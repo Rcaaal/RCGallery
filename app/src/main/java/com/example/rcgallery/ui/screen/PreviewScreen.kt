@@ -3,8 +3,9 @@ package com.example.rcgallery.ui.screen
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.shrinkVertically
@@ -85,7 +86,7 @@ fun PreviewScreen(
 
     // ── 图片信息面板 ──
     var showInfo by remember { mutableStateOf(false) }
-    BackHandler(enabled = showInfo) { showInfo = false }
+    // 返回键直接退出预览（不拦截），信息面板通过点击图片或翻页关闭
 
     // 用户点击"小窗"按钮 → 请求进入 PiP
     // 1. 隐藏全部 UI chrome + 禁用 PlayerView 控制器（useController=false）
@@ -203,9 +204,13 @@ fun PreviewScreen(
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // ── 图片/视频区域（信息面板展开时被推到上半部分）──
+                val imageWeight by animateFloatAsState(
+                    targetValue = if (showInfo && currentItem != null && !currentItem.isVideo) 0.5f else 1f,
+                    animationSpec = tween(180)
+                )
                 Box(
                     modifier = Modifier
-                        .weight(if (showInfo && currentItem != null && !currentItem.isVideo) 0.5f else 1f)
+                        .weight(imageWeight)
                         .fillMaxWidth()
                         .nestedScroll(overscrollConnection)
                 ) {
@@ -258,8 +263,8 @@ fun PreviewScreen(
             // ── 图片信息卡片（上划展开，推起图片）──
             AnimatedVisibility(
                 visible = showInfo && currentItem != null && !currentItem.isVideo,
-                enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
-                exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut()
+                enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+                exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(150)) + fadeOut(animationSpec = tween(150))
             ) {
                 if (currentItem != null) {
                     InfoCard(currentItem, onDismiss = { showInfo = false })
