@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rubber-Band 惯性物理 交互演示</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #111; color: #eee; padding: 20px; margin: 0; }
+  h2 { color: #FF9800; margin-bottom: 0; }
+  .subtitle { color: #888; font-size: 13px; margin-top: 2px; margin-bottom: 12px; }
+
+  .main-area { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+
+  .scene-box {
+    position: relative; width: 360px; height: 500px;
+    background: #1a1a2e; border: 2px solid #444;
+    border-radius: 12px; overflow: hidden;
+    cursor: grab; user-select: none; touch-action: none;
+  }
+  .scene-box:active { cursor: grabbing; }
+
+  .viewport-label {
+    position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: #666; background: #222; padding: 2px 12px; border-radius: 4px; z-index: 10;
+    pointer-events: none; white-space: nowrap;
+  }
+
+  .image-layer {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    will-change: transform;
+  }
+
+  .photo-card {
+    width: 320px; height: 320px; border-radius: 8px;
+    background: linear-gradient(135deg, #FF6B6B, #4ECDC4, #45B7D1, #F9CA24);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-size: 14px; color: #fff; font-weight: bold;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    flex-shrink: 0;
+  }
+  .photo-card span { font-size: 40px; margin-bottom: 6px; }
+
+  .boundary-indicator {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: rgba(255, 152, 0, 0.3); pointer-events: none; z-index: 5;
+  }
+
+  .stats-box {
+    position: absolute; bottom: 8px; left: 8px; right: 8px;
+    font-family: monospace; font-size: 11px; color: #aaa;
+    background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 4px;
+    pointer-events: none; z-index: 10;
+    display: flex; justify-content: space-between;
+  }
+
+  .side-panel {
+    display: flex; flex-direction: column; gap: 8px; min-width: 220px;
+  }
+  .param-group {
+    background: #1a1a1a; border: 1px solid #333; padding: 8px 12px;
+    border-radius: 8px;
+  }
+  .param-group label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: #aaa; margin: 4px 0;
+  }
+  .param-group input { width: 100%; margin: 2px 0; }
+  .param-group .val { color: #FF9800; font-family: monospace; font-size: 13px; min-width: 50px; text-align: right; }
+
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 12px; font-weight: bold;
+  }
+  .btn-primary { background: #FF9800; color: #222; }
+  .btn-secondary { background: #444; color: #ccc; }
+
+  .log-box {
+    width: 100%; min-height: 60px; max-height: 100px;
+    background: #0a0a0a; border: 1px solid #222; border-radius: 6px;
+    padding: 6px 10px; font-family: monospace; font-size: 11px;
+    color: #0f0; overflow-y: auto; white-space: pre-wrap;
+  }
+
+  .mode-tag {
+    position: absolute; top: 6px; right: 8px;
+    font-size: 10px; padding: 2px 8px; border-radius: 4px;
+    background: #222; color: #888; pointer-events: none; z-index: 10;
+  }
+</style>
+</head>
+<body>
+
+<h2>🎯 Rubber-Band 惯性物理 交互演示</h2>
+<div class="subtitle">← 用鼠标拖拽图片，松手感受 iOS Photos 风格的飞入 + 边缘弹性</div>
+
+<div class="main-area">
+  <div class="scene-box" id="scene">
+    <div class="viewport-label">📱 屏幕（overflow hidden）</div>
+    <div class="boundary-indicator" style="left: calc(50% + 158px);"></div>
+    <div class="boundary-indicator" style="left: calc(50% - 160px);"></div>
+    <div class="mode-tag" id="modeTag">🏷️ 拖拽</div>
+    <div class="image-layer" id="imageLayer">
+      <div class="photo-card"><span>🖼️</span>拖拽我 →</div>
+    </div>
+    <div class="stats-box">
+      <span id="posDisplay">offsetX = 0px</span>
+      <span id="velDisplay">vel = 0 px/f</span>
+      <span id="stateDisplay">闲置</span>
+    </div>
+  </div>
+
+  <div class="side-panel">
+    <div class="param-group">
+      <label>速度乘数 <span class="val" id="multVal">6×</span></label>
+      <input type="range" id="multSlider" min="1" max="15" value="6" step="0.5">
+
+      <label>摩擦系数 <span class="val" id="frictionVal">0.92</span></label>
+      <input type="range" id="frictionSlider" min="0.80" max="0.99" value="0.92" step="0.005">
+
+      <label>边缘弹性 <span class="val" id="rubberVal">0.30</span></label>
+      <input type="range" id="rubberSlider" min="0.05" max="0.50" value="0.30" step="0.01">
+
+      <label>停止阈值 <span class="val" id="thresholdVal">0.5</span></label>
+      <input type="range" id="thresholdSlider" min="0.1" max="5" value="0.5" step="0.1">
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" id="resetBtn">↺ 复位</button>
+      <button class="btn-secondary" id="clearLogBtn">清空日志</button>
+    </div>
+    <div class="log-box" id="logBox">[log] 就绪</div>
+  </div>
+</div>
+
+<script>
+// ── 状态 ──
+let offsetX = 0;
+let velocity = 0;
+let isDragging = false;
+let animId = null;
+let lastPointerX = 0;
+let dragHistory = []; // 最近 5 帧差分
+let isAnimating = false;
+
+const scene = document.getElementById('scene');
+const imageLayer = document.getElementById('imageLayer');
+const posDisplay = document.getElementById('posDisplay');
+const velDisplay = document.getElementById('velDisplay');
+const stateDisplay = document.getElementById('stateDisplay');
+const modeTag = document.getElementById('modeTag');
+const logBox = document.getElementById('logBox');
+
+const multSlider = document.getElementById('multSlider');
+const frictionSlider = document.getElementById('frictionSlider');
+const rubberSlider = document.getElementById('rubberSlider');
+const thresholdSlider = document.getElementById('thresholdSlider');
+const multVal = document.getElementById('multVal');
+const frictionVal = document.getElementById('frictionVal');
+const rubberVal = document.getElementById('rubberVal');
+const thresholdVal = document.getElementById('thresholdVal');
+
+const IMG_W = 320;
+const SCENE_W = 360;
+const BOUNDARY = (SCENE_W - IMG_W) / 2; // 20px
+
+function log(msg) {
+  logBox.textContent += '\n' + msg;
+  logBox.scrollTop = logBox.scrollHeight;
+  if (logBox.textContent.length > 2000) {
+    logBox.textContent = logBox.textContent.slice(-1000);
+  }
+}
+
+function getParams() {
+  return {
+    mult: parseFloat(multSlider.value),
+    friction: parseFloat(frictionSlider.value),
+    rubber: parseFloat(rubberSlider.value),
+    threshold: parseFloat(thresholdSlider.value),
+  };
+}
+
+multSlider.addEventListener('input', () => multVal.textContent = multSlider.value + '×');
+frictionSlider.addEventListener('input', () => frictionVal.textContent = frictionSlider.value);
+rubberSlider.addEventListener('input', () => rubberVal.textContent = rubberSlider.value);
+thresholdSlider.addEventListener('input', () => thresholdVal.textContent = thresholdSlider.value);
+
+function updateDisplay() {
+  imageLayer.style.transform = `translateX(${offsetX}px)`;
+  posDisplay.textContent = `offsetX = ${Math.round(offsetX)}px | bound=±${BOUNDARY}px`;
+  velDisplay.textContent = `vel = ${velocity.toFixed(1)} px/f`;
+}
+
+function stop() {
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+  isAnimating = false;
+  stateDisplay.textContent = '✅ 停止';
+  modeTag.textContent = '⏹️ 停止';
+  updateDisplay();
+}
+
+function reset() {
+  stop();
+  offsetX = 0;
+  velocity = 0;
+  isDragging = false;
+  isAnimating = false;
+  dragHistory = [];
+  stateDisplay.textContent = '闲置';
+  modeTag.textContent = '↺ 复位';
+  updateDisplay();
+  log('—— 复位 ——');
+}
+
+document.getElementById('resetBtn').addEventListener('click', reset);
+document.getElementById('clearLogBtn').addEventListener('click', () => { logBox.textContent = '[log] 就绪'; });
+
+// ── Rubber-band 公式 ──
+function applyRubberBand(x, bound) {
+  if (x > bound) return bound + (x - bound) * rubberSlider.value;
+  if (x < -bound) return -bound + (x + bound) * rubberSlider.value;
+  return x;
+}
+
+// ── 物理动画帧（松手后调用） ──
+function startPhysics(initialVel) {
+  const p = getParams();
+  velocity = initialVel;
+  isAnimating = true;
+  stateDisplay.textContent = '🚀 惯性中';
+  modeTag.textContent = '🚀 惯性';
+
+  let frame = 0;
+
+  function physicsStep() {
+    if (!isAnimating) return;
+    const p = getParams();
+    frame++;
+
+    // 1. 摩擦减速
+    velocity *= p.friction;
+
+    // 2. 更新位置
+    offsetX += velocity;
+
+    // 3. Rubber-band 边界处理（先 re-map 位置再调整速度）
+    const rawX = offsetX;
+    if (offsetX > BOUNDARY) {
+      const excess = offsetX - BOUNDARY;
+      offsetX = BOUNDARY + excess * p.rubber;
+      // 在边界外时额外减速
+      velocity *= 0.85;
+    } else if (offsetX < -BOUNDARY) {
+      const excess = offsetX + BOUNDARY;
+      offsetX = -BOUNDARY + excess * p.rubber;
+      velocity *= 0.85;
+    }
+
+    // 4. 停止条件
+    const absV = Math.abs(velocity);
+    const withinBounds = offsetX >= -BOUNDARY && offsetX <= BOUNDARY;
+
+    updateDisplay();
+
+    if (absV < p.threshold && withinBounds) {
+      // 精确复位
+      offsetX = Math.round(offsetX);
+      velocity = 0;
+      stop();
+      log(`[停] 帧=${frame} V=${absV.toFixed(2)} < ${p.threshold} 停`);
+      return;
+    }
+
+    // 安全限幅（防发散）
+    if (absV > 5000 || !isFinite(offsetX)) {
+      log(`[⚠️] 发散保护`);
+      reset();
+      return;
+    }
+
+    animId = requestAnimationFrame(physicsStep);
+  }
+
+  log(`[惯] V₀=${initialVel.toFixed(1)} ×${p.mult} 摩擦=${p.friction} 弹性=${p.rubber}`);
+  animId = requestAnimationFrame(physicsStep);
+}
+
+// ── 鼠标/触摸拖拽 ──
+function getPointerX(e) {
+  if (e.touches) return e.touches[0].clientX;
+  return e.clientX;
+}
+
+function onPointerDown(e) {
+  if (isAnimating) {
+    cancelAnimationFrame(animId);
+    animId = null;
+    isAnimating = false;
+  }
+  isDragging = true;
+  lastPointerX = getPointerX(e);
+  dragHistory = [];
+  stateDisplay.textContent = '👆 拖拽';
+  modeTag.textContent = '👆 拖拽';
+  scene.style.cursor = 'grabbing';
+  e.preventDefault();
+}
+
+function onPointerMove(e) {
+  if (!isDragging) return;
+  const px = getPointerX(e);
+  const dx = px - lastPointerX;
+  lastPointerX = px;
+
+  // 实时速度记录（5帧滑动）
+  dragHistory.push(dx);
+  if (dragHistory.length > 5) dragHistory.shift();
+
+  const p = getParams();
+
+  // 带 rubber-band 的位置更新
+  const rawX = offsetX + dx;
+  offsetX = applyRubberBand(rawX, BOUNDARY);
+
+  updateDisplay();
+  stateDisplay.textContent = `👆 拖拽 dx=${dx.toFixed(0)}`;
+  e.preventDefault();
+}
+
+function onPointerUp(e) {
+  if (!isDragging) return;
+  isDragging = false;
+  scene.style.cursor = 'grab';
+
+  // 计算速度：取最近 3 帧平均 × speedMultiplier
+  let sum = 0;
+  const n = Math.min(dragHistory.length, 5);
+  for (let i = 0; i < n; i++) sum += dragHistory[i];
+  const avgVel = n > 0 ? sum / n : 0;
+  const boosted = avgVel * parseFloat(multSlider.value);
+
+  stateDisplay.textContent = `松手 V₀=${boosted.toFixed(1)}`;
+  log(`[松手] 速度=${avgVel.toFixed(1)} ×${multSlider.value} → ${boosted.toFixed(1)}`);
+
+  if (Math.abs(boosted) > parseFloat(thresholdSlider.value)) {
+    startPhysics(boosted);
+  } else {
+    // 速度太小，直接停
+    offsetX = Math.round(offsetX);
+    velocity = 0;
+    stateDisplay.textContent = '✅ 停止';
+    modeTag.textContent = '⏹️ 停止';
+    updateDisplay();
+  }
+}
+
+// 鼠标事件
+scene.addEventListener('mousedown', onPointerDown);
+document.addEventListener('mousemove', onPointerMove);
+document.addEventListener('mouseup', onPointerUp);
+// 触摸事件
+scene.addEventListener('touchstart', onPointerDown, { passive: false });
+document.addEventListener('touchmove', onPointerMove, { passive: false });
+document.addEventListener('touchend', onPointerUp);
+
+reset();
+log('← 拖拽图片松手看效果');
+</script>
+</body>
+</html>
