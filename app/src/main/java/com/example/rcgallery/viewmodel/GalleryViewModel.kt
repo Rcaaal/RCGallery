@@ -41,15 +41,32 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private var loadMediaJob: Job? = null
     private var pendingAlbumId: String? = null
 
-    // ── 相册重命名（虚拟 + 物理双轨）──
+    // ── 相册重命名状态（虚拟 + 物理双轨）──
 
-    data class PendingAlbumRename(
+    /**
+     * 物理移动执行进度。
+     */
+    data class AlbumRenameProgress(
         val bucketId: String,
-        val urisWithNewPaths: List<Pair<Uri, String>>
+        val newName: String,
+        val totalCount: Int,
+        val completedCount: Int = 0,
+        val failedCount: Int = 0,
+        val currentFileName: String = "",
+        val isRunning: Boolean = false,
+        val isDone: Boolean = false,
+        val rolledBack: Boolean = false,
+        val allSucceeded: Boolean = false
     )
 
-    private val _pendingAlbumRename = MutableStateFlow<PendingAlbumRename?>(null)
-    val pendingAlbumRename: StateFlow<PendingAlbumRename?> = _pendingAlbumRename.asStateFlow()
+    private val _renameProgress = MutableStateFlow<AlbumRenameProgress?>(null)
+    val renameProgress: StateFlow<AlbumRenameProgress?> = _renameProgress.asStateFlow()
+
+    // 物理移动所需数据（不暴露给 UI）
+    private var pendingUrisWithNewPaths: List<Pair<Uri, String>> = emptyList()
+    private var pendingOldPaths: List<Pair<Uri, String>> = emptyList()
+    private var pendingBucketId: String = ""
+    private var pendingNewName: String = ""
 
     init {
         viewModelScope.launch {
@@ -136,11 +153,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ══════════════════════════════════════
 
     /**
-     * 重命名相册。
-     * 虚拟重命名立即生效（SharedPreferences），
-     * 物理移动推迟到用户退出 Preview 时触发（见 executePhysicalRename）。
+     * 重命名相册 — 虚拟名立即生效。
+     * 调用后需立刻调用 requestAlbumRenamePermission() 弹授权窗。
      */
-    fun renameAlbum(bucketId: String, oldName: String, newName: String) {
+    fun renameAlbum(bucketId: String, oldName: String, newName: String): List<Pair<Uri, String>> {
         AppLogger.d("Rename", "renameAlbum bucket=$bucketId $oldName → $newName")
 
         // Step 1: 虚拟重命名 — 立即生效
@@ -161,62 +177,160 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        if (urisWithNewPaths.isEmpty()) {
-            AppLogger.d("Rename", "No files with relativePath, physical rename skipped")
-            return
+        // 保存原始路径供回滚用
+        val oldPaths = allItems.mapNotNull { item ->
+            val rp = item.relativePath
+            if (rp.isNotEmpty()) item.uri to rp else null
         }
 
-        _pendingAlbumRename.value = PendingAlbumRename(
-            bucketId = bucketId,
-            urisWithNewPaths = urisWithNewPaths
+        pendingUrisWithNewPaths = urisWithNewPaths
+        pendingOldPaths = oldPaths
+        pendingBucketId = bucketId
+        pendingNewName = newName
+
+        if (urisWithNewPaths.isEmpty()) {
+            AppLogger.d("Rename", "No files with relativePath, physical rename skipped")
+            _renameProgress.value = AlbumRenameProgress(
+                bucketId = bucketId, newName = newName,
+                totalCount = 0, isDone = true, allSucceeded = true
+            )
+        }
+
+        return urisWithNewPaths
+    }
+
+    /**
+     * 用户已授权 → 标记为已授权待搬运。
+     */
+    fun grantAlbumRename() {
+        val total = pendingUrisWithNewPaths.size
+        AppLogger.d("Rename", "grantAlbumRename: $total files authorized")
+        _renameProgress.value = AlbumRenameProgress(
+            bucketId = pendingBucketId,
+            newName = pendingNewName,
+            totalCount = total,
+            isRunning = false,
+            isDone = false
         )
-        AppLogger.d("Rename", "Pending physical rename: ${urisWithNewPaths.size} files")
     }
 
     /**
-     * 清除待处理的物理移动（用户拒绝授权时调用）。
+     * 用户拒绝授权 → 清除待搬运状态。
      */
-    fun clearPendingRename() {
-        _pendingAlbumRename.value = null
+    fun cancelAlbumRename() {
+        AppLogger.d("Rename", "cancelAlbumRename — user denied permission")
+        pendingUrisWithNewPaths = emptyList()
+        pendingOldPaths = emptyList()
+        _renameProgress.value = null
     }
 
     /**
-     * 执行物理文件移动 — 在用户退出 Preview 时由 launcher 回调触发。
-     * 所有文件移到新目录后清除虚拟名；部分失败则保留虚拟名保底。
+     * 开始/继续物理搬运 — 由 AlbumGridScreen 检测到已授权后自动调用。
      */
-    fun executePhysicalRename(resolver: ContentResolver, onDone: () -> Unit) {
-        val pending = _pendingAlbumRename.value ?: run { onDone(); return }
-        _pendingAlbumRename.value = null
+    fun startPhysicalRename(resolver: ContentResolver) {
+        val progress = _renameProgress.value ?: return
+        if (!progress.isRunning || progress.isDone) {
+            _executePhysicalRename(resolver)
+        }
+    }
+
+    private fun _executePhysicalRename(resolver: ContentResolver) {
+        val urisToMove = pendingUrisWithNewPaths
+        if (urisToMove.isEmpty()) return
+
+        _renameProgress.value = _renameProgress.value?.copy(isRunning = true)
 
         viewModelScope.launch(Dispatchers.IO) {
-            var successCount = 0
-            var failCount = 0
-            for ((uri, newPath) in pending.urisWithNewPaths) {
+            var completed = 0
+            var failed = 0
+            val moved = mutableListOf<Pair<Uri, String>>()  // 已成功移动的 (uri, originalPath)
+            var shouldRollback = false
+
+            for ((uri, newPath) in urisToMove) {
+                if (shouldRollback) break
+
+                // 更新当前文件名
+                val fileName = uri.lastPathSegment ?: ""
+                withContext(Dispatchers.Main) {
+                    _renameProgress.value = _renameProgress.value?.copy(
+                        currentFileName = fileName
+                    )
+                }
+
                 try {
                     val values = ContentValues().apply {
                         put(MediaStore.MediaColumns.RELATIVE_PATH, newPath)
                     }
                     resolver.update(uri, values, null, null)
-                    successCount++
+                    completed++
+                    moved.add(uri to replaceAlbumSegment(newPath, pendingNewName).let {
+                        // 回滚时需要原始路径，直接从 pendingOldPaths 查找
+                        pendingOldPaths.find { it.first == uri }?.second ?: ""
+                    })
                 } catch (e: Exception) {
-                    AppLogger.e("Rename", "Physical move failed: uri=$uri path=$newPath", e)
-                    failCount++
+                    AppLogger.e("Rename", "Physical move FAILED: uri=$uri path=$newPath", e)
+                    failed++
+                    shouldRollback = true
                 }
             }
 
-            AppLogger.d("Rename", "Physical rename done: ok=$successCount fail=$failCount")
-
-            // 全部成功 → 清除虚拟名（物理名已生效）
-            if (failCount == 0) {
-                albumNameStore.removeCustomName(pending.bucketId)
+            if (shouldRollback && moved.isNotEmpty()) {
+                // ── 回滚：把已移动的文件移回原路径 ──
+                AppLogger.d("Rename", "Rolling back ${moved.size} files...")
+                for ((uri, _) in moved) {
+                    val originalPath = pendingOldPaths.find { it.first == uri }?.second
+                    if (originalPath != null) {
+                        try {
+                            val values = ContentValues().apply {
+                                put(MediaStore.MediaColumns.RELATIVE_PATH, originalPath)
+                            }
+                            resolver.update(uri, values, null, null)
+                            AppLogger.d("Rename", "Rolled back: uri=$uri → $originalPath")
+                        } catch (e2: Exception) {
+                            AppLogger.e("Rename", "Rollback FAILED! uri=$uri", e2)
+                        }
+                    }
+                }
+                AppLogger.d("Rename", "Rollback complete: ${moved.size} files reverted")
             }
+
+            val allOk = failed == 0 && !shouldRollback
+
+            if (allOk) {
+                albumNameStore.removeCustomName(pendingBucketId)
+                AppLogger.d("Rename", "All $completed files moved, virtual name cleared")
+            }
+
+            // 清理临时数据
+            pendingUrisWithNewPaths = emptyList()
+            pendingOldPaths = emptyList()
 
             withContext(Dispatchers.Main) {
+                _renameProgress.value = AlbumRenameProgress(
+                    bucketId = pendingBucketId,
+                    newName = pendingNewName,
+                    totalCount = urisToMove.size,
+                    completedCount = completed,
+                    failedCount = failed,
+                    currentFileName = "",
+                    isRunning = false,
+                    isDone = true,
+                    allSucceeded = allOk,
+                    rolledBack = shouldRollback
+                )
                 loadAlbums()
-                loadMedia(albumId = pending.bucketId)
-                onDone()
+                if (!shouldRollback) {
+                    loadMedia(albumId = pendingBucketId)
+                }
             }
         }
+    }
+
+    /**
+     * 清除重命名完成状态（AlbumGrid 展示完进度后调用）。
+     */
+    fun clearRenameProgress() {
+        _renameProgress.value = null
     }
 
     /**

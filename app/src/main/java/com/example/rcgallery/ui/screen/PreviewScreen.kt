@@ -156,40 +156,33 @@ fun PreviewScreen(
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
 
-    // ── 相册重命名（虚拟 + 退出时物理移动）──
-    val pendingAlbumRename by viewModel.pendingAlbumRename.collectAsStateWithLifecycle()
+    // ── 相册重命名（立即授权 + 退出时自动搬运）──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
 
-    // 物理移动 launcher（退出 Preview 时触发 createWriteRequest）
+    // 相册重命名授权 launcher（改名后立刻弹窗）
     val albumRenameLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (pendingAlbumRename != null) {
-            if (result.resultCode == Activity.RESULT_OK) {
-                viewModel.executePhysicalRename(context.contentResolver) {
-                    onBackClick()
-                }
-            } else {
-                viewModel.clearPendingRename()
-                onBackClick()
-            }
+        if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.grantAlbumRename()
+            Toast.makeText(context, "授权成功，返回相册列表后自动搬运", Toast.LENGTH_SHORT).show()
         } else {
-            onBackClick()
+            viewModel.cancelAlbumRename()
+            Toast.makeText(context, "已跳过物理移动，虚拟名不受影响", Toast.LENGTH_SHORT).show()
         }
     }
 
     // ── 相册重命名对话框 ──
     if (showAlbumRenameDialog && currentItem != null) {
-        val currentAlbumName = currentItem?.albumName ?: ""
+        val currentAlbumName = viewModel.getAlbumDisplayName(currentItem?.albumId, currentItem?.albumName)
         var editText by remember { mutableStateOf(currentAlbumName) }
         AlertDialog(
             onDismissRequest = { showAlbumRenameDialog = false },
             title = { Text("重命名相册") },
             text = {
                 Column {
-                    Text("当前相册中的所有文件将移到新目录。", color = Color(0xFF999999), fontSize = 13.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text("注意：操作不可撤销。", color = Color(0xFF666666), fontSize = 11.sp)
+                    Text("虚拟名立即生效，确认后弹出授权窗口。", color = Color(0xFF999999), fontSize = 13.sp)
+                    Text("返回相册列表后自动搬运文件到新目录。", color = Color(0xFF999999), fontSize = 13.sp)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = editText,
@@ -205,10 +198,25 @@ fun PreviewScreen(
                     if (newName.isEmpty()) return@Button
                     showAlbumRenameDialog = false
                     val bucketId = currentItem?.albumId ?: return@Button
-                    val oldName = currentItem?.albumName ?: return@Button
-                    viewModel.renameAlbum(bucketId, oldName, newName)
-                    Toast.makeText(context, "相册名已更新，返回时将进行物理移动", Toast.LENGTH_SHORT).show()
-                }) { Text("确认") }
+                    val oldName = currentAlbumName
+                    // 虚拟重命名 + 构建 pending 数据
+                    val uris = viewModel.renameAlbum(bucketId, oldName, newName)
+                    if (uris.isEmpty()) {
+                        Toast.makeText(context, "相册名已更新（无文件需搬运）", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    // 立刻弹授权窗
+                    try {
+                        val pending = MediaStore.createWriteRequest(
+                            context.contentResolver, uris.map { it.first }
+                        )
+                        albumRenameLauncher.launch(
+                            IntentSenderRequest.Builder(pending.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "请求授权失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("确认 & 授权") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
         )
@@ -235,23 +243,7 @@ fun PreviewScreen(
                         title = {},
                         navigationIcon = {
                             TextButton(onClick = {
-                                if (pendingAlbumRename != null) {
-                                    // 退出时触发物理移动
-                                    try {
-                                        val allUris = pendingAlbumRename!!.urisWithNewPaths.map { it.first }
-                                        val pending = MediaStore.createWriteRequest(
-                                            context.contentResolver, allUris
-                                        )
-                                        albumRenameLauncher.launch(
-                                            IntentSenderRequest.Builder(pending.intentSender).build()
-                                        )
-                                    } catch (e: Exception) {
-                                        viewModel.clearPendingRename()
-                                        onBackClick()
-                                    }
-                                } else {
-                                    onBackClick()
-                                }
+                                onBackClick()
                             }) { Text("← 返回", color = Color.White) }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black.copy(alpha = 0.3f))
@@ -306,21 +298,7 @@ fun PreviewScreen(
                                     },
                                     onSwipeDownToBack = {
                                         if (showInfo) showInfo = false
-                                        else if (pendingAlbumRename != null) {
-                                            // 下滑返回时也触发物理移动
-                                            try {
-                                                val allUris = pendingAlbumRename!!.urisWithNewPaths.map { it.first }
-                                                val pending = MediaStore.createWriteRequest(
-                                                    context.contentResolver, allUris
-                                                )
-                                                albumRenameLauncher.launch(
-                                                    IntentSenderRequest.Builder(pending.intentSender).build()
-                                                )
-                                            } catch (e: Exception) {
-                                                viewModel.clearPendingRename()
-                                                onBackClick()
-                                            }
-                                        } else onBackClick()
+                                        else onBackClick()
                                     },
                                     onSwipeUpToShowInfo = { showInfo = true },
                                     onSingleTap = { if (showInfo) showInfo = false }

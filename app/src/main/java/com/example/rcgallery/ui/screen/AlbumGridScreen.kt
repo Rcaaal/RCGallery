@@ -153,6 +153,22 @@ fun AlbumGridScreen(
         }
     }
 
+    // ── 相册重命名搬运进度（回到相册列表后自动触发）──
+    val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
+    LaunchedEffect(renameProgress) {
+        val p = renameProgress
+        if (p != null && !p.isRunning && !p.isDone) {
+            // 已授权待搬运 → 回到相册列表立即开始
+            AppLogger.d("AlbumGrid", "auto-start physical rename: ${p.totalCount} files")
+            viewModel.startPhysicalRename(context.contentResolver)
+        }
+        // 搬运完成 → 5 秒后自动清除进度显示
+        if (p != null && p.isDone) {
+            kotlinx.coroutines.delay(5000L)
+            viewModel.clearRenameProgress()
+        }
+    }
+
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             if (!hasPermission) {
@@ -169,7 +185,7 @@ fun AlbumGridScreen(
                     albums = albums,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
-                        selectedAlbumId = album.bucketId   // 触发 overlay 显示，不 navigation
+                        selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
                     },
                     onRefresh = { viewModel.loadAlbums() },
@@ -181,7 +197,8 @@ fun AlbumGridScreen(
                             is AlbumDisplayMode.Grid -> "grid_${mode.columns}"
                         }).apply()
                     },
-                    albumRvRef = albumRvRef
+                    albumRvRef = albumRvRef,
+                    renameProgress = renameProgress
                 )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
@@ -286,12 +303,49 @@ private fun AlbumGridContent(
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
-    albumRvRef: MutableState<RecyclerView?>
+    albumRvRef: MutableState<RecyclerView?>,
+    renameProgress: GalleryViewModel.AlbumRenameProgress?  // 搬运进度
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("RCGallery") },
+                title = {
+                    val p = renameProgress
+                    if (p != null) {
+                        if (p.isRunning) {
+                            // 搬运进行中 → 显示进度
+                            Column {
+                                Text("相册重命名" , fontSize = 14.sp, maxLines = 1)
+                                if (p.currentFileName.isNotEmpty()) {
+                                    Text(
+                                        "${p.completedCount}/${p.totalCount}  ${p.currentFileName}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1
+                                    )
+                                } else {
+                                    Text(
+                                        "${p.completedCount}/${p.totalCount}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        } else if (p.isDone) {
+                            // 搬运完成/失败
+                            val status = when {
+                                p.allSucceeded -> "✓ 搬运完成"
+                                p.rolledBack -> "✗ 搬运失败，已回滚"
+                                else -> "⚠ ${p.failedCount}个文件失败"
+                            }
+                            Text(status, fontSize = 14.sp)
+                        } else {
+                            Text("RCGallery")
+                        }
+                    } else {
+                        Text("RCGallery")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
