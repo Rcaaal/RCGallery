@@ -3,12 +3,18 @@ package com.example.rcgallery.ui.screen
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -74,6 +80,10 @@ fun PreviewScreen(
     // ── PiP 覆盖层管理 ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
     var pipTriggered by remember { mutableStateOf(false) }
+
+    // ── 图片信息面板 ──
+    var showInfo by remember { mutableStateOf(false) }
+    BackHandler(enabled = showInfo) { showInfo = false }
 
     // 用户点击"小窗"按钮 → 请求进入 PiP
     // 1. 隐藏全部 UI chrome + 禁用 PlayerView 控制器（useController=false）
@@ -141,6 +151,7 @@ fun PreviewScreen(
     }
     // 日志：当前页面变更
     LaunchedEffect("page:${pagerState.currentPage}") {
+        showInfo = false  // 翻页关闭信息面板
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -224,7 +235,8 @@ fun PreviewScreen(
                                     }
                                 }
                             },
-                            onSwipeDownToBack = onBackClick
+                            onSwipeDownToBack = onBackClick,
+                            onSwipeUpToShowInfo = { showInfo = true }
                         )
                     }
                 }
@@ -241,6 +253,79 @@ fun PreviewScreen(
                     .clickable { showInertiaSettings = true },
                 contentAlignment = Alignment.Center
             ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
+        }
+
+        // ── 图片信息面板（上划触发）──
+        AnimatedVisibility(
+            visible = showInfo && currentItem != null && !currentItem.isVideo,
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it }
+        ) {
+            Column(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) {
+                // 上半部分：点击关闭
+                Box(
+                    modifier = Modifier.weight(0.6f).fillMaxWidth().clickable { showInfo = false },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("点击关闭", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp)
+                }
+                // 下半部分：信息卡片
+                if (currentItem != null) {
+                    InfoCard(currentItem)
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════
+//  图片信息卡片
+// ══════════════════════════════════════
+
+private fun formatFileSize(bytes: Long): String = when {
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> "%.1f KB".format(bytes / 1024f)
+    bytes < 1024L * 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
+    else -> "%.2f GB".format(bytes / (1024f * 1024f * 1024f))
+}
+
+private fun formatDate(timestamp: Long): String {
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+    return sdf.format(java.util.Date(timestamp * 1000L))
+}
+
+private val infoIconColor = Color(0xFFBBBBBB)
+
+@Composable
+private fun InfoCard(item: com.example.rcgallery.model.MediaItem) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF1A1A1A),
+        tonalElevation = 4.dp
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp).verticalScroll(rememberScrollState())) {
+            InfoRow(icon = "📄", label = "文件名", value = item.fileName)
+            Spacer(Modifier.height(12.dp))
+            InfoRow(icon = "⏰", label = "创建时间", value = formatDate(item.dateAdded))
+            Spacer(Modifier.height(12.dp))
+            InfoRow(icon = "💾", label = "文件大小", value = formatFileSize(item.size))
+            Spacer(Modifier.height(12.dp))
+            InfoRow(icon = "📋", label = "格式", value = item.mimeType)
+            Spacer(Modifier.height(12.dp))
+            InfoRow(icon = "📂", label = "所在位置", value = item.filePath.ifEmpty { "未知" })
+            Spacer(Modifier.height(12.dp))
+            InfoRow(icon = "🗂", label = "所在相册", value = item.albumName ?: "未知")
+        }
+    }
+}
+
+@Composable
+private fun InfoRow(icon: String, label: String, value: String) {
+    Row(verticalAlignment = Alignment.Top) {
+        Text(icon, fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+        Column {
+            Text(label, color = Color.Gray, fontSize = 11.sp)
+            Text(value, color = Color.White, fontSize = 13.sp, lineHeight = 16.sp)
         }
     }
 }

@@ -58,7 +58,8 @@ private fun calcImageFitHeight(boxSize: IntSize, intrinsicSize: Size): Float {
 fun ZoomableImage3(
     uri: Uri,
     onEdgeSwipe: (direction: Int) -> Unit,
-    onSwipeDownToBack: () -> Unit = {}
+    onSwipeDownToBack: () -> Unit = {},
+    onSwipeUpToShowInfo: () -> Unit = {}
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -192,6 +193,15 @@ fun ZoomableImage3(
                         smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                         AppLogger.d("Zoom", "swipe down back V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
                         onSwipeDownToBack()
+                        return@awaitEachGesture
+                    }
+
+                    // ── 上划显示图片信息（未缩放）──
+                    if (scale <= 1f && frameCount > 0 &&
+                        smoothY < -SWIPE_DOWN_MIN_VELOCITY &&
+                        smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
+                        AppLogger.d("Zoom", "swipe up info V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
+                        onSwipeUpToShowInfo()
                         return@awaitEachGesture
                     }
 
