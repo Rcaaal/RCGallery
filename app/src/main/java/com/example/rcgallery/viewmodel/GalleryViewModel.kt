@@ -12,8 +12,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MediaRepository(application)
@@ -33,9 +35,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         viewModelScope.launch {
-            observer.observeMediaChanges().collect {
-                refreshCurrentView()
-            }
+            observer.observeMediaChanges()
+                .debounce(500)
+                .collect { refreshCurrentView() }
         }
     }
 

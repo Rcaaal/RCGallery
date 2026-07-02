@@ -1,7 +1,9 @@
 package com.example.rcgallery.data
 
+import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import android.provider.MediaStore
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
@@ -155,15 +157,14 @@ class MediaRepository(private val context: Context) {
         val items = mutableListOf<MediaItem>()
         val selection = if (albumId != null) "bucket_id = ?" else null
         val selectionArgs = if (albumId != null) arrayOf(albumId) else null
-        val limit = "$pageSize OFFSET $offset"
 
-        // 查询图片
         queryMediaItems(
             uri = MediaStoreQuery.IMAGES_URI,
             projection = MediaStoreQuery.IMAGE_PROJECTION,
             selection = selection,
             selectionArgs = selectionArgs,
-            limit = limit,
+            limit = pageSize,
+            offset = offset,
             isVideo = false,
             items = items
         )
@@ -174,7 +175,8 @@ class MediaRepository(private val context: Context) {
             projection = MediaStoreQuery.VIDEO_PROJECTION,
             selection = selection,
             selectionArgs = selectionArgs,
-            limit = limit,
+            limit = pageSize,
+            offset = offset,
             isVideo = true,
             items = items
         )
@@ -188,12 +190,23 @@ class MediaRepository(private val context: Context) {
         projection: Array<String>,
         selection: String?,
         selectionArgs: Array<String>?,
-        limit: String,
+        limit: Int,
+        offset: Int,
         isVideo: Boolean,
         items: MutableList<MediaItem>
     ) {
+        val extras = Bundle().apply {
+            if (selection != null) {
+                putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, selectionArgs)
+            }
+            putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.MediaColumns.DATE_ADDED))
+            putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+            putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
+            putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
+        }
         val cursor = context.contentResolver.query(
-            uri, projection, selection, selectionArgs, "date_added DESC"
+            uri, projection, extras, null
         )
         cursor?.use { c ->
             while (c.moveToNext()) {

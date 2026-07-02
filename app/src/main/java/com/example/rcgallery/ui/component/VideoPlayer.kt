@@ -70,7 +70,7 @@ fun VideoPlayer(
     savedPositions: MutableMap<Uri, Long> = remember { mutableMapOf() },
     onControlZoneActive: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
-    onRequestPip: (() -> Unit)? = null,
+    onRequestPip: ((ExoPlayer) -> Unit)? = null,
     hideUiOverlays: Boolean = false,
 ) {
     val context = LocalContext.current
@@ -147,9 +147,6 @@ fun VideoPlayer(
             exoPlayer.release()
         }
     }
-
-    // 设置 exoPlayer 引用供 PiP 快进快退使用
-    LaunchedEffect(Unit) { PipState.exoPlayer = exoPlayer }
 
     LaunchedEffect(isActive) {
         if (isActive) {
@@ -435,7 +432,7 @@ fun VideoPlayer(
                 Box(modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp).size(36.dp)
                     .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape).clickable {
                         AppLogger.d("VideoPlayer", "PiP button clicked")
-                        onRequestPip()
+                        onRequestPip(exoPlayer)
                     }, contentAlignment = Alignment.Center) {
                     Text("小窗", color = Color.White, fontSize = 10.sp)
                 }
