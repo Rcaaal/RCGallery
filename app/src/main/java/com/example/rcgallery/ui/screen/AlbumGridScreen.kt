@@ -224,7 +224,17 @@ fun AlbumGridScreen(
                     .clickable { showInertiaSettings = true },
                 contentAlignment = Alignment.Center
             ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
-            // ── 搬运队列按钮（有任务且不在执行中时显示）──
+            FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
+
+            // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
+            if (selectedAlbumId != null) {
+                MediaGridScreen(
+                    albumId = selectedAlbumId!!,
+                    albumName = selectedAlbumName,
+                    onBackClick = { selectedAlbumId = null }
+                )
+            }
+            // ── 搬运队列按钮（在 MediaGrid 之上）──
             val showRenameBtn = renameQueue.isNotEmpty() && renameProgress?.isRunning != true
             if (showRenameBtn) {
                 Box(
@@ -232,7 +242,6 @@ fun AlbumGridScreen(
                         .clip(CircleShape).background(Color(0xCC4CAF50))
                         .clickable {
                             if (renameProgress?.isRunning == true) return@clickable
-                            // 获取第一个任务的 URI → 弹授权窗
                             val uris = viewModel.getNextTaskUris()
                             if (uris.isNullOrEmpty()) return@clickable
                             try {
@@ -248,16 +257,6 @@ fun AlbumGridScreen(
                         },
                     contentAlignment = Alignment.Center
                 ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 11.sp) }
-            }
-            FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
-
-            // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
-            if (selectedAlbumId != null) {
-                MediaGridScreen(
-                    albumId = selectedAlbumId!!,
-                    albumName = selectedAlbumName,
-                    onBackClick = { selectedAlbumId = null }
-                )
             }
         }
     }
