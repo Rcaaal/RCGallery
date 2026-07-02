@@ -126,11 +126,21 @@ fun VideoPlayer(
 
     // MediaSession → PiP 窗口自动显示暂停/播放按钮
     // 用 URI hash 作为唯一 session ID，翻页后多个 VideoPlayer 共存时不会冲突
-    // try-catch 保护：API 36 上 builder 可能抛出异常，不影响视频播放
+    // setCallback 通知系统 PiP 控制能力（部分国产 ROM 需要明确回调才能显示控制按钮）
     val mediaSession = remember { mutableStateOf<MediaSession?>(null) }
     DisposableEffect(uri) {
         val ms = try {
-            MediaSession.Builder(context, exoPlayer).setId("rcg_${uri.hashCode()}").build().also { AppLogger.d("VideoPlayer", "MediaSession OK id=rcg_${uri.hashCode()}") }
+            MediaSession.Builder(context, exoPlayer)
+                .setId("rcg_${uri.hashCode()}")
+                .setCallback(object : MediaSession.Callback {
+                    override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
+                        return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                            .setAvailablePlayerCommands(exoPlayer.availableCommands)
+                            .build()
+                    }
+                })
+                .build()
+                .also { AppLogger.d("VideoPlayer", "MediaSession OK id=rcg_${uri.hashCode()}") }
         } catch (e: Throwable) {
             AppLogger.e("VideoPlayer", "MediaSession FAILED: ${e.message}")
             e.printStackTrace()
