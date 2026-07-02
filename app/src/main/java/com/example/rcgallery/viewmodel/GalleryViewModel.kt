@@ -67,6 +67,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private var pendingOldPaths: List<Pair<Uri, String>> = emptyList()
     private var pendingBucketId: String = ""
     private var pendingNewName: String = ""
+    private var pendingOldNameOriginal: String = ""  // 原始相册名（用于拒绝后还原）
 
     init {
         viewModelScope.launch {
@@ -159,6 +160,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun renameAlbum(bucketId: String, oldName: String, newName: String): List<Pair<Uri, String>> {
         AppLogger.d("Rename", "renameAlbum bucket=$bucketId $oldName → $newName")
 
+        // 保存原始相册名（用于拒绝后还原）
+        val allItems = _mediaItems.value.filter { it.albumId == bucketId }
+        pendingOldNameOriginal = oldName
+
         // Step 1: 虚拟重命名 — 立即生效
         albumNameStore.setCustomName(bucketId, newName)
         _albums.value = _albums.value.map {
@@ -166,7 +171,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
 
         // Step 2: 构建待处理的物理移动数据
-        val allItems = _mediaItems.value.filter { it.albumId == bucketId }
         val urisWithNewPaths = allItems.mapNotNull { item ->
             val rp = item.relativePath
             if (rp.isNotEmpty()) {
@@ -215,12 +219,29 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 用户拒绝授权 → 清除待搬运状态。
+     * 用户拒绝授权 → 清除全部状态，还原虚拟名。
      */
     fun cancelAlbumRename() {
-        AppLogger.d("Rename", "cancelAlbumRename — user denied permission")
+        AppLogger.d("Rename", "cancelAlbumRename — user denied permission, reverting virtual name")
+        val bucketId = pendingBucketId
+        val oldName = pendingOldNameOriginal
+
+        // 还原虚拟名
+        if (bucketId.isNotEmpty()) {
+            albumNameStore.removeCustomName(bucketId)
+            // 更新 UI 中的相册名列表
+            _albums.value = _albums.value.map {
+                if (it.bucketId == bucketId) {
+                    if (oldName.isNotEmpty()) it.copy(bucketName = oldName) else it
+                } else it
+            }
+        }
+
         pendingUrisWithNewPaths = emptyList()
         pendingOldPaths = emptyList()
+        pendingBucketId = ""
+        pendingNewName = ""
+        pendingOldNameOriginal = ""
         _renameProgress.value = null
     }
 
@@ -228,14 +249,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 开始/继续物理搬运 — 由 AlbumGridScreen 检测到已授权后自动调用。
      */
     fun startPhysicalRename(resolver: ContentResolver) {
-        val progress = _renameProgress.value ?: return
+        val progress = _renameProgress.value
+        AppLogger.d("Rename", "startPhysicalRename called: progress=$progress")
+        if (progress == null) return
         if (!progress.isRunning || progress.isDone) {
+            AppLogger.d("Rename", "startPhysicalRename → executing")
             _executePhysicalRename(resolver)
+        } else {
+            AppLogger.d("Rename", "startPhysicalRename already running, skip")
         }
     }
 
     private fun _executePhysicalRename(resolver: ContentResolver) {
         val urisToMove = pendingUrisWithNewPaths
+        AppLogger.d("Rename", "_executePhysicalRename: ${urisToMove.size} files to move")
         if (urisToMove.isEmpty()) return
 
         _renameProgress.value = _renameProgress.value?.copy(isRunning = true)

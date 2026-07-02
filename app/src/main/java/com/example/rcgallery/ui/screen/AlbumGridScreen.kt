@@ -44,6 +44,7 @@ import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import kotlinx.coroutines.delay
 
 /**
  * 相册显示模式。
@@ -153,18 +154,26 @@ fun AlbumGridScreen(
         }
     }
 
-    // ── 相册重命名搬运进度（回到相册列表后自动触发）──
+    // ── 相册重命名搬运进度 ──
     val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
+
+    // 检测用户从 Preview 返回 → 自动触发物理搬运
+    LaunchedEffect(selectedAlbumId) {
+        if (selectedAlbumId == null) {
+            val p = viewModel.renameProgress.value
+            if (p != null && !p.isRunning && !p.isDone) {
+                AppLogger.d("AlbumGrid", "returned from preview, start physical rename: ${p.totalCount} files")
+                viewModel.startPhysicalRename(context.contentResolver)
+            }
+        }
+    }
+
+    // 搬运完成 → 5 秒后自动清除进度
     LaunchedEffect(renameProgress) {
         val p = renameProgress
-        if (p != null && !p.isRunning && !p.isDone) {
-            // 已授权待搬运 → 回到相册列表立即开始
-            AppLogger.d("AlbumGrid", "auto-start physical rename: ${p.totalCount} files")
-            viewModel.startPhysicalRename(context.contentResolver)
-        }
-        // 搬运完成 → 5 秒后自动清除进度显示
         if (p != null && p.isDone) {
-            kotlinx.coroutines.delay(5000L)
+            AppLogger.d("AlbumGrid", "rename done: succeeded=${p.allSucceeded} rolledBack=${p.rolledBack}")
+            delay(5000L)
             viewModel.clearRenameProgress()
         }
     }
