@@ -45,6 +45,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -160,6 +163,18 @@ fun VideoPlayer(
 
     // 保持 PipState.exoPlayer 指向当前 VideoPlayer 的 ExoPlayer，供 PiP 尺寸同步使用
     LaunchedEffect(Unit) { PipState.exoPlayer = exoPlayer }
+
+    // App 切后台时暂停（非 PiP 模式），PiP 模式不暂停
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE && !hideUiOverlays) {
+                exoPlayer.playWhenReady = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(isActive) {
         if (isActive) {
