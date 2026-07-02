@@ -37,7 +37,6 @@ import kotlin.math.roundToInt
 private const val DOUBLE_TAP_ZOOM = 2.5f
 private const val EDGE_THRESHOLD_PX = 3f
 private const val DOUBLE_TAP_TIME_MS = 300L
-private const val SWIPE_DOWN_MIN_VELOCITY = 5f
 
 private data class InertiaParams(
     val targetX: Float,
@@ -188,8 +187,9 @@ fun ZoomableImage3(
 
                     // ── 下滑返回（未缩放）──
                     // 要求 Y 是强主导方向（|Y| >= |X| * 1.5），防止斜向 45° 误触发
+                    val swipeThresh = InertiaSettings.swipeVelocityThreshold
                     if (scale <= 1f && frameCount > 0 &&
-                        smoothY > SWIPE_DOWN_MIN_VELOCITY &&
+                        smoothY > swipeThresh &&
                         smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                         AppLogger.d("Zoom", "swipe down back V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
                         onSwipeDownToBack()
@@ -198,7 +198,7 @@ fun ZoomableImage3(
 
                     // ── 上划显示图片信息（未缩放）──
                     if (scale <= 1f && frameCount > 0 &&
-                        smoothY < -SWIPE_DOWN_MIN_VELOCITY &&
+                        smoothY < -swipeThresh &&
                         smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                         AppLogger.d("Zoom", "swipe up info V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
                         onSwipeUpToShowInfo()

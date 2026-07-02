@@ -33,4 +33,7 @@ object InertiaSettings {
 
     /** 控制栏按钮保护区域（占屏幕高度百分比，从底部算起）：双击不触发范围，默认 25% */
     @JvmStatic var controlBarZonePercent: Float = 25f
+
+    /** 上划/下滑速度阈值（px）：值越小越容易触发。默认 5，范围 1~15 */
+    @JvmStatic var swipeVelocityThreshold: Float = 5f
 }

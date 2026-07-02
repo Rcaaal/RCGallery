@@ -12,6 +12,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -249,15 +251,20 @@ fun PreviewScreen(
                                             }
                                         }
                                     },
-                                    onSwipeDownToBack = onBackClick,
+                                    onSwipeDownToBack = {
+                                        if (showInfo) showInfo = false
+                                        else onBackClick()
+                                    },
                                     onSwipeUpToShowInfo = { showInfo = true }
                                 )
                             }
                         }
                     }
-                    // 信息面板展开时，点击图片部分关闭
+                    // 信息面板展开时，点击图片部分关闭（不拦截滑动手势）
                     if (showInfo) {
-                        Box(Modifier.matchParentSize().clickable { showInfo = false })
+                        Box(Modifier.matchParentSize().pointerInput(Unit) {
+                            detectTapGestures { showInfo = false }
+                        })
                     }
                 }
             // ── 图片信息卡片（上划展开，推起图片）──

@@ -75,6 +75,17 @@ fun InertiaSettingsPanel(
 
                 HorizontalDivider()
 
+                // ── 上划/下滑触发阈值（图片预览）──
+                var swipeVel by remember { mutableFloatStateOf(InertiaSettings.swipeVelocityThreshold) }
+                Text("滑动触发: ${"%.0f".format(swipeVel)} px", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Slider(
+                    value = swipeVel,
+                    onValueChange = { swipeVel = it; InertiaSettings.swipeVelocityThreshold = it },
+                    valueRange = 1f..15f, steps = 13
+                )
+
+                HorizontalDivider()
+
                 var showDbg by remember { mutableStateOf(InertiaSettings.showControlZoneDebug) }
                 var cbPct by remember { mutableFloatStateOf(InertiaSettings.controlBarZonePercent) }
 
