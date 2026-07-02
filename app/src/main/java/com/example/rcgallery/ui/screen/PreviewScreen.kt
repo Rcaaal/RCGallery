@@ -158,6 +158,21 @@ fun PreviewScreen(
 
     // ── 相册重命名（只记录虚拟名+入队列，不弹授权窗）──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
+    val renameQueue by viewModel.renameQueue.collectAsStateWithLifecycle()
+    val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
+
+    // Preview 内授权 launcher（点击 [搬N] 时触发）
+    val previewRenameLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            AppLogger.d("Rename", "Preview auth OK → execute")
+            viewModel.executeNextTask(context.contentResolver)
+        } else {
+            AppLogger.d("Rename", "Preview auth denied → cancel")
+            viewModel.cancelNextTask()
+        }
+    }
 
     // ── 相册重命名对话框 ──
     if (showAlbumRenameDialog && currentItem != null) {
@@ -302,13 +317,31 @@ fun PreviewScreen(
         }
         // ── 设置按钮（PiP 时隐藏）──
         if (!pipOverlayHidden) {
-            // ── 惯性设置齿轮按钮（TopEnd，橙色）──
+            // ── 惯性设置齿轮按钮（TopEnd，橙色，在搬运按钮左侧）──
             Box(
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(28.dp)
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp).size(28.dp)
                     .clip(CircleShape).background(Color(0xCCFF9800))
                     .clickable { showInertiaSettings = true },
                 contentAlignment = Alignment.Center
             ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
+        }
+        // ── 搬运队列按钮（在所有界面之上可见，最右侧）──
+        if (renameQueue.isNotEmpty() && renameProgress?.isRunning != true) {
+            Box(
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(40.dp)
+                    .clip(CircleShape).background(Color(0xFF4CAF50))
+                    .clickable {
+                        val uris = viewModel.getNextTaskUris()
+                        if (uris.isNullOrEmpty()) return@clickable
+                        try {
+                            val pending = MediaStore.createWriteRequest(context.contentResolver, uris)
+                            previewRenameLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
+                        } catch (e: Exception) {
+                            viewModel.cancelNextTask()
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 15.sp) }
         }
     }
 }

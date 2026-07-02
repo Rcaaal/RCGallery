@@ -234,29 +234,24 @@ fun AlbumGridScreen(
                     onBackClick = { selectedAlbumId = null }
                 )
             }
-            // ── 搬运队列按钮（在 MediaGrid 之上）──
-            val showRenameBtn = renameQueue.isNotEmpty() && renameProgress?.isRunning != true
-            if (showRenameBtn) {
+            // ── 搬运队列按钮（在所有覆盖层之上，与 FPS 同位置但更大）──
+            if (renameQueue.isNotEmpty() && renameProgress?.isRunning != true) {
+                AppLogger.d("AlbumGrid", "👉 showRenameBtn: queue=${renameQueue.size} isRunning=${renameProgress?.isRunning}")
                 Box(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 44.dp).size(28.dp)
-                        .clip(CircleShape).background(Color(0xCC4CAF50))
+                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(40.dp)
+                        .clip(CircleShape).background(Color(0xFF4CAF50))
                         .clickable {
-                            if (renameProgress?.isRunning == true) return@clickable
                             val uris = viewModel.getNextTaskUris()
                             if (uris.isNullOrEmpty()) return@clickable
                             try {
-                                val pending = MediaStore.createWriteRequest(
-                                    context.contentResolver, uris
-                                )
-                                renameAuthLauncher.launch(
-                                    IntentSenderRequest.Builder(pending.intentSender).build()
-                                )
+                                val pending = MediaStore.createWriteRequest(context.contentResolver, uris)
+                                renameAuthLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
                             } catch (e: Exception) {
                                 viewModel.cancelNextTask()
                             }
                         },
                     contentAlignment = Alignment.Center
-                ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 11.sp) }
+                ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 15.sp) }
             }
         }
     }
