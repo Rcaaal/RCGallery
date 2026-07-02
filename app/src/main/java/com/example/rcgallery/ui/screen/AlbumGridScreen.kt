@@ -13,16 +13,21 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -36,6 +41,7 @@ import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
+import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
@@ -92,6 +98,19 @@ fun AlbumGridScreen(
     var selectedAlbumName by remember { mutableStateOf("") }
     if (selectedAlbumId != null) {
         BackHandler { selectedAlbumId = null }
+    }
+
+    // ── 设置面板 / 日志 ──
+    var showInertiaSettings by remember { mutableStateOf(false) }
+    var showLogDialog by remember { mutableStateOf(false) }
+    if (showInertiaSettings) InertiaSettingsPanel(
+        onDismiss = { showInertiaSettings = false },
+        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+    )
+    if (showLogDialog) {
+        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
+            DevOverlay(initialShow = true)
+        }
     }
 
     // ── 权限状态 ──
@@ -166,7 +185,13 @@ fun AlbumGridScreen(
                 )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            DevOverlay(modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
+            // ── 设置齿轮按钮（替代 DevOverlay，内含日志入口）──
+            Box(
+                modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp).size(28.dp)
+                    .clip(CircleShape).background(Color(0xCCFF9800))
+                    .clickable { showInertiaSettings = true },
+                contentAlignment = Alignment.Center
+            ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──

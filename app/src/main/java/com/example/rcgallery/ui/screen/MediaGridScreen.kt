@@ -7,22 +7,28 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.ui.component.DevOverlay
@@ -30,6 +36,7 @@ import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
+import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
@@ -49,6 +56,28 @@ fun MediaGridScreen(
     LaunchedEffect(albumId) {
         AppLogger.d("MediaGrid", "LaunchedEffect albumId=[$albumId]  items.size=${mediaItems.size}")
         viewModel.loadMedia(albumId = albumId)
+    }
+
+    // ── 相册切换时防止旧数据闪烁：加载完成前不展示 RecyclerView ──
+    var isLoadingAlbum by remember { mutableStateOf(true) }
+    LaunchedEffect(albumId) {
+        isLoadingAlbum = true
+    }
+    LaunchedEffect(isLoading) {
+        if (!isLoading) isLoadingAlbum = false
+    }
+
+    // ── 设置面板 / 日志 ──
+    var showInertiaSettings by remember { mutableStateOf(false) }
+    var showLogDialog by remember { mutableStateOf(false) }
+    if (showInertiaSettings) InertiaSettingsPanel(
+        onDismiss = { showInertiaSettings = false },
+        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+    )
+    if (showLogDialog) {
+        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
+            DevOverlay(initialShow = true)
+        }
     }
 
     // ── Preview overlay 状态（代替 navigation push，防止 RecyclerView 销毁）──
@@ -87,7 +116,8 @@ fun MediaGridScreen(
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
-            if (isLoading && mediaItems.isEmpty()) {
+            if (isLoadingAlbum) {
+                // 相册切换/首次加载→显示 loading，防止旧数据闪烁
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             } else {
                 Scaffold(
@@ -113,7 +143,6 @@ fun MediaGridScreen(
                                 val rv = RecyclerView(ctx).apply {
                                     layoutManager = GridLayoutManager(ctx, 4)
                                     adapter = SimpleGridAdapter(
-                                        items = filteredItems,
                                         onClick = { index ->
                                             AppLogger.d("MediaGrid", "click index=$index isVideo=${filteredItems.getOrNull(index)?.isVideo}")
                                             selectedPhotoIndex = index
@@ -133,11 +162,7 @@ fun MediaGridScreen(
                                 val rv = (container as FrameLayout).getChildAt(0) as RecyclerView
                                 val scroller = container.getChildAt(1) as FastScrollerView
                                 val adapter = rv.adapter as SimpleGridAdapter
-                                val dirty = adapter.items !== filteredItems
-                                AppLogger.d("MediaGrid", "update size=${adapter.items.size}→${filteredItems.size} dirty=$dirty")
-                                if (dirty) {
-                                    adapter.items = filteredItems
-                                    adapter.notifyDataSetChanged()
+                                adapter.submitList(filteredItems) {
                                     scroller.refresh()
                                 }
                             },
@@ -149,7 +174,13 @@ fun MediaGridScreen(
                     }
                 }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            DevOverlay(modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
+            // ── 设置齿轮按钮（替代 DevOverlay，内含日志入口）──
+            Box(
+                modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp).size(28.dp)
+                    .clip(CircleShape).background(Color(0xCCFF9800))
+                    .clickable { showInertiaSettings = true },
+                contentAlignment = Alignment.Center
+            ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
 
             // ── 媒体类型过滤按钮（底部居中，略抬上）──
             if (availableTypes.isNotEmpty()) {
@@ -210,7 +241,6 @@ fun MediaGridScreen(
                 PreviewScreen(
                     initialIndex = selectedPhotoIndex,
                     onBackClick = { selectedPhotoIndex = -1 },
-                    onDeleted = { selectedPhotoIndex = -1 },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
                     items = if (activeFilters.isNotEmpty()) filteredItems else null
@@ -226,17 +256,14 @@ private enum class MediaFilterType(val label: String) {
 }
 
 private class SimpleGridAdapter(
-    var items: List<com.example.rcgallery.model.MediaItem>,
     private val onClick: (Int) -> Unit,
     private val context: android.content.Context
-) : RecyclerView.Adapter<SimpleGridAdapter.VH>() {
+) : ListAdapter<com.example.rcgallery.model.MediaItem, SimpleGridAdapter.VH>(DiffCallback()) {
 
     private val density = context.resources.displayMetrics.density
     private val gapPx = (2 * density).toInt()
     private val screenWidth = context.resources.displayMetrics.widthPixels
     private val itemSize = (screenWidth - gapPx * 3) / 4
-
-    override fun getItemCount() = items.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val frame = FrameLayout(context).apply {
@@ -266,7 +293,12 @@ private class SimpleGridAdapter(
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.bind(items[position], position)
+        holder.bind(getItem(position), position)
+    }
+
+    private class DiffCallback : DiffUtil.ItemCallback<com.example.rcgallery.model.MediaItem>() {
+        override fun areItemsTheSame(a: com.example.rcgallery.model.MediaItem, b: com.example.rcgallery.model.MediaItem) = a.uri == b.uri
+        override fun areContentsTheSame(a: com.example.rcgallery.model.MediaItem, b: com.example.rcgallery.model.MediaItem) = a == b
     }
 
     class VH(

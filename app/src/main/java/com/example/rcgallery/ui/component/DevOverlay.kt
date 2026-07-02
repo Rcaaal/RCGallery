@@ -30,11 +30,12 @@ import com.example.rcgallery.util.AppLogger
 @Composable
 fun DevOverlay(
     modifier: Modifier = Modifier,
-    tagFilter: String? = null
+    tagFilter: String? = null,
+    initialShow: Boolean = false
 ) {
     val context = LocalContext.current
-    var showDialog by remember { mutableStateOf(false) }
-    var logs by remember { mutableStateOf("") }
+    var showDialog by remember { mutableStateOf(initialShow) }
+    var logs by remember { mutableStateOf(if (initialShow) AppLogger.getLogs(tagFilter) else "") }
 
     // ── 悬浮小绿点 ──
     Box(

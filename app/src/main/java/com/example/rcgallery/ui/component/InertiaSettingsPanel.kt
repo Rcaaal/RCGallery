@@ -17,7 +17,8 @@ import androidx.compose.ui.unit.sp
  */
 @Composable
 fun InertiaSettingsPanel(
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onOpenLog: () -> Unit = {}
 ) {
     var speedX by remember { mutableFloatStateOf(InertiaSettings.speedMultiplierX) }
     var speedY by remember { mutableFloatStateOf(InertiaSettings.speedMultiplierY) }
@@ -105,6 +106,16 @@ fun InertiaSettingsPanel(
                         onValueChange = { cbPct = it; InertiaSettings.controlBarZonePercent = it },
                         valueRange = 10f..50f, steps = 7
                     )
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+
+                // ── 日志入口按钮（从设置面板打开调试日志）──
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    TextButton(onClick = { onOpenLog() }) { Text("日志", fontSize = 13.sp) }
                 }
             }
         },

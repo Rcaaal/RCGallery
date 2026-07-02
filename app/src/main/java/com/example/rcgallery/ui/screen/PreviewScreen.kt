@@ -1,25 +1,21 @@
 package com.example.rcgallery.ui.screen
 
+import android.app.Activity
+import android.content.ContentValues
 import android.net.Uri
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.fadeOut
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -52,7 +48,6 @@ import kotlinx.coroutines.launch
 fun PreviewScreen(
     initialIndex: Int = 0,
     onBackClick: () -> Unit = {},
-    onDeleted: () -> Unit = {},
     volumeEnabled: Boolean = false,
     onVolumeToggle: () -> Unit = {},
     items: List<com.example.rcgallery.model.MediaItem>? = null  // 非空时覆盖 ViewModel 的全量数据
@@ -160,28 +155,16 @@ fun PreviewScreen(
         showInfo = false  // 翻页关闭信息面板
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
-    var showDeleteDialog by remember { mutableStateOf(false) }
-    var isDeleting by remember { mutableStateOf(false) }
     var showInertiaSettings by remember { mutableStateOf(false) }
-    if (showInertiaSettings) InertiaSettingsPanel(onDismiss = { showInertiaSettings = false })
-
-    if (showDeleteDialog && currentItem != null) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = { Text("删除此项？") },
-            text = { Text("此操作不可撤销，将从设备中永久删除。") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        isDeleting = true; showDeleteDialog = false
-                        try { context.contentResolver.delete(currentItem.uri, null, null) } catch (_: Exception) {}
-                        onDeleted()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("删除") }
-            },
-            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("取消") } }
-        )
+    var showLogDialog by remember { mutableStateOf(false) }
+    if (showInertiaSettings) InertiaSettingsPanel(
+        onDismiss = { showInertiaSettings = false },
+        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+    )
+    if (showLogDialog) {
+        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
+            DevOverlay(initialShow = true)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -192,13 +175,6 @@ fun PreviewScreen(
                     TopAppBar(
                         title = {},
                         navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回", color = Color.White) } },
-                        actions = {
-                            if (currentItem != null) {
-                                TextButton(onClick = { showDeleteDialog = true }, enabled = !isDeleting) {
-                                    Text("删除", color = if (isDeleting) Color.Gray else Color(0xFFEF5350), style = MaterialTheme.typography.labelLarge)
-                                }
-                            }
-                        },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black.copy(alpha = 0.3f))
                     )
                 }
@@ -208,13 +184,9 @@ fun PreviewScreen(
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // ── 图片/视频区域（信息面板展开时被推到上半部分）──
                 val isInfoShown = showInfo && currentItem != null && !currentItem.isVideo
-                val imageWeight by animateFloatAsState(
-                    targetValue = if (isInfoShown) 0.5f else 1f,
-                    animationSpec = if (isInfoShown) tween(180) else snap()
-                )
                 Box(
                     modifier = Modifier
-                        .weight(imageWeight)
+                        .weight(if (isInfoShown) 0.7f else 1f)
                         .fillMaxWidth()
                         .nestedScroll(overscrollConnection)
                 ) {
@@ -264,28 +236,26 @@ fun PreviewScreen(
                         }
                     }
                 }
-            // ── 图片信息卡片（上划展开，推起图片）──
-            AnimatedVisibility(
-                visible = showInfo && currentItem != null && !currentItem.isVideo,
-                enter = expandVertically(expandFrom = Alignment.Bottom, animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(150)) + fadeOut(animationSpec = tween(150))
-            ) {
-                if (currentItem != null) {
-                    Box(Modifier.pointerInput(Unit) {
-                        detectVerticalDragGestures { _, dragAmount ->
-                            if (dragAmount > 0) showInfo = false
+            // ── 图片信息卡片（仅展开时插入 Column，weight 占 30%）──
+            if (isInfoShown) {
+                Box(
+                    modifier = Modifier
+                        .weight(0.3f)
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            detectVerticalDragGestures { _, dragAmount ->
+                                if (dragAmount > 0) showInfo = false
+                            }
                         }
-                    }) {
-                        InfoCard(currentItem, onDismiss = { showInfo = false })
-                    }
+                ) {
+                    InfoCard(currentItem!!, onDismiss = { showInfo = false })
                 }
             }
             }
         }
-        // ── 调试/设置按钮（PiP 时隐藏）──
+        // ── 设置按钮（PiP 时隐藏）──
         if (!pipOverlayHidden) {
-            DevOverlay(modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
-            // ── 惯性设置齿轮按钮（TopEnd，橙色，不与 DevOverlay 重叠）──
+            // ── 惯性设置齿轮按钮（TopEnd，橙色）──
             Box(
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(28.dp)
                     .clip(CircleShape).background(Color(0xCCFF9800))
@@ -297,7 +267,7 @@ fun PreviewScreen(
 }
 
 // ══════════════════════════════════════
-//  图片信息卡片
+//  图片信息卡片（紧凑 4 行布局 + 重命名）
 // ══════════════════════════════════════
 
 private fun formatFileSize(bytes: Long): String = when {
@@ -308,42 +278,162 @@ private fun formatFileSize(bytes: Long): String = when {
 }
 
 private fun formatDate(timestamp: Long): String {
-    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(timestamp * 1000L))
 }
 
-private val infoIconColor = Color(0xFFBBBBBB)
-
 @Composable
-private fun InfoCard(item: com.example.rcgallery.model.MediaItem, onDismiss: () -> Unit) {
+private fun InfoCard(
+    item: com.example.rcgallery.model.MediaItem,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // ── 文件名解析（只含前缀，扩展名不可改）──
+    val dotIndex = remember(item.fileName) { item.fileName.lastIndexOf('.') }
+    val baseNameOnly = remember(item.fileName) {
+        if (dotIndex > 0) item.fileName.substring(0, dotIndex) else item.fileName
+    }
+    val extOnly = remember(item.fileName) {
+        if (dotIndex > 0) item.fileName.substring(dotIndex) else ""
+    }
+
+    var showRenameDialog by remember { mutableStateOf(false) }
+
+    // ── 文件重命名 launcher（首次操作时申请写入权限）──
+    var writeGrantedUris by remember { mutableStateOf<Set<Uri>?>(null) }
+    var pendingDisplayName by remember { mutableStateOf("") }
+    val renameLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            writeGrantedUris = (writeGrantedUris ?: emptySet()) + item.uri
+            if (pendingDisplayName.isNotEmpty()) {
+                try {
+                    context.contentResolver.update(item.uri, ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
+                    }, null, null)
+                    showRenameDialog = false
+                } catch (e: Exception) {
+                    Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            Toast.makeText(context, "需要授予修改权限", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val albumDisplay = item.albumName ?: "未知"
+    val filePath = item.filePath.ifEmpty { albumDisplay }
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF1A1A1A),
         tonalElevation = 4.dp
     ) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp).verticalScroll(rememberScrollState())) {
-            InfoRow(icon = "📄", label = "文件名", value = item.fileName)
-            Spacer(Modifier.height(12.dp))
-            InfoRow(icon = "⏰", label = "创建时间", value = formatDate(item.dateAdded))
-            Spacer(Modifier.height(12.dp))
-            InfoRow(icon = "💾", label = "文件大小", value = formatFileSize(item.size))
-            Spacer(Modifier.height(12.dp))
-            InfoRow(icon = "📋", label = "格式", value = item.mimeType)
-            Spacer(Modifier.height(12.dp))
-            InfoRow(icon = "📂", label = "所在位置", value = item.filePath.ifEmpty { "未知" })
-            Spacer(Modifier.height(12.dp))
-            InfoRow(icon = "🗂", label = "所在相册", value = item.albumName ?: "未知")
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            // Row 1: 文件名(可点击) + 创建时间
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = item.fileName,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f).clickable { showRenameDialog = true }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = formatDate(item.dateAdded),
+                    color = Color(0xFF999999),
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            // Row 2: 大小 · 格式
+            Text(
+                text = "${formatFileSize(item.size)} · ${item.mimeType}",
+                color = Color(0xFF999999),
+                fontSize = 12.sp,
+                maxLines = 1
+            )
+            Spacer(Modifier.height(4.dp))
+            // Row 3: 相册名（可点击）
+            Text(
+                text = albumDisplay,
+                color = Color(0xFFBBBBBB),
+                fontSize = 12.sp,
+                maxLines = 1,
+                modifier = Modifier.clickable {
+                    Toast.makeText(context, "Android 系统限制，无法重命名相册", Toast.LENGTH_SHORT).show()
+                }
+            )
+            Spacer(Modifier.height(4.dp))
+            // Row 4: 目录路径
+            if (filePath.isNotEmpty()) {
+                Text(
+                    text = filePath,
+                    color = Color(0xFF777777),
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
         }
     }
+
+    // ── 文件重命名对话框 ──
+    if (showRenameDialog) {
+        var editText by remember { mutableStateOf(baseNameOnly) }
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("重命名文件") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        label = { Text("文件名") }
+                    )
+                    Text(extOnly, color = Color.Gray, fontSize = 14.sp)
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newName = editText.trim()
+                    if (newName.isEmpty()) return@Button
+                    pendingDisplayName = "$newName$extOnly"
+
+                    // 已有授权 → 直接更新
+                    if (writeGrantedUris?.contains(item.uri) == true) {
+                        try {
+                            context.contentResolver.update(item.uri, ContentValues().apply {
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
+                            }, null, null)
+                            showRenameDialog = false
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
+                        }
+                        return@Button
+                    }
+
+                    // 首次 → 只申请当前文件的写入权限（不批量覆盖整张专辑）
+                    try {
+                        val pending = MediaStore.createWriteRequest(
+                            context.contentResolver, listOf(item.uri)
+                        )
+                        renameLauncher.launch(
+                            IntentSenderRequest.Builder(pending.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "请求授权失败", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("确认") }
+            },
+            dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("取消") } }
+        )
+    }
+
 }
 
-@Composable
-private fun InfoRow(icon: String, label: String, value: String) {
-    Row(verticalAlignment = Alignment.Top) {
-        Text(icon, fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
-        Column {
-            Text(label, color = Color.Gray, fontSize = 11.sp)
-            Text(value, color = Color.White, fontSize = 13.sp, lineHeight = 16.sp)
-        }
-    }
-}
