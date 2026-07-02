@@ -5,8 +5,10 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -199,46 +201,64 @@ fun PreviewScreen(
             },
             containerColor = Color.Black
         ) { padding ->
-            Box(modifier = Modifier.fillMaxSize().padding(padding).nestedScroll(overscrollConnection)) {
-                HorizontalPager(
-                    state = pagerState,
-                    userScrollEnabled = pagerScrollEnabled,
-                    beyondViewportPageCount = 1,
-                    modifier = Modifier.fillMaxSize(),
-                    pageSpacing = 0.dp
-                ) { page ->
-                val item = mediaItems.getOrNull(page)
-                if (item != null) {
-                    if (item.isVideo) {
-                        VideoPlayer(
-                            uri = item.uri,
-                            isActive = page == pagerState.currentPage,
-                            volumeEnabled = volumeEnabled,
-                            onVolumeToggle = onVolumeToggle,
-                            savedPositions = savedPositions,
-                            onControlZoneActive = { pagerScrollEnabled = !it },
-                            onRequestPip = { pipTriggered = true },
-                            hideUiOverlays = pipOverlayHidden
-                        )
-                    } else {
-                        ZoomableImage3(
-                            uri = item.uri,
-                            onEdgeSwipe = { direction ->
-                                val nextPage = pagerState.currentPage + direction
-                                if (nextPage < 0) {
-                                    Toast.makeText(context, "已经是第一张", Toast.LENGTH_SHORT).show()
-                                } else if (nextPage >= mediaItems.size) {
-                                    Toast.makeText(context, "已经是最后一张", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    scope.launch {
-                                        pagerState.animateScrollToPage(nextPage)
-                                    }
-                                }
-                            },
-                            onSwipeDownToBack = onBackClick,
-                            onSwipeUpToShowInfo = { showInfo = true }
-                        )
+            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                // ── 图片/视频区域（信息面板展开时被推到上半部分）──
+                Box(
+                    modifier = Modifier
+                        .weight(if (showInfo && currentItem != null && !currentItem.isVideo) 0.5f else 1f)
+                        .fillMaxWidth()
+                        .nestedScroll(overscrollConnection)
+                ) {
+                    HorizontalPager(
+                        state = pagerState,
+                        userScrollEnabled = pagerScrollEnabled,
+                        beyondViewportPageCount = 1,
+                        modifier = Modifier.fillMaxSize(),
+                        pageSpacing = 0.dp
+                    ) { page ->
+                        val item = mediaItems.getOrNull(page)
+                        if (item != null) {
+                            if (item.isVideo) {
+                                VideoPlayer(
+                                    uri = item.uri,
+                                    isActive = page == pagerState.currentPage,
+                                    volumeEnabled = volumeEnabled,
+                                    onVolumeToggle = onVolumeToggle,
+                                    savedPositions = savedPositions,
+                                    onControlZoneActive = { pagerScrollEnabled = !it },
+                                    onRequestPip = { pipTriggered = true },
+                                    hideUiOverlays = pipOverlayHidden
+                                )
+                            } else {
+                                ZoomableImage3(
+                                    uri = item.uri,
+                                    onEdgeSwipe = { direction ->
+                                        val nextPage = pagerState.currentPage + direction
+                                        if (nextPage < 0) {
+                                            Toast.makeText(context, "已经是第一张", Toast.LENGTH_SHORT).show()
+                                        } else if (nextPage >= mediaItems.size) {
+                                            Toast.makeText(context, "已经是最后一张", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            scope.launch {
+                                                pagerState.animateScrollToPage(nextPage)
+                                            }
+                                        }
+                                    },
+                                    onSwipeDownToBack = onBackClick,
+                                    onSwipeUpToShowInfo = { showInfo = true }
+                                )
+                            }
+                        }
                     }
+                }
+            // ── 图片信息卡片（上划展开，推起图片）──
+            AnimatedVisibility(
+                visible = showInfo && currentItem != null && !currentItem.isVideo,
+                enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
+                exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut()
+            ) {
+                if (currentItem != null) {
+                    InfoCard(currentItem, onDismiss = { showInfo = false })
                 }
             }
             }
@@ -253,27 +273,6 @@ fun PreviewScreen(
                     .clickable { showInertiaSettings = true },
                 contentAlignment = Alignment.Center
             ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
-        }
-
-        // ── 图片信息面板（上划触发）──
-        AnimatedVisibility(
-            visible = showInfo && currentItem != null && !currentItem.isVideo,
-            enter = slideInVertically { it },
-            exit = slideOutVertically { it }
-        ) {
-            Column(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) {
-                // 上半部分：点击关闭
-                Box(
-                    modifier = Modifier.weight(0.6f).fillMaxWidth().clickable { showInfo = false },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("点击关闭", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp)
-                }
-                // 下半部分：信息卡片
-                if (currentItem != null) {
-                    InfoCard(currentItem)
-                }
-            }
         }
     }
 }
@@ -297,7 +296,7 @@ private fun formatDate(timestamp: Long): String {
 private val infoIconColor = Color(0xFFBBBBBB)
 
 @Composable
-private fun InfoCard(item: com.example.rcgallery.model.MediaItem) {
+private fun InfoCard(item: com.example.rcgallery.model.MediaItem, onDismiss: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF1A1A1A),
