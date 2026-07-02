@@ -131,6 +131,7 @@ fun ZoomableImage3(
                     var smoothY = 0f
                     var frameCount = 0
                     var hadMovement = false
+                    var verticalDominant = false  // 一旦 Y 方向变为主导，consume 事件阻止 Pager 翻页
 
                     do {
                         val event = awaitPointerEvent(PointerEventPass.Main)
@@ -177,11 +178,18 @@ fun ZoomableImage3(
                                 event.changes.forEach { it.consume() }
                             }
                         } else {
-                            // ── 未缩放 + 单指：不 consume → 让 HorizontalPager 翻页 ──
+                            // ── 未缩放 + 单指 ──
                             smoothX = smoothX * 0.5f + pan.x * 0.5f
                             smoothY = smoothY * 0.5f + pan.y * 0.5f
                             frameCount++
                             if (pan.x != 0f || pan.y != 0f) hadMovement = true
+                            // 检测到垂直主导（Y >= X*1.5）且超过阈值 → 开始 consume，阻止 Pager 翻页
+                            if (frameCount >= 3 && smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
+                                verticalDominant = true
+                            }
+                            if (verticalDominant) {
+                                event.changes.forEach { it.consume() }
+                            }
                         }
                     } while (event.changes.any { it.pressed })
 
