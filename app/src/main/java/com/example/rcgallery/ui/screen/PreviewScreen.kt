@@ -155,6 +155,65 @@ fun PreviewScreen(
         showInfo = false  // 翻页关闭信息面板
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
+
+    // ── 相册重命名（虚拟 + 退出时物理移动）──
+    val pendingAlbumRename by viewModel.pendingAlbumRename.collectAsStateWithLifecycle()
+    var showAlbumRenameDialog by remember { mutableStateOf(false) }
+
+    // 物理移动 launcher（退出 Preview 时触发 createWriteRequest）
+    val albumRenameLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (pendingAlbumRename != null) {
+            if (result.resultCode == Activity.RESULT_OK) {
+                viewModel.executePhysicalRename(context.contentResolver) {
+                    onBackClick()
+                }
+            } else {
+                viewModel.clearPendingRename()
+                onBackClick()
+            }
+        } else {
+            onBackClick()
+        }
+    }
+
+    // ── 相册重命名对话框 ──
+    if (showAlbumRenameDialog && currentItem != null) {
+        val currentAlbumName = currentItem?.albumName ?: ""
+        var editText by remember { mutableStateOf(currentAlbumName) }
+        AlertDialog(
+            onDismissRequest = { showAlbumRenameDialog = false },
+            title = { Text("重命名相册") },
+            text = {
+                Column {
+                    Text("当前相册中的所有文件将移到新目录。", color = Color(0xFF999999), fontSize = 13.sp)
+                    Spacer(Modifier.height(4.dp))
+                    Text("注意：操作不可撤销。", color = Color(0xFF666666), fontSize = 11.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        singleLine = true,
+                        label = { Text("新相册名") }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newName = editText.trim()
+                    if (newName.isEmpty()) return@Button
+                    showAlbumRenameDialog = false
+                    val bucketId = currentItem?.albumId ?: return@Button
+                    val oldName = currentItem?.albumName ?: return@Button
+                    viewModel.renameAlbum(bucketId, oldName, newName)
+                    Toast.makeText(context, "相册名已更新，返回时将进行物理移动", Toast.LENGTH_SHORT).show()
+                }) { Text("确认") }
+            },
+            dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
+        )
+    }
+
     var showInertiaSettings by remember { mutableStateOf(false) }
     var showLogDialog by remember { mutableStateOf(false) }
     if (showInertiaSettings) InertiaSettingsPanel(
@@ -174,7 +233,27 @@ fun PreviewScreen(
                 if (!pipOverlayHidden) {
                     TopAppBar(
                         title = {},
-                        navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回", color = Color.White) } },
+                        navigationIcon = {
+                            TextButton(onClick = {
+                                if (pendingAlbumRename != null) {
+                                    // 退出时触发物理移动
+                                    try {
+                                        val allUris = pendingAlbumRename!!.urisWithNewPaths.map { it.first }
+                                        val pending = MediaStore.createWriteRequest(
+                                            context.contentResolver, allUris
+                                        )
+                                        albumRenameLauncher.launch(
+                                            IntentSenderRequest.Builder(pending.intentSender).build()
+                                        )
+                                    } catch (e: Exception) {
+                                        viewModel.clearPendingRename()
+                                        onBackClick()
+                                    }
+                                } else {
+                                    onBackClick()
+                                }
+                            }) { Text("← 返回", color = Color.White) }
+                        },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black.copy(alpha = 0.3f))
                     )
                 }
@@ -227,7 +306,21 @@ fun PreviewScreen(
                                     },
                                     onSwipeDownToBack = {
                                         if (showInfo) showInfo = false
-                                        else onBackClick()
+                                        else if (pendingAlbumRename != null) {
+                                            // 下滑返回时也触发物理移动
+                                            try {
+                                                val allUris = pendingAlbumRename!!.urisWithNewPaths.map { it.first }
+                                                val pending = MediaStore.createWriteRequest(
+                                                    context.contentResolver, allUris
+                                                )
+                                                albumRenameLauncher.launch(
+                                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                                )
+                                            } catch (e: Exception) {
+                                                viewModel.clearPendingRename()
+                                                onBackClick()
+                                            }
+                                        } else onBackClick()
                                     },
                                     onSwipeUpToShowInfo = { showInfo = true },
                                     onSingleTap = { if (showInfo) showInfo = false }
@@ -248,7 +341,12 @@ fun PreviewScreen(
                             }
                         }
                 ) {
-                    InfoCard(currentItem!!, onDismiss = { showInfo = false })
+                    InfoCard(
+                        currentItem!!,
+                        onDismiss = { showInfo = false },
+                        albumDisplayName = viewModel.getAlbumDisplayName(currentItem?.albumId, currentItem?.albumName),
+                        onAlbumNameClick = { showAlbumRenameDialog = true }
+                    )
                 }
             }
             }
@@ -285,7 +383,9 @@ private fun formatDate(timestamp: Long): String {
 @Composable
 private fun InfoCard(
     item: com.example.rcgallery.model.MediaItem,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    albumDisplayName: String,
+    onAlbumNameClick: () -> Unit
 ) {
     val context = LocalContext.current
 
@@ -323,8 +423,7 @@ private fun InfoCard(
         }
     }
 
-    val albumDisplay = item.albumName ?: "未知"
-    val filePath = item.filePath.ifEmpty { albumDisplay }
+    val filePath = item.filePath.ifEmpty { albumDisplayName }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -358,15 +457,13 @@ private fun InfoCard(
                 maxLines = 1
             )
             Spacer(Modifier.height(4.dp))
-            // Row 3: 相册名（可点击）
+            // Row 3: 相册名（可点击 → 打开重命名对话框）
             Text(
-                text = albumDisplay,
+                text = albumDisplayName,
                 color = Color(0xFFBBBBBB),
                 fontSize = 12.sp,
                 maxLines = 1,
-                modifier = Modifier.clickable {
-                    Toast.makeText(context, "Android 系统限制，无法重命名相册", Toast.LENGTH_SHORT).show()
-                }
+                modifier = Modifier.clickable { onAlbumNameClick() }
             )
             Spacer(Modifier.height(4.dp))
             // Row 4: 目录路径

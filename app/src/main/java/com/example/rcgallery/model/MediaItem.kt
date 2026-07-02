@@ -19,7 +19,8 @@ data class MediaItem(
     val albumName: String? = null,
     val duration: Long = 0L,
     val width: Int = 0,
-    val height: Int = 0
+    val height: Int = 0,
+    val relativePath: String = ""
 ) {
     val isVideo: Boolean get() = mimeType.startsWith("video/")
     val isImage: Boolean get() = mimeType.startsWith("image/")

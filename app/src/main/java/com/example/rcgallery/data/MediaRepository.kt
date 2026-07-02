@@ -222,6 +222,7 @@ class MediaRepository(private val context: Context) {
                 val height = c.getInt(if (isVideo) MediaStoreQuery.VIDEO_INDEX_HEIGHT else MediaStoreQuery.IMAGE_INDEX_HEIGHT)
                 val duration = if (isVideo) c.getLong(MediaStoreQuery.VIDEO_INDEX_DURATION) else 0L
                 val filePath = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_DATA else MediaStoreQuery.IMAGE_INDEX_DATA) ?: ""
+                val relativePath = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_RELATIVE_PATH else MediaStoreQuery.IMAGE_INDEX_RELATIVE_PATH) ?: ""
 
                 // 过滤无用格式（如 .nomedia）
                 if (displayName.startsWith(".")) continue
@@ -245,7 +246,8 @@ class MediaRepository(private val context: Context) {
                         albumName = bucketName,
                         duration = duration,
                         width = width,
-                        height = height
+                        height = height,
+                        relativePath = relativePath
                     )
                 )
             }

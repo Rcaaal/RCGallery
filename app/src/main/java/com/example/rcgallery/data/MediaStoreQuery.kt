@@ -23,7 +23,8 @@ object MediaStoreQuery {
         MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
         MediaStore.Images.Media.WIDTH,
         MediaStore.Images.Media.HEIGHT,
-        MediaStore.Images.Media.DATA
+        MediaStore.Images.Media.DATA,
+        MediaStore.Images.Media.RELATIVE_PATH
     )
     const val IMAGE_INDEX_ID = 0
     const val IMAGE_INDEX_NAME = 1
@@ -36,6 +37,7 @@ object MediaStoreQuery {
     const val IMAGE_INDEX_WIDTH = 8
     const val IMAGE_INDEX_HEIGHT = 9
     const val IMAGE_INDEX_DATA = 10
+    const val IMAGE_INDEX_RELATIVE_PATH = 11
 
     // ── 视频投影 ──
     val VIDEO_PROJECTION = arrayOf(
@@ -50,7 +52,8 @@ object MediaStoreQuery {
         MediaStore.Video.Media.WIDTH,
         MediaStore.Video.Media.HEIGHT,
         MediaStore.Video.Media.DURATION,
-        MediaStore.Video.Media.DATA
+        MediaStore.Video.Media.DATA,
+        MediaStore.Video.Media.RELATIVE_PATH
     )
     const val VIDEO_INDEX_ID = 0
     const val VIDEO_INDEX_NAME = 1
@@ -64,6 +67,7 @@ object MediaStoreQuery {
     const val VIDEO_INDEX_HEIGHT = 9
     const val VIDEO_INDEX_DURATION = 10
     const val VIDEO_INDEX_DATA = 11
+    const val VIDEO_INDEX_RELATIVE_PATH = 12
 
     // ── 相册分组排序（按最新时间降序） ──
     const val ALBUM_ORDER = "${MediaStore.Images.ImageColumns.BUCKET_ID} ASC, ${MediaStore.Images.ImageColumns.DATE_ADDED} DESC"
