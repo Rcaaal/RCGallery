@@ -250,6 +250,10 @@ fun PreviewScreen(
                             }
                         }
                     }
+                    // 信息面板展开时，点击图片部分关闭
+                    if (showInfo) {
+                        Box(Modifier.matchParentSize().clickable { showInfo = false })
+                    }
                 }
             // ── 图片信息卡片（上划展开，推起图片）──
             AnimatedVisibility(
