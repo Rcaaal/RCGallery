@@ -206,7 +206,7 @@ fun PreviewScreen(
                             onVolumeToggle = onVolumeToggle,
                             savedPositions = savedPositions,
                             onControlZoneActive = { pagerScrollEnabled = !it },
-                            onRequestPip = { player -> PipState.exoPlayer = player; pipTriggered = true },
+                            onRequestPip = { pipTriggered = true },
                             hideUiOverlays = pipOverlayHidden
                         )
                     } else {
