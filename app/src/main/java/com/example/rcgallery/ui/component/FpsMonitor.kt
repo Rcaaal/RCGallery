@@ -18,7 +18,7 @@ import androidx.compose.ui.unit.sp
  * 全局 FPS 监控开关。后续可从设置页面写入 DataStore/Preferences，
  * 这里先留作硬编码开关。
  */
-var FpsMonitorEnabled: Boolean = true
+var FpsMonitorEnabled: Boolean = false
     private set
 
 /** 由设置页面调用 */

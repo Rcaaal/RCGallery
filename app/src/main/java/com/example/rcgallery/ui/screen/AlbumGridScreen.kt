@@ -11,6 +11,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -93,7 +94,7 @@ fun AlbumGridScreen(
     onSearchClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val viewModel: GalleryViewModel = viewModel()
+    val viewModel: GalleryViewModel = viewModel(context as ComponentActivity)
     val albums by viewModel.albums.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
 
@@ -234,8 +235,8 @@ fun AlbumGridScreen(
                     onBackClick = { selectedAlbumId = null }
                 )
             }
-            // ── 搬运队列按钮（在所有覆盖层之上，与 FPS 同位置但更大）──
-            if (renameQueue.isNotEmpty() && renameProgress?.isRunning != true) {
+            // ── 搬运队列按钮（仅在主页显示，进入相册后隐藏）──
+            if (selectedAlbumId == null && renameQueue.isNotEmpty() && renameProgress?.isRunning != true) {
                 AppLogger.d("AlbumGrid", "👉 showRenameBtn: queue=${renameQueue.size} isRunning=${renameProgress?.isRunning}")
                 Box(
                     modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(40.dp)
