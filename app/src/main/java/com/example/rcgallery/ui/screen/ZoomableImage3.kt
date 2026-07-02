@@ -58,7 +58,8 @@ fun ZoomableImage3(
     uri: Uri,
     onEdgeSwipe: (direction: Int) -> Unit,
     onSwipeDownToBack: () -> Unit = {},
-    onSwipeUpToShowInfo: () -> Unit = {}
+    onSwipeUpToShowInfo: () -> Unit = {},
+    onSingleTap: () -> Unit = {}
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -216,6 +217,7 @@ fun ZoomableImage3(
                     // ── 记录 lastTapTime：有位移的不是 tap，清除双击计时 ──
                     if (!hadMovement) {
                         lastTapTime = now
+                        onSingleTap()  // 单击返回给外层（关闭信息栏等）
                     } else {
                         lastTapTime = 0L
                     }

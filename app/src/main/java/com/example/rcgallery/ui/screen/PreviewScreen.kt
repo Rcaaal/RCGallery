@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -12,7 +13,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -206,9 +207,10 @@ fun PreviewScreen(
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // ── 图片/视频区域（信息面板展开时被推到上半部分）──
+                val isInfoShown = showInfo && currentItem != null && !currentItem.isVideo
                 val imageWeight by animateFloatAsState(
-                    targetValue = if (showInfo && currentItem != null && !currentItem.isVideo) 0.5f else 1f,
-                    animationSpec = tween(180)
+                    targetValue = if (isInfoShown) 0.5f else 1f,
+                    animationSpec = if (isInfoShown) tween(180) else snap()
                 )
                 Box(
                     modifier = Modifier
@@ -255,16 +257,11 @@ fun PreviewScreen(
                                         if (showInfo) showInfo = false
                                         else onBackClick()
                                     },
-                                    onSwipeUpToShowInfo = { showInfo = true }
+                                    onSwipeUpToShowInfo = { showInfo = true },
+                                    onSingleTap = { if (showInfo) showInfo = false }
                                 )
                             }
                         }
-                    }
-                    // 信息面板展开时，点击图片部分关闭（不拦截滑动手势）
-                    if (showInfo) {
-                        Box(Modifier.matchParentSize().pointerInput(Unit) {
-                            detectTapGestures { showInfo = false }
-                        })
                     }
                 }
             // ── 图片信息卡片（上划展开，推起图片）──
@@ -274,7 +271,13 @@ fun PreviewScreen(
                 exit = shrinkVertically(shrinkTowards = Alignment.Bottom, animationSpec = tween(150)) + fadeOut(animationSpec = tween(150))
             ) {
                 if (currentItem != null) {
-                    InfoCard(currentItem, onDismiss = { showInfo = false })
+                    Box(Modifier.pointerInput(Unit) {
+                        detectVerticalDragGestures { _, dragAmount ->
+                            if (dragAmount > 0) showInfo = false
+                        }
+                    }) {
+                        InfoCard(currentItem, onDismiss = { showInfo = false })
+                    }
                 }
             }
             }
