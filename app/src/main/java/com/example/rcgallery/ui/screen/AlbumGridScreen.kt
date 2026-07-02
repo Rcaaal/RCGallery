@@ -1,8 +1,10 @@
 package com.example.rcgallery.ui.screen
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.MediaStore
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -10,6 +12,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -158,11 +161,24 @@ fun AlbumGridScreen(
     val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
     val renameQueue by viewModel.renameQueue.collectAsStateWithLifecycle()
 
-    // 全部完成 → 5 秒后自动清除进度显示
+    // 授权 launcher（点击[搬N]时触发）
+    val renameAuthLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            AppLogger.d("AlbumGrid", "rename auth OK → executeNextTask")
+            viewModel.executeNextTask(context.contentResolver)
+        } else {
+            AppLogger.d("AlbumGrid", "rename auth denied → cancelNextTask")
+            viewModel.cancelNextTask()
+        }
+    }
+
+    // 全部完成 → 5 秒后自动清除
     LaunchedEffect(renameProgress) {
         val p = renameProgress
         if (p != null && p.isDone) {
-            AppLogger.d("AlbumGrid", "rename all done: ${p.lastResult}")
+            AppLogger.d("AlbumGrid", "rename done: ${p.lastResult}")
             delay(5000L)
             viewModel.clearRenameProgress()
         }
@@ -216,7 +232,19 @@ fun AlbumGridScreen(
                         .clip(CircleShape).background(Color(0xCC4CAF50))
                         .clickable {
                             if (renameProgress?.isRunning == true) return@clickable
-                            viewModel.processNextTask(context.contentResolver)
+                            // 获取第一个任务的 URI → 弹授权窗
+                            val uris = viewModel.getNextTaskUris()
+                            if (uris.isNullOrEmpty()) return@clickable
+                            try {
+                                val pending = MediaStore.createWriteRequest(
+                                    context.contentResolver, uris
+                                )
+                                renameAuthLauncher.launch(
+                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                viewModel.cancelNextTask()
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 11.sp) }
