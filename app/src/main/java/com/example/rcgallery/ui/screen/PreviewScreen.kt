@@ -156,19 +156,29 @@ fun PreviewScreen(
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
 
-    // ── 相册重命名（立即授权 + 退出时自动搬运）──
+    // ── 相册重命名（入队列）──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
 
-    // 相册重命名授权 launcher（改名后立刻弹窗）
+    // 暂存待加入队列的任务（launcher 回调时使用，必须在 launcher 前声明）
+    var renamePendingTask by remember { mutableStateOf<GalleryViewModel.RenameTask?>(null) }
+
     val albumRenameLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            viewModel.grantAlbumRename()
-            Toast.makeText(context, "授权成功，返回相册列表后自动搬运", Toast.LENGTH_SHORT).show()
+            val task = renamePendingTask
+            if (task != null) {
+                viewModel.addRenameTask(task)
+                renamePendingTask = null
+                Toast.makeText(context, "已加入搬运队列 (${viewModel.renameQueue.value.size}个任务)", Toast.LENGTH_SHORT).show()
+            }
         } else {
-            viewModel.cancelAlbumRename()
-            Toast.makeText(context, "已跳过物理移动，虚拟名不受影响", Toast.LENGTH_SHORT).show()
+            val task = renamePendingTask
+            if (task != null) {
+                viewModel.cancelRenameTask(task.bucketId, task.originalName)
+                renamePendingTask = null
+            }
+            Toast.makeText(context, "已取消", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -199,22 +209,25 @@ fun PreviewScreen(
                     showAlbumRenameDialog = false
                     val bucketId = currentItem?.albumId ?: return@Button
                     val oldName = currentAlbumName
-                    // 虚拟重命名 + 构建 pending 数据
-                    val uris = viewModel.renameAlbum(bucketId, oldName, newName)
-                    if (uris.isEmpty()) {
-                        Toast.makeText(context, "相册名已更新（无文件需搬运）", Toast.LENGTH_SHORT).show()
+                    // 构建任务 + 虚拟名立即生效
+                    val task = viewModel.buildRenameTask(bucketId, oldName, newName)
+                    if (task == null) {
+                        Toast.makeText(context, "相册名已更新（无需搬运）", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
-                    // 立刻弹授权窗
+                    // 暂存任务，弹授权窗
+                    renamePendingTask = task
                     try {
                         val pending = MediaStore.createWriteRequest(
-                            context.contentResolver, uris.map { it.first }
+                            context.contentResolver, task.urisWithNewPaths.map { it.first }
                         )
                         albumRenameLauncher.launch(
                             IntentSenderRequest.Builder(pending.intentSender).build()
                         )
                     } catch (e: Exception) {
-                        Toast.makeText(context, "请求授权失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                        renamePendingTask = null
+                        viewModel.cancelRenameTask(bucketId, oldName)
+                        Toast.makeText(context, "请求授权失败", Toast.LENGTH_SHORT).show()
                     }
                 }) { Text("确认 & 授权") }
             },

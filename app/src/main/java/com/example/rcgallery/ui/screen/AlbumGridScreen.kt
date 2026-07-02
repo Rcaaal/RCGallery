@@ -156,23 +156,13 @@ fun AlbumGridScreen(
 
     // ── 相册重命名搬运进度 ──
     val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
+    val renameQueue by viewModel.renameQueue.collectAsStateWithLifecycle()
 
-    // 检测用户从 Preview 返回 → 自动触发物理搬运
-    LaunchedEffect(selectedAlbumId) {
-        if (selectedAlbumId == null) {
-            val p = viewModel.renameProgress.value
-            if (p != null && !p.isRunning && !p.isDone) {
-                AppLogger.d("AlbumGrid", "returned from preview, start physical rename: ${p.totalCount} files")
-                viewModel.startPhysicalRename(context.contentResolver)
-            }
-        }
-    }
-
-    // 搬运完成 → 5 秒后自动清除进度
+    // 全部完成 → 5 秒后自动清除进度显示
     LaunchedEffect(renameProgress) {
         val p = renameProgress
         if (p != null && p.isDone) {
-            AppLogger.d("AlbumGrid", "rename done: succeeded=${p.allSucceeded} rolledBack=${p.rolledBack}")
+            AppLogger.d("AlbumGrid", "rename all done: ${p.lastResult}")
             delay(5000L)
             viewModel.clearRenameProgress()
         }
@@ -218,6 +208,19 @@ fun AlbumGridScreen(
                     .clickable { showInertiaSettings = true },
                 contentAlignment = Alignment.Center
             ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
+            // ── 搬运队列按钮（有任务且不在执行中时显示）──
+            val showRenameBtn = renameQueue.isNotEmpty() && renameProgress?.isRunning != true
+            if (showRenameBtn) {
+                Box(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 44.dp).size(28.dp)
+                        .clip(CircleShape).background(Color(0xCC4CAF50))
+                        .clickable {
+                            if (renameProgress?.isRunning == true) return@clickable
+                            viewModel.processNextTask(context.contentResolver)
+                        },
+                    contentAlignment = Alignment.Center
+                ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 11.sp) }
+            }
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
@@ -322,9 +325,11 @@ private fun AlbumGridContent(
                     val p = renameProgress
                     if (p != null) {
                         if (p.isRunning) {
-                            // 搬运进行中 → 显示进度
+                            // 搬运进行中
                             Column {
-                                Text("相册重命名" , fontSize = 14.sp, maxLines = 1)
+                                val label = if (p.totalTasks > 1) "搬运中 (${p.currentTaskIndex + 1}/${p.totalTasks})"
+                                            else "搬运中"
+                                Text(label, fontSize = 14.sp, maxLines = 1)
                                 if (p.currentFileName.isNotEmpty()) {
                                     Text(
                                         "${p.completedCount}/${p.totalCount}  ${p.currentFileName}",
@@ -341,13 +346,9 @@ private fun AlbumGridContent(
                                 }
                             }
                         } else if (p.isDone) {
-                            // 搬运完成/失败
-                            val status = when {
-                                p.allSucceeded -> "✓ 搬运完成"
-                                p.rolledBack -> "✗ 搬运失败，已回滚"
-                                else -> "⚠ ${p.failedCount}个文件失败"
-                            }
-                            Text(status, fontSize = 14.sp)
+                            Text(p.lastResult, fontSize = 14.sp)
+                        } else if (p.lastResult.isNotEmpty()) {
+                            Text(p.lastResult, fontSize = 14.sp)
                         } else {
                             Text("RCGallery")
                         }
