@@ -10,9 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -60,7 +59,7 @@ private const val MAX_AGE_DAYS = 30L
  * 回收站全屏覆盖层。
  * 支持多选、分类筛选、批量操作、清空、过期倒计时。
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrashScreen(
     onBackClick: () -> Unit = {}
@@ -509,7 +508,9 @@ fun TrashScreen(
             },
             containerColor = Color.Black
         ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                // ── 主体：TabRow + 网格 ──
+                Column(modifier = Modifier.fillMaxSize()) {
                 // ── 分类 Tab ──
                 TabRow(
                     selectedTabIndex = activeTab.ordinal,
@@ -619,16 +620,38 @@ fun TrashScreen(
                                     } else {
                                         selectedEntry = entry
                                     }
-                                },
-                                onLongClick = {
-                                    if (!isMultiSelectMode) {
-                                        isMultiSelectMode = true
-                                        selectedUris = setOf(entry.uri)
-                                    }
                                 }
                             )
                         }
                     }
+                }
+
+                // ── 批量选择按钮（非多选模式时左下角显示）──
+                if (!isMultiSelectMode && entries.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .wrapContentSize(Alignment.BottomStart)
+                            .padding(start = 12.dp, bottom = 12.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = Color(0xFF4CAF50),
+                            onClick = {
+                                isMultiSelectMode = true
+                                selectedUris = emptySet()
+                            }
+                        ) {
+                            Text(
+                                "批量选择",
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
                 }
             }
         }
@@ -639,14 +662,12 @@ fun TrashScreen(
 //  网格条目（含多选 checkbox + 过期标签）
 // ══════════════════════════════════════
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TrashGridItem(
     entry: TrashEntry,
     isSelected: Boolean,
     isMultiSelectMode: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onClick: () -> Unit
 ) {
     // 过期天数计算
     val remainingDays = remember(entry.deleteTime) {
@@ -676,14 +697,7 @@ private fun TrashGridItem(
             .aspectRatio(1f)
             .clip(RoundedCornerShape(4.dp))
             .background(if (isSelected) Color(0xFF2A5A2A) else Color(0xFF2A2A2A))
-            .then(
-                if (isSelected) Modifier.padding(0.dp)
-                else Modifier.padding(0.dp)
-            )
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+            .clickable { onClick() }
     ) {
         // 缩略图
         AsyncImage(
