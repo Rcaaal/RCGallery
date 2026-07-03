@@ -71,6 +71,7 @@ fun MediaGridScreen(
 
     // ── Preview overlay 状态（代替 navigation push，防止 RecyclerView 销毁）──
     var selectedPhotoIndex by remember { mutableIntStateOf(-1) }
+    var selectedPhotoItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
     if (selectedPhotoIndex >= 0) {
         BackHandler { selectedPhotoIndex = -1 }
     }
@@ -132,9 +133,14 @@ fun MediaGridScreen(
                                 val rv = RecyclerView(ctx).apply {
                                     layoutManager = GridLayoutManager(ctx, 4)
                                     adapter = SimpleGridAdapter(
-                                        onClick = { index ->
-                                            AppLogger.d("MediaGrid", "click index=$index isVideo=${filteredItems.getOrNull(index)?.isVideo}")
-                                            selectedPhotoIndex = index
+                                        onClick = { item ->
+                                            val index = filteredItems.indexOf(item)
+                                            AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${filteredItems.size}")
+                                            if (index >= 0) {
+                                                selectedPhotoIndex = index
+                                            } else {
+                                                // fallback: 如果 filteredItems 中找不到（理论上不会），用 item.uri 唯一标识
+                                            }
                                         },
                                         context = ctx
                                     )
@@ -243,7 +249,7 @@ private enum class MediaFilterType(val label: String) {
 }
 
 private class SimpleGridAdapter(
-    private val onClick: (Int) -> Unit,
+    private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
     private val context: android.content.Context
 ) : ListAdapter<com.example.rcgallery.model.MediaItem, SimpleGridAdapter.VH>(DiffCallback()) {
 
@@ -292,18 +298,19 @@ private class SimpleGridAdapter(
         itemView: android.view.View,
         private val iv: ImageView,
         private val tv: TextView,
-        private val onClick: (Int) -> Unit,
+        private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
         private val thumbSize: Int,
         private val context: android.content.Context
     ) : RecyclerView.ViewHolder(itemView) {
+        private var currentItem: com.example.rcgallery.model.MediaItem? = null
         init {
             itemView.setOnClickListener {
-                val pos = itemView.tag as? Int ?: return@setOnClickListener
-                if (pos >= 0) onClick(pos)
+                val item = currentItem ?: return@setOnClickListener
+                onClick(item)
             }
         }
         fun bind(item: com.example.rcgallery.model.MediaItem, position: Int) {
-            itemView.tag = position  // View.tag 不依赖 layout，bind 后永远有效
+            currentItem = item
             if (item.isVideo) {
                 // 视频用 Coil 异步加载帧（Coil 2.7.0 内置 VideoFrameDecoder，自动缓存）
                 iv.load(item.uri) { size(thumbSize); crossfade(true) }
