@@ -351,7 +351,7 @@ fun PreviewScreen(
                 val isInfoShown = showInfo && currentItem != null
                 Box(
                     modifier = Modifier
-                        .weight(if (isInfoShown) 0.7f else 1f)
+                        .weight(if (isInfoShown) 0.55f else 1f)
                         .fillMaxWidth()
                         .nestedScroll(overscrollConnection)
                 ) {
@@ -453,14 +453,15 @@ fun PreviewScreen(
                         }
                     }
                 }
-            // ── 图片信息卡片（仅展开时插入 Column，weight 占 30%）──
+            // ── 图片信息卡片（仅展开时插入 Column，weight 占 45%）──
             if (isInfoShown) {
                 Box(
                     modifier = Modifier
-                        .weight(0.3f)
+                        .weight(0.45f)
+                        .padding(top = 28.dp)
                         .fillMaxWidth()
                 ) {
-                    // ── 视频信息卡片的关闭按钮（在卡片外部右上方，用 offset 上移，图片不显示）──
+                    // ── 视频信息卡片的关闭按钮（紧邻 InfoCard 顶部上方）──
                     if (currentItem?.isVideo == true) {
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_close),
@@ -468,16 +469,15 @@ fun PreviewScreen(
                             tint = Color.White,
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .offset(y = (-36).dp)
+                                .offset(y = (-6).dp)
                                 .padding(end = 4.dp)
-                                .size(20.dp)
+                                .size(16.dp)
                                 .clickable { showInfo = false }
                         )
                     }
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(top = 8.dp)
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures { _, dragAmount ->
                                     if (dragAmount > 0) showInfo = false
