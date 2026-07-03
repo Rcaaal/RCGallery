@@ -1,10 +1,8 @@
 package com.example.rcgallery.ui.screen
 
 import android.Manifest
-import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
-import android.provider.MediaStore
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -13,7 +11,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -48,7 +45,6 @@ import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
-import kotlinx.coroutines.delay
 
 /**
  * 相册显示模式。
@@ -158,33 +154,6 @@ fun AlbumGridScreen(
         }
     }
 
-    // ── 相册重命名搬运进度 ──
-    val renameProgress by viewModel.renameProgress.collectAsStateWithLifecycle()
-    val renameQueue by viewModel.renameQueue.collectAsStateWithLifecycle()
-
-    // 授权 launcher（点击[搬N]时触发）
-    val renameAuthLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            AppLogger.d("AlbumGrid", "rename auth OK → executeNextTask")
-            viewModel.executeNextTask(context.contentResolver)
-        } else {
-            AppLogger.d("AlbumGrid", "rename auth denied → cancelNextTask")
-            viewModel.cancelNextTask()
-        }
-    }
-
-    // 全部完成 → 5 秒后自动清除
-    LaunchedEffect(renameProgress) {
-        val p = renameProgress
-        if (p != null && p.isDone) {
-            AppLogger.d("AlbumGrid", "rename done: ${p.lastResult}")
-            delay(5000L)
-            viewModel.clearRenameProgress()
-        }
-    }
-
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             if (!hasPermission) {
@@ -213,8 +182,7 @@ fun AlbumGridScreen(
                             is AlbumDisplayMode.Grid -> "grid_${mode.columns}"
                         }).apply()
                     },
-                    albumRvRef = albumRvRef,
-                    renameProgress = renameProgress
+                    albumRvRef = albumRvRef
                 )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
@@ -232,27 +200,9 @@ fun AlbumGridScreen(
                 MediaGridScreen(
                     albumId = selectedAlbumId!!,
                     albumName = selectedAlbumName,
-                    onBackClick = { selectedAlbumId = null }
+                    onBackClick = { selectedAlbumId = null },
+                    onGoHome = { selectedAlbumId = null }
                 )
-            }
-            // ── 搬运队列按钮（仅在主页显示，进入相册后隐藏）──
-            if (selectedAlbumId == null && renameQueue.isNotEmpty() && renameProgress?.isRunning != true) {
-                AppLogger.d("AlbumGrid", "👉 showRenameBtn: queue=${renameQueue.size} isRunning=${renameProgress?.isRunning}")
-                Box(
-                    modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(40.dp)
-                        .clip(CircleShape).background(Color(0xFF4CAF50))
-                        .clickable {
-                            val uris = viewModel.getNextTaskUris()
-                            if (uris.isNullOrEmpty()) return@clickable
-                            try {
-                                val pending = MediaStore.createWriteRequest(context.contentResolver, uris)
-                                renameAuthLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
-                            } catch (e: Exception) {
-                                viewModel.cancelNextTask()
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) { Text("搬${renameQueue.size}", color = Color.White, fontSize = 15.sp) }
             }
         }
     }
@@ -338,47 +288,12 @@ private fun AlbumGridContent(
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
-    albumRvRef: MutableState<RecyclerView?>,
-    renameProgress: GalleryViewModel.AlbumRenameProgress?  // 搬运进度
+    albumRvRef: MutableState<RecyclerView?>
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    val p = renameProgress
-                    if (p != null) {
-                        if (p.isRunning) {
-                            // 搬运进行中
-                            Column {
-                                val label = if (p.totalTasks > 1) "搬运中 (${p.currentTaskIndex + 1}/${p.totalTasks})"
-                                            else "搬运中"
-                                Text(label, fontSize = 14.sp, maxLines = 1)
-                                if (p.currentFileName.isNotEmpty()) {
-                                    Text(
-                                        "${p.completedCount}/${p.totalCount}  ${p.currentFileName}",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1
-                                    )
-                                } else {
-                                    Text(
-                                        "${p.completedCount}/${p.totalCount}",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        } else if (p.isDone) {
-                            Text(p.lastResult, fontSize = 14.sp)
-                        } else if (p.lastResult.isNotEmpty()) {
-                            Text(p.lastResult, fontSize = 14.sp)
-                        } else {
-                            Text("RCGallery")
-                        }
-                    } else {
-                        Text("RCGallery")
-                    }
-                },
+                title = { Text("RCGallery") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
@@ -414,6 +329,7 @@ private fun AlbumGridContent(
                     val rv = (container as FrameLayout).getChildAt(0) as RecyclerView
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
+                    val prevItems = adapter.items
                     adapter.items = albums
                     val prevMode = adapter.currentMode
                     if (prevMode != displayMode) {
@@ -428,7 +344,7 @@ private fun AlbumGridContent(
                         }
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
-                    } else if (adapter.items !== albums) {
+                    } else if (prevItems !== albums) {
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
                     }

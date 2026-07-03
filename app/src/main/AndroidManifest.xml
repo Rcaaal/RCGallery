@@ -4,6 +4,8 @@
     <!-- 媒体读取权限（Android 16） -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- 全存储管理权限 — 用于文件系统级的目录重命名（File.renameTo） -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:name=".RCGalleryApplication"

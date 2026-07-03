@@ -46,7 +46,8 @@ fun MediaGridScreen(
     albumId: String = "",
     albumName: String = "",
     onMediaClick: (Int) -> Unit = {},
-    onBackClick: () -> Unit = {}
+    onBackClick: () -> Unit = {},
+    onGoHome: () -> Unit = {}    // 直接回到 AlbumGrid 主页
 ) {
     val activity = LocalContext.current as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
@@ -241,6 +242,7 @@ fun MediaGridScreen(
                 PreviewScreen(
                     initialIndex = selectedPhotoIndex,
                     onBackClick = { selectedPhotoIndex = -1 },
+                    onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
                     items = if (activeFilters.isNotEmpty()) filteredItems else null

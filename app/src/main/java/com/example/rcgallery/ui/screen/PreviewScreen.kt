@@ -2,8 +2,12 @@ package com.example.rcgallery.ui.screen
 
 import android.app.Activity
 import android.content.ContentValues
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +52,7 @@ import kotlinx.coroutines.launch
 fun PreviewScreen(
     initialIndex: Int = 0,
     onBackClick: () -> Unit = {},
+    onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
     volumeEnabled: Boolean = false,
     onVolumeToggle: () -> Unit = {},
     items: List<com.example.rcgallery.model.MediaItem>? = null  // 非空时覆盖 ViewModel 的全量数据
@@ -156,19 +161,30 @@ fun PreviewScreen(
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
     }
 
-    // ── 相册重命名（只记录虚拟名+入队列，不弹授权窗）──
+    // ── 相册重命名 ──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
+
+    // 存储管理权限 launcher（跳转系统设置页授权）
+    val manageStorageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        // 从设置页返回，提示用户重新改名
+        Toast.makeText(context, "授权成功，请重新点击相册名进行改名", Toast.LENGTH_SHORT).show()
+    }
 
     // ── 相册重命名对话框 ──
     if (showAlbumRenameDialog && currentItem != null) {
-        val currentAlbumName = viewModel.getAlbumDisplayName(currentItem?.albumId, currentItem?.albumName)
+        val currentAlbumName = currentItem?.albumName ?: "未知"
         var editText by remember { mutableStateOf(currentAlbumName) }
         AlertDialog(
             onDismissRequest = { showAlbumRenameDialog = false },
             title = { Text("重命名相册") },
             text = {
                 Column {
-                    Text("相册名立即更改，返回主页后点击按钮搬运。", color = Color(0xFF999999), fontSize = 13.sp)
+                    val hasManageStorage = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+                    val hint = if (hasManageStorage) "相册名立即更改，文件夹同时重命名。"
+                               else "首次改名需授权，将跳转至系统设置开启权限。"
+                    Text(hint, color = Color(0xFF999999), fontSize = 13.sp)
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = editText,
@@ -185,8 +201,23 @@ fun PreviewScreen(
                     showAlbumRenameDialog = false
                     val bucketId = currentItem?.albumId ?: return@Button
                     val oldName = currentAlbumName
-                    viewModel.buildAndQueueTask(bucketId, oldName, newName)
-                    Toast.makeText(context, "已加入搬运队列 (${viewModel.renameQueue.value.size}个)", Toast.LENGTH_SHORT).show()
+                    if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                        // 有权限 → 直接改名
+                        viewModel.renameNow(bucketId, newName)
+                        Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
+                        onGoHome()
+                    } else {
+                        // 无权限 → 跳转系统设置
+                        try {
+                            manageStorageLauncher.launch(
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                            )
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
@@ -293,7 +324,7 @@ fun PreviewScreen(
                     InfoCard(
                         currentItem!!,
                         onDismiss = { showInfo = false },
-                        albumDisplayName = viewModel.getAlbumDisplayName(currentItem?.albumId, currentItem?.albumName),
+                        albumDisplayName = currentItem?.albumName ?: "未知",
                         onAlbumNameClick = { showAlbumRenameDialog = true }
                     )
                 }
