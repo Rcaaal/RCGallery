@@ -60,7 +60,11 @@ fun PreviewScreen(
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
     // 始终使用 items 参数（与 MediaGridScreen 共享同一引用），不从 ViewModel 收集
-    val mediaItems = items
+    var mediaItems by remember { mutableStateOf(items) }
+    // 当 items 参数变化时同步到本地可变状态（例如从回收站恢复后）
+    LaunchedEffect(items) {
+        if (mediaItems !== items) mediaItems = items
+    }
     val scope = rememberCoroutineScope()
 
     // 用 remember 快照「进入时」的 items 大小，避免 ViewModel 清空数据时误触发返回
@@ -489,7 +493,15 @@ fun PreviewScreen(
                             onDismiss = { showInfo = false },
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
-                            onDeleteClick = { showPermanentDeleteConfirm = true }
+                            onDeleteClick = { showPermanentDeleteConfirm = true },
+                            onFileRenamed = { newFileName ->
+                                val pageIdx = pagerState.currentPage
+                                mediaItems.getOrNull(pageIdx)?.let { oldItem ->
+                                    val updated = mediaItems.toMutableList()
+                                    updated[pageIdx] = oldItem.copy(fileName = newFileName)
+                                    mediaItems = updated
+                                }
+                            }
                         )
                     }
                 } else {
@@ -509,7 +521,15 @@ fun PreviewScreen(
                             onDismiss = { showInfo = false },
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
-                            onDeleteClick = { showPermanentDeleteConfirm = true }
+                            onDeleteClick = { showPermanentDeleteConfirm = true },
+                            onFileRenamed = { newFileName ->
+                                val pageIdx = pagerState.currentPage
+                                mediaItems.getOrNull(pageIdx)?.let { oldItem ->
+                                    val updated = mediaItems.toMutableList()
+                                    updated[pageIdx] = oldItem.copy(fileName = newFileName)
+                                    mediaItems = updated
+                                }
+                            }
                         )
                     }
                 }
@@ -536,7 +556,8 @@ private fun InfoCard(
     onDismiss: () -> Unit,
     albumDisplayName: String,
     onAlbumNameClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onFileRenamed: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -565,6 +586,7 @@ private fun InfoCard(
                         put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
                     }, null, null)
                     showRenameDialog = false
+                    onFileRenamed(pendingDisplayName)
                 } catch (e: Exception) {
                     Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
                 }
@@ -679,6 +701,7 @@ private fun InfoCard(
                                 put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
                             }, null, null)
                             showRenameDialog = false
+                            onFileRenamed(pendingDisplayName)
                         } catch (e: Exception) {
                             Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
                         }

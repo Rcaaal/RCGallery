@@ -553,7 +553,8 @@ fun TrashScreen(
                     }
                 }
 
-                // ── 网格内容 ──
+                // ── 网格区域 + 批量按钮覆盖层（Box 防止 fillMaxSize 挤压按钮）──
+                Box(modifier = Modifier.weight(1f)) {
                 if (entries.isEmpty()) {
                     Box(
                         Modifier.fillMaxSize(),
@@ -626,28 +627,33 @@ fun TrashScreen(
                     }
                 }
 
-                // ── 批量选择按钮（非多选模式时左下角显示）──
-                if (!isMultiSelectMode && entries.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = Color(0xFF4CAF50),
-                        modifier = Modifier
-                            .padding(start = 12.dp, bottom = 12.dp),
-                        onClick = {
-                            isMultiSelectMode = true
-                            selectedUris = emptySet()
+                    // ── 批量选择按钮（覆盖在网格左下角）──
+                    if (!isMultiSelectMode && entries.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(start = 12.dp, bottom = 12.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = Color(0xFF4CAF50),
+                                onClick = {
+                                    isMultiSelectMode = true
+                                    selectedUris = emptySet()
+                                }
+                            ) {
+                                Text(
+                                    "批量选择",
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
-                    ) {
-                        Text(
-                            "批量选择",
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
                     }
-                }
-            }
+                }   // ← Box end
+            }       // ← inner Column end
             }
         }
     }
