@@ -104,6 +104,10 @@ fun MediaGridScreen(
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
+    // ── filteredItems 的 MutableRef（解决 AndroidView.factory 闭包捕获陈旧引用的问题）──
+    val filteredItemsRef = remember { mutableStateOf(filteredItems) }
+    SideEffect { filteredItemsRef.value = filteredItems }
+
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             if (isLoadingAlbum) {
@@ -134,12 +138,16 @@ fun MediaGridScreen(
                                     layoutManager = GridLayoutManager(ctx, 4)
                                     adapter = SimpleGridAdapter(
                                         onClick = { item ->
-                                            val index = filteredItems.indexOf(item)
-                                            AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${filteredItems.size}")
+                                            val items = filteredItemsRef.value
+                                            var index = items.indexOf(item)
+                                            if (index < 0) {
+                                                // fallback: 按 URI 搜索（handle data class equals 不匹配的极端情况）
+                                                val uriStr = item.uri.toString()
+                                                index = items.indexOfFirst { it.uri.toString() == uriStr }
+                                            }
+                                            AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${items.size}")
                                             if (index >= 0) {
                                                 selectedPhotoIndex = index
-                                            } else {
-                                                // fallback: 如果 filteredItems 中找不到（理论上不会），用 item.uri 唯一标识
                                             }
                                         },
                                         context = ctx
