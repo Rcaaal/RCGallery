@@ -583,22 +583,21 @@ fun TrashScreen(
                                         val entry = filteredEntries.getOrNull(idx) ?: return@detectDragGestures
                                         dragStartIndex = idx
                                         lastDragIndex = idx
-                                        // 选中起始项
-                                        selectedUrisState.value = selectedUrisState.value + entry.uri
+                                        // 从当前项开始选中（替换先前选中，拖拽期间以手指范围为精确选择）
+                                        selectedUrisState.value = setOf(entry.uri)
                                     },
                                     onDrag = { change, _ ->
                                         change.consume()
                                         val idx = findItemIndex(change.position.x, change.position.y) ?: return@detectDragGestures
                                         if (idx == lastDragIndex) return@detectDragGestures
                                         lastDragIndex = idx
-                                        // 选中起点到当前位置之间的所有项（Google Photos 风格）
+                                        // 选中 dragStart 到 current 之间的所有项（前后滑动都能取消超出范围的选择）
                                         val minIdx = minOf(dragStartIndex, idx)
                                         val maxIdx = maxOf(dragStartIndex, idx)
                                         val rangeUris = (minIdx..maxIdx).mapNotNull { i ->
                                             filteredEntries.getOrNull(i)?.uri
                                         }.toSet()
-                                        selectedUrisState.value = selectedUrisState.value + rangeUris
-                                        // 自动进入多选模式
+                                        selectedUrisState.value = rangeUris
                                         if (!isMultiSelectMode) isMultiSelectMode = true
                                     },
                                     onDragEnd = { lastDragIndex = -1 },
