@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -180,7 +181,7 @@ fun AlbumGridScreen(
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
             // ── 回收站入口按钮（右上角）──
             Box(
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp).size(28.dp)
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(28.dp)
                     .clip(CircleShape).background(Color(0xCC607D8B))
                     .clickable {
                         showTrash = true
@@ -188,7 +189,12 @@ fun AlbumGridScreen(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                Text("🗑", color = Color.White, fontSize = 14.sp)
+                Icon(
+                    painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                    contentDescription = "回收站",
+                    tint = Color.White,
+                    modifier = Modifier.size(16.dp)
+                )
                 if (trashCount > 0) {
                     Box(
                         modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp)

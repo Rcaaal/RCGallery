@@ -206,6 +206,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun restoreFromTrash(uri: String) {
         trashManager.remove(uri)
         refreshTrashCount()
+        _trashEntries.value = trashManager.getAll()
         refreshCurrentView()
         AppLogger.d("VM", "restoreFromTrash: $uri")
     }
@@ -223,6 +224,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             trashManager.remove(uri)
             refreshTrashCount()
+            _trashEntries.value = trashManager.getAll()
             refreshCurrentView()
             AppLogger.d("VM", "permanentlyDelete: $uri")
         }

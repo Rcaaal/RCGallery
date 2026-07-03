@@ -306,6 +306,7 @@ fun PreviewScreen(
                                         if (showInfo) {
                                             // 信息栏已展开 → 上划快删
                                             val item = currentItem ?: return@ZoomableImage3
+                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
                                             viewModel.moveToTrash(item)
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()
@@ -318,10 +319,8 @@ fun PreviewScreen(
                                                     viewModel.restoreFromTrash(item.uri.toString())
                                                 }
                                             }
-                                            // 翻到下一张或退出
-                                            if (pagerState.currentPage < mediaItems.lastIndex) {
-                                                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
-                                            } else {
+                                            // 删除后 currentPage 自动指到下一张（pageCount-1，索引不变）
+                                            if (isLastPage) {
                                                 onBackClick()
                                             }
                                         } else {
