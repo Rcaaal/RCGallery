@@ -160,6 +160,8 @@ fun PreviewScreen(
                 val item = pendingDeleteItem
                 if (item != null) {
                     viewModel.removeFromMediaItems(item)
+                    // 同步更新本地快照，触发 pager 重组和 empty-return
+                    mediaItems = mediaItems.filterIndexed { i, _ -> i != pagerState.currentPage }
                     showInfo = false
                     pendingDeleteItem = null
                     Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
@@ -314,6 +316,7 @@ fun PreviewScreen(
                             try {
                                 context.contentResolver.delete(item.uri, null, null)
                                 viewModel.removeFromMediaItems(item)
+                                mediaItems = mediaItems.filterIndexed { i, _ -> i != pagerState.currentPage }
                                 showInfo = false
                                 Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
                             } catch (e: Exception) {
@@ -387,9 +390,12 @@ fun PreviewScreen(
                                     onMoveToTrash = {
                                         val trashItem = mediaItems.getOrNull(pagerState.currentPage)
                                         if (trashItem != null) {
-                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
                                             if (showInfo) showInfo = false
                                             viewModel.moveToTrash(trashItem)
+                                            // 从本地快照移除，触发 pager 重组
+                                            val deletedPage = pagerState.currentPage
+                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
+                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
@@ -401,7 +407,7 @@ fun PreviewScreen(
                                                     viewModel.restoreFromTrash(trashItem.uri.toString())
                                                     viewModel.addMediaItemBack(trashItem)
                                                 }
-                                                if (isLastPage) {
+                                                if (wasLastPage) {
                                                     onBackClick()
                                                 }
                                             }
@@ -431,9 +437,12 @@ fun PreviewScreen(
                                         if (showInfo) {
                                             // 信息栏已展开 → 上划快删
                                             val item = currentItem ?: return@ZoomableImage3
-                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
                                             showInfo = false  // 关闭信息栏，防快速连击
                                             viewModel.moveToTrash(item)
+                                            // 从本地快照移除，触发 pager 重组
+                                            val deletedPage = pagerState.currentPage
+                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
+                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
@@ -447,7 +456,7 @@ fun PreviewScreen(
                                                     viewModel.addMediaItemBack(item)
                                                 }
                                                 // Snackbar 结束后再退出（保留 coroutine scope 给撤销用）
-                                                if (isLastPage) {
+                                                if (wasLastPage) {
                                                     onBackClick()
                                                 }
                                             }
