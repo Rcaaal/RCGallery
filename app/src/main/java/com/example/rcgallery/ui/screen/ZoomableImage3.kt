@@ -32,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.absoluteValue
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private const val DOUBLE_TAP_ZOOM = 2.5f
@@ -44,9 +45,36 @@ private data class InertiaParams(
     val durationMs: Int
 )
 
-private fun calcImageFitHeight(boxSize: IntSize, intrinsicSize: Size): Float {
-    if (intrinsicSize.width <= 0f || intrinsicSize.height <= 0f) return boxSize.height.toFloat()
-    return boxSize.width.toFloat() * intrinsicSize.height / intrinsicSize.width
+/**
+ * 计算 FIT_CENTER 的实际渲染尺寸和偏移。
+ * graphicsLayer 缩放的是整个 AndroidView（boxSize），FIT_CENTER 会让内容
+ * 在 View 内居中有留白。边界计算需要减去这些留白，确保内容边缘=屏幕边缘。
+ */
+private data class FitRender(
+    val renderedWidth: Float,
+    val renderedHeight: Float,
+    val offsetX: Float,   // FIT_CENTER 产生的水平留白偏移
+    val offsetY: Float    // FIT_CENTER 产生的垂直留白偏移
+)
+
+private fun computeFitRender(boxSize: IntSize, intrinsicSize: Size): FitRender {
+    if (intrinsicSize.width <= 0f || intrinsicSize.height <= 0f) {
+        return FitRender(boxSize.width.toFloat(), boxSize.height.toFloat(), 0f, 0f)
+    }
+    val fitScale = min(boxSize.width / intrinsicSize.width, boxSize.height / intrinsicSize.height)
+    val rw = intrinsicSize.width * fitScale
+    val rh = intrinsicSize.height * fitScale
+    return FitRender(rw, rh, (boxSize.width - rw) / 2f, (boxSize.height - rh) / 2f)
+}
+
+/** 缩放 S 倍后，内容左/右边缘与屏幕边缘对齐所需的最大水平偏移。 */
+private fun maxScrollX(viewW: Float, fit: FitRender, scale: Float): Float {
+    return ((viewW * (scale - 1f) / 2f) - (fit.offsetX * scale)).coerceAtLeast(0f)
+}
+
+/** 缩放 S 倍后，内容上/下边缘与屏幕边缘对齐所需的最大垂直偏移。 */
+private fun maxScrollY(viewH: Float, fit: FitRender, scale: Float): Float {
+    return ((viewH * (scale - 1f) / 2f) - (fit.offsetY * scale)).coerceAtLeast(0f)
 }
 
 /**
@@ -119,11 +147,11 @@ fun ZoomableImage3(
                         } else {
                             val newScale = DOUBLE_TAP_ZOOM
                             scale = newScale
-                            val imgH = calcImageFitHeight(size, intrinsicSize)
-                            val maxX = size.width * (newScale - 1f) / 2f
-                            val maxY = ((imgH * newScale - size.height) / 2f).coerceAtLeast(0f)
-                            offsetX = ((size.width / 2f - downX) * (newScale - 1f) / newScale).coerceIn(-maxX, maxX)
-                            offsetY = ((size.height / 2f - downY) * (newScale - 1f) / newScale).coerceIn(-maxY, maxY)
+                            val fit = computeFitRender(size, intrinsicSize)
+                            val mx = maxScrollX(size.width.toFloat(), fit, newScale)
+                            val my = maxScrollY(size.height.toFloat(), fit, newScale)
+                            offsetX = ((size.width / 2f - downX) * (newScale - 1f) / newScale).coerceIn(-mx, mx)
+                            offsetY = ((size.height / 2f - downY) * (newScale - 1f) / newScale).coerceIn(-my, my)
                         }
                         // 消费后续所有事件
                         do {
@@ -154,10 +182,10 @@ fun ZoomableImage3(
                             if (ns <= 1f) {
                                 offsetX = 0f; offsetY = 0f
                             } else {
-                                val imgH = calcImageFitHeight(size, intrinsicSize)
-                                val mx = size.width * (ns - 1f) / 2f
-                                val my = ((imgH * ns - size.height) / 2f).coerceAtLeast(0f)
-                                AppLogger.d("Zoom", "pinch scale=$ns imgH=$imgH mx=$mx my=$my size=$size intrinsic=$intrinsicSize")
+                                val fit = computeFitRender(size, intrinsicSize)
+                                val mx = maxScrollX(size.width.toFloat(), fit, ns)
+                                val my = maxScrollY(size.height.toFloat(), fit, ns)
+                                AppLogger.d("Zoom", "pinch scale=$ns mx=$mx my=$my size=$size intrinsic=$intrinsicSize fitOff=(${fit.offsetX},${fit.offsetY})")
                                 offsetX = offsetX.coerceIn(-mx, mx)
                                 offsetY = offsetY.coerceIn(-my, my)
                             }
@@ -166,11 +194,11 @@ fun ZoomableImage3(
                             hadMovement = true
                         } else if (zoomed) {
                             // ── 已缩放 + 单指拖拽：consume ──
-                            val maxX = size.width * (scale - 1f) / 2f
-                            val imgH = calcImageFitHeight(size, intrinsicSize)
-                            val maxY = ((imgH * scale - size.height) / 2f).coerceAtLeast(0f)
+                            val fit = computeFitRender(size, intrinsicSize)
+                            val maxX = maxScrollX(size.width.toFloat(), fit, scale)
+                            val maxY = maxScrollY(size.height.toFloat(), fit, scale)
                             if (frameCount % 5 == 0) {
-                                AppLogger.d("Zoom", "drag scale=$scale imgH=$imgH maxX=$maxX maxY=$maxY off=(${offsetX.roundToInt()},${offsetY.roundToInt()}) pan=(${pan.x.roundToInt()},${pan.y.roundToInt()})")
+                                AppLogger.d("Zoom", "drag scale=$scale maxX=$maxX maxY=$maxY off=(${offsetX.roundToInt()},${offsetY.roundToInt()}) pan=(${pan.x.roundToInt()},${pan.y.roundToInt()}) fitOff=(${fit.offsetX},${fit.offsetY})")
                             }
 
                             // 方案 C：边缘翻页仅当 X 为主轴向时才触发（|X| >= |Y| * 1.5），
@@ -234,9 +262,9 @@ fun ZoomableImage3(
 
                     // ── 惯性（方案 C：X/Y 独立计算，不再二选一取主轴向）──
                     if (scale > 1f && !didEdgeSwipe && frameCount > 0) {
-                        val maxX = size.width * (scale - 1f) / 2f
-                        val imgH = calcImageFitHeight(size, intrinsicSize)
-                        val maxY = ((imgH * scale - size.height) / 2f).coerceAtLeast(0f)
+                        val fit = computeFitRender(size, intrinsicSize)
+                        val maxX = maxScrollX(size.width.toFloat(), fit, scale)
+                        val maxY = maxScrollY(size.height.toFloat(), fit, scale)
 
                         val targetX = (offsetX + smoothX * InertiaSettings.speedMultiplierX / InertiaSettings.decay).coerceIn(-maxX, maxX)
                         val targetY = (offsetY + smoothY * InertiaSettings.speedMultiplierY / InertiaSettings.decay).coerceIn(-maxY, maxY)
