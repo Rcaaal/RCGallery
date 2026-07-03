@@ -458,38 +458,32 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 左侧按钮组（信息 + PiP，与控制面板同显隐）──
+            // ── 左侧按钮组（信息 + PiP，与控制面板同显隐，纯图标无背景，相同大小）──
             if (!hideUiOverlays && controllerVisible) {
                 Column(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .padding(start = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // 信息按钮（白底圆）
-                    Box(
+                    // 信息按钮（纯图标）
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_info),
+                        contentDescription = "文件信息",
+                        tint = Color.White,
                         modifier = Modifier
-                            .size(36.dp)
-                            .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape)
-                            .clickable { onShowInfoClick() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(com.example.rcgallery.R.drawable.ic_info),
-                            contentDescription = "文件信息",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    // 小窗按钮（仅图标，无背景装饰）
+                            .size(24.dp)
+                            .clickable { onShowInfoClick() }
+                    )
+                    // 小窗按钮（纯图标）
                     if (onRequestPip != null) {
                         Icon(
                             painter = painterResource(com.example.rcgallery.R.drawable.ic_pip),
                             contentDescription = "小窗播放",
-                            tint = Color.White.copy(alpha = 0.8f),
+                            tint = Color.White,
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(24.dp)
                                 .clickable {
                                     AppLogger.d("VideoPlayer", "PiP button clicked")
                                     onRequestPip()
@@ -499,24 +493,18 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 删除按钮（常驻右上角，不随控制面板显隐，走回收站）──
+            // ── 删除按钮（常驻右上角，不随控制面板显隐，纯图标无背景）──
             if (!hideUiOverlays) {
-                Box(
+                Icon(
+                    painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                    contentDescription = "移至回收站",
+                    tint = Color(0xFFFF5252),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(top = 4.dp, end = 4.dp)
-                        .size(36.dp)
-                        .background(color = Color.Black.copy(alpha = 0.4f), shape = CircleShape)
-                        .clickable { onMoveToTrash() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "移至回收站",
-                        tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                        .padding(top = 8.dp, end = 8.dp)
+                        .size(24.dp)
+                        .clickable { onMoveToTrash() }
+                )
             }
 
             // ── 音量按钮（PiP 时隐藏）──

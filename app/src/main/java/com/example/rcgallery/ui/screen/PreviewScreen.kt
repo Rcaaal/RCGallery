@@ -271,7 +271,15 @@ fun PreviewScreen(
             onDismissRequest = { if (!isPermanentDeleting) showPermanentDeleteConfirm = false },
             title = { Text("永久删除") },
             text = {
-                Text("文件「${item.fileName}」将被从设备中彻底删除，无法恢复。\n确定要继续吗？")
+                Column {
+                    Text("文件「${item.fileName}」将被从设备中彻底删除，无法恢复。\n确定要继续吗？")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "不经过回收站，直接删除",
+                        color = Color(0xFFFF5252),
+                        fontSize = 12.sp
+                    )
+                }
             },
             confirmButton = {
                 Button(
@@ -450,19 +458,37 @@ fun PreviewScreen(
                     modifier = Modifier
                         .weight(0.3f)
                         .fillMaxWidth()
-                        .pointerInput(Unit) {
-                            detectVerticalDragGestures { _, dragAmount ->
-                                if (dragAmount > 0) showInfo = false
-                            }
-                        }
                 ) {
-                    InfoCard(
-                        currentItem!!,
-                        onDismiss = { showInfo = false },
-                        albumDisplayName = currentItem?.albumName ?: "未知",
-                        onAlbumNameClick = { showAlbumRenameDialog = true },
-                        onDeleteClick = { showPermanentDeleteConfirm = true }
-                    )
+                    // ── 视频信息卡片的关闭按钮（在卡片外部右上角，图片不显示）──
+                    if (currentItem?.isVideo == true) {
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_close),
+                            contentDescription = "关闭信息",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 2.dp, end = (-4).dp)
+                                .size(18.dp)
+                                .clickable { showInfo = false }
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures { _, dragAmount ->
+                                    if (dragAmount > 0) showInfo = false
+                                }
+                            }
+                    ) {
+                        InfoCard(
+                            currentItem!!,
+                            onDismiss = { showInfo = false },
+                            albumDisplayName = currentItem?.albumName ?: "未知",
+                            onAlbumNameClick = { showAlbumRenameDialog = true },
+                            onDeleteClick = { showPermanentDeleteConfirm = true }
+                        )
+                    }
                 }
             }
             }
@@ -584,21 +610,15 @@ private fun InfoCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "不经过回收站，直接删除",
-                    color = Color(0xFF666666),
-                    fontSize = 10.sp
-                )
-                Spacer(Modifier.width(4.dp))
                 IconButton(
                     onClick = onDeleteClick,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
                         painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_trash),
                         contentDescription = "永久删除",
                         tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
