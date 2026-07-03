@@ -57,20 +57,37 @@ fun TrashScreen(
     // ── 选中条目操作对话框 ──
     var selectedEntry by remember { mutableStateOf<TrashEntry?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
 
     // ── 永久删除 launcher（Android 10+ 需要 createDeleteRequest IntentSender）──
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            selectedEntry?.let { entry ->
-                viewModel.permanentlyDeleteConfirmed(entry.uri)
-                Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+        try {
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
+                val entry = selectedEntry
+                if (entry != null) {
+                    viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
+                    Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
             }
-        } else {
-            Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            com.example.rcgallery.util.AppLogger.e("Trash", "permanent delete callback error", e)
+            Toast.makeText(context, "删除操作异常", Toast.LENGTH_SHORT).show()
+        } finally {
+            selectedEntry = null
+            isDeleting = false
         }
-        selectedEntry = null
+    }
+
+    // 退出 TrashScreen 时清理 pending 状态（防止回调访问 stale entry 或启动中状态的 launcher）
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            showDeleteConfirm = false
+            isDeleting = false
+        }
     }
 
     // 永久删除确认对话框
@@ -85,30 +102,37 @@ fun TrashScreen(
             confirmButton = {
                 Button(
                     onClick = {
+                        if (isDeleting) return@Button
+                        isDeleting = true
                         showDeleteConfirm = false
                         // 用 createDeleteRequest 物理删除（Android 10+），低版本直接删
                         if (Build.VERSION.SDK_INT >= 30) {
                             try {
+                                val uri = Uri.parse(entry.uri)
+                                if (uri == null || uri.toString().isBlank()) {
+                                    Toast.makeText(context, "无效的文件 URI", Toast.LENGTH_SHORT).show()
+                                    selectedEntry = null; isDeleting = false; return@Button
+                                }
                                 val pending = MediaStore.createDeleteRequest(
-                                    context.contentResolver, listOf(Uri.parse(entry.uri))
+                                    context.contentResolver, listOf(uri)
                                 )
                                 deleteRequestLauncher.launch(
                                     IntentSenderRequest.Builder(pending.intentSender).build()
                                 )
                             } catch (e: Exception) {
                                 Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
-                                selectedEntry = null
+                                selectedEntry = null; isDeleting = false
                             }
                         } else {
                             // Android 9 及以下直接 contentResolver.delete
                             try {
                                 context.contentResolver.delete(Uri.parse(entry.uri), null, null)
-                                viewModel.permanentlyDeleteConfirmed(entry.uri)
+                                viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
                                 Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
                             } catch (e: Exception) {
                                 Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
                             }
-                            selectedEntry = null
+                            selectedEntry = null; isDeleting = false
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -145,6 +169,7 @@ fun TrashScreen(
                     Button(
                         onClick = {
                             viewModel.restoreFromTrash(entry.uri)
+                            viewModel.loadAlbums()  // 恢复后刷新相册计数
                             selectedEntry = null
                             Toast.makeText(context, "已恢复", Toast.LENGTH_SHORT).show()
                         }

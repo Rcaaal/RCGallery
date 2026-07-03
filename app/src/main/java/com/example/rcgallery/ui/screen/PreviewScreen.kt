@@ -316,12 +316,14 @@ fun PreviewScreen(
                                                     duration = SnackbarDuration.Short
                                                 )
                                                 if (result == SnackbarResult.ActionPerformed) {
+                                                    // 撤销：清索引 + 加回列表（增量，不走 loadMedia）
                                                     viewModel.restoreFromTrash(item.uri.toString())
+                                                    viewModel.addMediaItemBack(item)
                                                 }
-                                            }
-                                            // 删除后 currentPage 自动指到下一张（pageCount-1，索引不变）
-                                            if (isLastPage) {
-                                                onBackClick()
+                                                // Snackbar 结束后再退出（保留 coroutine scope 给撤销用）
+                                                if (isLastPage) {
+                                                    onBackClick()
+                                                }
                                             }
                                         } else {
                                             showInfo = true

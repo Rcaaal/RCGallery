@@ -225,8 +225,7 @@ fun MediaGridScreen(
                     initialIndex = selectedPhotoIndex,
                     onBackClick = {
                         selectedPhotoIndex = -1
-                        // 删除后返回时强制刷新媒体列表，确保 RecyclerView 索引正确
-                        viewModel.loadMedia(albumId = albumId)
+                        // 删除/撤销后 _mediaItems 已被增量修改，无需 loadMedia 全量重查
                     },
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,

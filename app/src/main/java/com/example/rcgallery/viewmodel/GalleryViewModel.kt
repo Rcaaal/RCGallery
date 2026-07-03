@@ -192,7 +192,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             )
         )
         refreshTrashCount()
-        // 如果当前正在浏览该相册，从列表中移除
+        // 如果当前正在浏览该相册，从列表中移除（同步过滤，不走 loadMedia 全量重查）
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
         // 直接更新相册计数（减 1），不走全量 loadAlbums
         _albums.value = _albums.value.map { album ->
@@ -202,26 +202,45 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
+     * Snackbar 撤销时把删除的项加回列表（增量恢复，不走 loadMedia 全量重查）。
+     * 仅用于 PreviewScreen 的 Snackbar 撤销路径。
+     */
+    fun addMediaItemBack(item: MediaItem) {
+        _mediaItems.value = (_mediaItems.value + item).sortedByDescending { it.dateAdded }
+        _albums.value = _albums.value.map { album ->
+            if (album.bucketId == item.albumId) album.copy(count = album.count + 1) else album
+        }
+        AppLogger.d("VM", "addMediaItemBack: ${item.fileName}")
+    }
+
+    /**
      * 从回收站恢复文件（只清除索引标记，不涉及文件操作）。
+     * ⚠️ 不再调用 refreshCurrentView()，避免异步 loadMedia 与同步过滤产生竞态。
+     * 调用方（TrashScreen/PreviewScreen）根据需要自行调用 loadAlbums()。
      */
     fun restoreFromTrash(uri: String) {
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
-        refreshCurrentView()
         AppLogger.d("VM", "restoreFromTrash: $uri")
     }
 
     /**
      * 从回收站永久删除文件（物理删除 + 清除索引）。
-     * 物理删除需由 UI 层通过 createDeleteRequest 执行成功后再调此方法。
+     * ⚠️ 不再调用 refreshCurrentView()，避免异步 loadMedia 竞态。
      * @param uri 已物理删除的文件的 URI（只需从索引中移除）
+     * @param albumId 可选的相册 ID，用于同步更新相册计数
      */
-    fun permanentlyDeleteConfirmed(uri: String) {
+    fun permanentlyDeleteConfirmed(uri: String, albumId: String? = null) {
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
-        refreshCurrentView()
+        // 同步更新相册计数
+        if (albumId != null) {
+            _albums.value = _albums.value.map { album ->
+                if (album.bucketId == albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+            }
+        }
         AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
     }
 

@@ -36,10 +36,13 @@ class TrashManager(private val context: Context) {
                 val json = file.readText().trim()
                 if (json.isEmpty() || json == "[]") return emptyList()
                 val arr = JSONArray(json)
-                (0 until arr.length()).map { i ->
+                (0 until arr.length()).mapNotNull { i ->
                     val obj = arr.getJSONObject(i)
+                    val uri = obj.getString("uri")
+                    // 过滤空白 URI（防御 corrupted JSON）
+                    if (uri.isBlank()) return@mapNotNull null
                     TrashEntry(
-                        uri = obj.getString("uri"),
+                        uri = uri,
                         filePath = obj.optString("filePath", ""),
                         fileName = obj.optString("fileName", ""),
                         deleteTime = obj.optLong("deleteTime", 0L),
