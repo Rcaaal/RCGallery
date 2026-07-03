@@ -192,9 +192,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refreshTrashCount()
         // 如果当前正在浏览该相册，从列表中移除（同步过滤，不走 loadMedia 全量重查）
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
-        // 直接更新相册计数（减 1），不走全量 loadAlbums
-        _albums.value = _albums.value.map { album ->
-            if (album.bucketId == item.albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+        // 直接更新相册计数（减 1），count=0 的相册自动移除
+        _albums.value = _albums.value.mapNotNull { album ->
+            if (album.bucketId == item.albumId) {
+                val newCount = (album.count - 1).coerceAtLeast(0)
+                if (newCount <= 0) null else album.copy(count = newCount)
+            } else {
+                album
+            }
         }
         AppLogger.d("VM", "moveToTrash: ${item.fileName}")
     }
@@ -205,8 +210,23 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     fun addMediaItemBack(item: MediaItem) {
         _mediaItems.value = (_mediaItems.value + item).sortedByDescending { it.dateAdded }
-        _albums.value = _albums.value.map { album ->
-            if (album.bucketId == item.albumId) album.copy(count = album.count + 1) else album
+        // 如果相册已被移除（上次 moveToTrash 时 count=0），重新加入
+        val existingAlbum = _albums.value.find { it.bucketId == item.albumId }
+        _albums.value = if (existingAlbum != null) {
+            _albums.value.map { album ->
+                if (album.bucketId == item.albumId) album.copy(count = album.count + 1) else album
+            }
+        } else {
+            _albums.value + Album(
+                bucketId = item.albumId ?: "",
+                bucketName = item.albumName ?: "Unknown",
+                coverUri = item.uri,
+                count = 1,
+                totalSize = item.size,
+                imageCount = if (item.isImage) 1 else 0,
+                videoCount = if (item.isVideo) 1 else 0,
+                gifCount = if (item.isGif) 1 else 0
+            )
         }
         AppLogger.d("VM", "addMediaItemBack: ${item.fileName}")
     }
