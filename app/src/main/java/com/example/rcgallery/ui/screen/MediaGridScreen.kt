@@ -223,7 +223,11 @@ fun MediaGridScreen(
             if (selectedPhotoIndex >= 0) {
                 PreviewScreen(
                     initialIndex = selectedPhotoIndex,
-                    onBackClick = { selectedPhotoIndex = -1 },
+                    onBackClick = {
+                        selectedPhotoIndex = -1
+                        // 删除后返回时强制刷新媒体列表，确保 RecyclerView 索引正确
+                        viewModel.loadMedia(albumId = albumId)
+                    },
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },

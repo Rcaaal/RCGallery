@@ -189,15 +189,6 @@ class MediaRepository(private val context: Context) {
             }
         }
     }
-
-    // ── 删除 ──
-
-    fun deleteMediaItems(uris: List<Uri>): Result<Unit> = runCatching {
-        for (uri in uris) {
-            context.contentResolver.delete(uri, null, null)
-        }
-    }
-
     // ── 内部 URI 构建 ──
 
     private object ContentUriBuilder {

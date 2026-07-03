@@ -1,7 +1,14 @@
 package com.example.rcgallery.ui.screen
 
+import android.content.IntentSender
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -51,6 +58,21 @@ fun TrashScreen(
     var selectedEntry by remember { mutableStateOf<TrashEntry?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
+    // ── 永久删除 launcher（Android 10+ 需要 createDeleteRequest IntentSender）──
+    val deleteRequestLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            selectedEntry?.let { entry ->
+                viewModel.permanentlyDeleteConfirmed(entry.uri)
+                Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
+        }
+        selectedEntry = null
+    }
+
     // 永久删除确认对话框
     if (showDeleteConfirm && selectedEntry != null) {
         val entry = selectedEntry!!
@@ -64,9 +86,30 @@ fun TrashScreen(
                 Button(
                     onClick = {
                         showDeleteConfirm = false
-                        selectedEntry = null
-                        viewModel.permanentlyDelete(entry.uri)
-                        Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                        // 用 createDeleteRequest 物理删除（Android 10+），低版本直接删
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            try {
+                                val pending = MediaStore.createDeleteRequest(
+                                    context.contentResolver, listOf(Uri.parse(entry.uri))
+                                )
+                                deleteRequestLauncher.launch(
+                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
+                                selectedEntry = null
+                            }
+                        } else {
+                            // Android 9 及以下直接 contentResolver.delete
+                            try {
+                                context.contentResolver.delete(Uri.parse(entry.uri), null, null)
+                                viewModel.permanentlyDeleteConfirmed(entry.uri)
+                                Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                            }
+                            selectedEntry = null
+                        }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("删除") }

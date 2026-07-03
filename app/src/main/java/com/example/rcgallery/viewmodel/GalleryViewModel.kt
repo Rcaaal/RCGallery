@@ -1,7 +1,6 @@
 package com.example.rcgallery.viewmodel
 
 import android.app.Application
-import android.net.Uri
 import android.media.MediaScannerConnection
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -215,21 +214,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * 从回收站永久删除文件（物理删除 + 清除索引）。
+     * 物理删除需由 UI 层通过 createDeleteRequest 执行成功后再调此方法。
+     * @param uri 已物理删除的文件的 URI（只需从索引中移除）
      */
-    fun permanentlyDelete(uri: String, item: MediaItem? = null) {
-        viewModelScope.launch {
-            try {
-                // 物理删除
-                repository.deleteMediaItems(listOf(Uri.parse(uri)))
-            } catch (e: Exception) {
-                AppLogger.e("VM", "permanentlyDelete failed", e)
-            }
-            trashManager.remove(uri)
-            refreshTrashCount()
-            _trashEntries.value = trashManager.getAll()
-            refreshCurrentView()
-            AppLogger.d("VM", "permanentlyDelete: $uri")
-        }
+    fun permanentlyDeleteConfirmed(uri: String) {
+        trashManager.remove(uri)
+        refreshTrashCount()
+        _trashEntries.value = trashManager.getAll()
+        refreshCurrentView()
+        AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
     }
 
     /** 获取全部回收站条目（供 TrashScreen 使用） */
