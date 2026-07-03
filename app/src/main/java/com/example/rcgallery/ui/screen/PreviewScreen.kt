@@ -533,7 +533,12 @@ fun PreviewScreen(
                                 val pageIdx = pagerState.currentPage
                                 val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
                                 mediaItems = mediaItems.mapIndexed { i, item ->
-                                    if (i == pageIdx) item.copy(fileName = newFileName) else item
+                                    if (i == pageIdx) {
+                                        val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
+                                        item.copy(fileName = newFileName, filePath = newPath)
+                                    } else {
+                                        item
+                                    }
                                 }
                                 renameVersion++
                                 if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
@@ -564,7 +569,12 @@ fun PreviewScreen(
                                 val pageIdx = pagerState.currentPage
                                 val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
                                 mediaItems = mediaItems.mapIndexed { i, item ->
-                                    if (i == pageIdx) item.copy(fileName = newFileName) else item
+                                    if (i == pageIdx) {
+                                        val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
+                                        item.copy(fileName = newFileName, filePath = newPath)
+                                    } else {
+                                        item
+                                    }
                                 }
                                 renameVersion++
                                 if (targetUri != null) viewModel.renameFile(targetUri, newFileName)

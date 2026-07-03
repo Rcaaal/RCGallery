@@ -314,7 +314,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     fun renameFile(uri: String, newFileName: String) {
         _mediaItems.value = _mediaItems.value.map { item ->
-            if (item.uri.toString() == uri) item.copy(fileName = newFileName) else item
+            if (item.uri.toString() == uri) {
+                val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
+                item.copy(fileName = newFileName, filePath = newPath)
+            } else {
+                item
+            }
         }
         AppLogger.d("VM", "renameFile: $uri → $newFileName")
     }
