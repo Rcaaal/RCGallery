@@ -148,12 +148,20 @@ fun PreviewScreen(
                 val item = pendingDeleteItem
                 if (item != null) {
                     viewModel.removeFromMediaItems(item)
-                    // 从本地快照移除，pager 自动跳到下一项
                     val page = pagerState.currentPage
+                    val newSize = mediaItems.size - 1
                     mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
                     showInfo = false
                     pendingDeleteItem = null
                     Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                    // 动画翻到下一页
+                    if (newSize > 0) {
+                        val targetPage = page.coerceIn(0, newSize - 1)
+                        scope.launch {
+                            delay(50)
+                            pagerState.animateScrollToPage(targetPage)
+                        }
+                    }
                 }
             } else {
                 Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
@@ -306,9 +314,16 @@ fun PreviewScreen(
                                 context.contentResolver.delete(item.uri, null, null)
                                 viewModel.removeFromMediaItems(item)
                                 val page = pagerState.currentPage
+                                val newSize = mediaItems.size - 1
                                 mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
                                 showInfo = false
                                 Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                                if (newSize > 0) {
+                                    scope.launch {
+                                        delay(50)
+                                        pagerState.animateScrollToPage(page.coerceIn(0, newSize - 1))
+                                    }
+                                }
                             } catch (e: Exception) {
                                 Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
                             }
@@ -364,6 +379,7 @@ fun PreviewScreen(
                         pageSpacing = 0.dp
                     ) { page ->
                         val item = mediaItems.getOrNull(page)
+                        key(item?.uri ?: page) {
                         if (item != null) {
                             if (item.isVideo) {
                                 VideoPlayer(
@@ -382,11 +398,16 @@ fun PreviewScreen(
                                         if (trashItem != null) {
                                             if (showInfo) showInfo = false
                                             viewModel.moveToTrash(trashItem)
-                                            // 从本地快照移除，pager 跳到下一项
                                             val deletedPage = pagerState.currentPage
                                             val wasLastPage = deletedPage >= mediaItems.lastIndex
                                             mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
+                                                // 先翻到下一页
+                                                if (!wasLastPage && mediaItems.isNotEmpty()) {
+                                                    delay(50)
+                                                    pagerState.animateScrollToPage(deletedPage.coerceAtMost(mediaItems.lastIndex))
+                                                }
+                                                // 再显示 Snackbar
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
                                                     message = "已移至回收站",
@@ -432,11 +453,16 @@ fun PreviewScreen(
                                             val item = currentItem ?: return@ZoomableImage3
                                             showInfo = false  // 关闭信息栏，防快速连击
                                             viewModel.moveToTrash(item)
-                                            // 从本地快照移除，pager 跳到下一项
                                             val deletedPage = pagerState.currentPage
                                             val wasLastPage = deletedPage >= mediaItems.lastIndex
                                             mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
+                                                // 先翻到下一页
+                                                if (!wasLastPage && mediaItems.isNotEmpty()) {
+                                                    delay(50)
+                                                    pagerState.animateScrollToPage(deletedPage.coerceAtMost(mediaItems.lastIndex))
+                                                }
+                                                // 再显示 Snackbar
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
                                                     message = "已移至回收站",
@@ -464,8 +490,9 @@ fun PreviewScreen(
                                 )
                             }
                         }
-                    }
-                }
+                    }   // ← key(uri) end
+                }   // ← page lambda end
+            }   // ← Box weight end
             // ── 信息卡片（展开时插入 Column，weight 占比例）──
             if (isInfoShown) {
                 if (currentItem?.isVideo == true) {
