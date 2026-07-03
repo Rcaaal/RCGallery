@@ -157,6 +157,7 @@ fun ZoomableImage3(
                                 val imgH = calcImageFitHeight(size, intrinsicSize)
                                 val mx = size.width * (ns - 1f) / 2f
                                 val my = ((imgH * ns - size.height) / 2f).coerceAtLeast(0f)
+                                AppLogger.d("Zoom", "pinch scale=$ns imgH=$imgH mx=$mx my=$my size=$size intrinsic=$intrinsicSize")
                                 offsetX = offsetX.coerceIn(-mx, mx)
                                 offsetY = offsetY.coerceIn(-my, my)
                             }
@@ -168,6 +169,9 @@ fun ZoomableImage3(
                             val maxX = size.width * (scale - 1f) / 2f
                             val imgH = calcImageFitHeight(size, intrinsicSize)
                             val maxY = ((imgH * scale - size.height) / 2f).coerceAtLeast(0f)
+                            if (frameCount % 5 == 0) {
+                                AppLogger.d("Zoom", "drag scale=$scale imgH=$imgH maxX=$maxX maxY=$maxY off=(${offsetX.roundToInt()},${offsetY.roundToInt()}) pan=(${pan.x.roundToInt()},${pan.y.roundToInt()})")
+                            }
 
                             // 方案 C：边缘翻页仅当 X 为主轴向时才触发（|X| >= |Y| * 1.5），
                             // 斜向到边缘允许 Y 继续滑动
@@ -276,9 +280,11 @@ fun ZoomableImage3(
                                     drawable.intrinsicWidth.toFloat(),
                                     drawable.intrinsicHeight.toFloat()
                                 )
+                                AppLogger.d("Zoom", "decode OK uri=${uri.lastPathSegment} intrinsic=${drawable.intrinsicWidth}x${drawable.intrinsicHeight}")
                             }
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
                             if (iv.tag != loadUri) return@launch
+                            AppLogger.d("Zoom", "ImageDecoder fallback uri=${uri.lastPathSegment} err=${e.message}")
                             iv.load(uri) { crossfade(false) }
                         }
                     }
