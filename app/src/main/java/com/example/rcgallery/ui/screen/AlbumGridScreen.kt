@@ -179,36 +179,20 @@ fun AlbumGridScreen(
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
-            // ── 回收站入口按钮（右上角）──
-            Box(
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp).size(28.dp)
-                    .clip(CircleShape).background(Color(0xCC607D8B))
+            // ── 回收站入口按钮（右上角，纯 SVG 图标）──
+            Icon(
+                painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                contentDescription = "回收站",
+                tint = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 62.dp, end = 8.dp)
+                    .size(22.dp)
                     .clickable {
                         showTrash = true
                         viewModel.loadTrashEntries()
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                    contentDescription = "回收站",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
-                if (trashCount > 0) {
-                    Box(
-                        modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp)
-                            .size(16.dp).clip(CircleShape).background(Color.Red),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        androidx.compose.material3.Text(
-                            text = if (trashCount > 99) "99+" else trashCount.toString(),
-                            color = Color.White,
-                            fontSize = 9.sp
-                        )
                     }
-                }
-            }
+            )
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
             if (selectedAlbumId != null) {

@@ -195,8 +195,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refreshTrashCount()
         // 如果当前正在浏览该相册，从列表中移除
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
-        // 刷新相册列表（调整计数）
-        loadAlbums()
+        // 直接更新相册计数（减 1），不走全量 loadAlbums
+        _albums.value = _albums.value.map { album ->
+            if (album.bucketId == item.albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+        }
         AppLogger.d("VM", "moveToTrash: ${item.fileName}")
     }
 

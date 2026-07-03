@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.screen
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -176,7 +177,7 @@ private fun TrashGridItem(
     ) {
         // 缩略图（Coil 自动从 URI 加载）
         AsyncImage(
-            model = entry.uri,
+            model = remember(entry.uri) { Uri.parse(entry.uri) },
             contentDescription = entry.fileName,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
