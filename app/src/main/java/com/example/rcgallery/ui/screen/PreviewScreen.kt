@@ -351,7 +351,11 @@ fun PreviewScreen(
                 val isInfoShown = showInfo && currentItem != null
                 Box(
                     modifier = Modifier
-                        .weight(if (isInfoShown) 0.55f else 1f)
+                        .weight(
+                            if (isInfoShown && currentItem?.isVideo == true) 0.65f
+                            else if (isInfoShown) 0.7f
+                            else 1f
+                        )
                         .fillMaxWidth()
                         .nestedScroll(overscrollConnection)
                 ) {
@@ -453,31 +457,47 @@ fun PreviewScreen(
                         }
                     }
                 }
-            // ── 图片信息卡片（仅展开时插入 Column，weight 占 45%）──
+            // ── 信息卡片（展开时插入 Column，weight 占比例）──
             if (isInfoShown) {
-                Box(
-                    modifier = Modifier
-                        .weight(0.45f)
-                        .padding(top = 28.dp)
-                        .fillMaxWidth()
-                ) {
-                    // ── 视频信息卡片的关闭按钮（紧邻 InfoCard 顶部上方）──
-                    if (currentItem?.isVideo == true) {
+                if (currentItem?.isVideo == true) {
+                    // ── 视频信息卡片：0.65/0.05/0.3 分区 ──
+                    // 关闭按钮横排 0.05（左对齐）
+                    Box(
+                        modifier = Modifier
+                            .weight(0.05f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_close),
                             contentDescription = "关闭信息",
                             tint = Color.White,
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .offset(y = (-6).dp)
-                                .padding(end = 4.dp)
-                                .size(16.dp)
+                                .padding(start = 4.dp)
+                                .size(20.dp)
                                 .clickable { showInfo = false }
                         )
                     }
+                    // InfoCard 0.3
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
+                            .weight(0.3f)
+                            .fillMaxWidth()
+                    ) {
+                        InfoCard(
+                            currentItem!!,
+                            onDismiss = { showInfo = false },
+                            albumDisplayName = currentItem?.albumName ?: "未知",
+                            onAlbumNameClick = { showAlbumRenameDialog = true },
+                            onDeleteClick = { showPermanentDeleteConfirm = true }
+                        )
+                    }
+                } else {
+                    // ── 图片信息卡片：0.3 + 无额外装饰（#249 前布局）──
+                    Box(
+                        modifier = Modifier
+                            .weight(0.3f)
+                            .fillMaxWidth()
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures { _, dragAmount ->
                                     if (dragAmount > 0) showInfo = false

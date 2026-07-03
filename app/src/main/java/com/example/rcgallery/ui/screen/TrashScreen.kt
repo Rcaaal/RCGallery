@@ -508,9 +508,9 @@ fun TrashScreen(
             },
             containerColor = Color.Black
         ) { padding ->
-            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                // ── 主体：TabRow + 网格 ──
-                Column(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                // ── 主体：TabRow + 网格（可滚动区域，weight 1 填满剩余空间）──
+                Column(modifier = Modifier.weight(1f)) {
                 // ── 分类 Tab ──
                 TabRow(
                     selectedTabIndex = activeTab.ordinal,
@@ -628,31 +628,26 @@ fun TrashScreen(
 
                 // ── 批量选择按钮（非多选模式时左下角显示）──
                 if (!isMultiSelectMode && entries.isNotEmpty()) {
-                    Box(
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = Color(0xFF4CAF50),
                         modifier = Modifier
-                            .fillMaxSize()
-                            .wrapContentSize(Alignment.BottomStart)
-                            .padding(start = 12.dp, bottom = 12.dp)
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = Color(0xFF4CAF50),
-                            onClick = {
-                                isMultiSelectMode = true
-                                selectedUris = emptySet()
-                            }
-                        ) {
-                            Text(
-                                "批量选择",
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            .padding(start = 12.dp, bottom = 12.dp),
+                        onClick = {
+                            isMultiSelectMode = true
+                            selectedUris = emptySet()
                         }
+                    ) {
+                        Text(
+                            "批量选择",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
-                }
+            }
             }
         }
     }
