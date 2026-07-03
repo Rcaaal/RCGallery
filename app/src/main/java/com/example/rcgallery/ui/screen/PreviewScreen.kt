@@ -75,6 +75,13 @@ fun PreviewScreen(
 
     val safeIndex = initialIndex.coerceIn(0, mediaItems.lastIndex)
 
+    // ── 当 items 变为空时（例如删除最后一张后）自动返回 ──
+    LaunchedEffect(mediaItems.size) {
+        if (mediaItems.isEmpty()) {
+            onBackClick()
+        }
+    }
+
     val pagerState = rememberPagerState(
         pageCount = { mediaItems.size },
         initialPage = safeIndex
@@ -92,6 +99,11 @@ fun PreviewScreen(
 
     // ── 快删 Snackbar ──
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // ── 直接永久删除（不经过回收站）──
+    var showPermanentDeleteConfirm by remember { mutableStateOf(false) }
+    var isPermanentDeleting by remember { mutableStateOf(false) }
+    var pendingDeleteItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
 
     // 用户点击"小窗"按钮 → 请求进入 PiP
     // 1. 隐藏全部 UI chrome + 禁用 PlayerView 控制器（useController=false）
@@ -134,6 +146,32 @@ fun PreviewScreen(
     }
 
     val currentItem = mediaItems.getOrNull(pagerState.currentPage)
+
+    // ── 直接永久删除 launcher（不经过回收站，物理删除）──
+    val permanentDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        try {
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
+                val item = pendingDeleteItem
+                if (item != null) {
+                    viewModel.removeFromMediaItems(item)
+                    showInfo = false
+                    pendingDeleteItem = null
+                    Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            com.example.rcgallery.util.AppLogger.e("Preview", "permanent delete callback error", e)
+            Toast.makeText(context, "删除操作异常", Toast.LENGTH_SHORT).show()
+        } finally {
+            isPermanentDeleting = false
+            showPermanentDeleteConfirm = false
+            pendingDeleteItem = null
+        }
+    }
 
     // ── 检测 Pager 边缘 overscroll → 提示 ──
     var overscrollToastTime by remember { mutableLongStateOf(0L) }
@@ -223,6 +261,59 @@ fun PreviewScreen(
                 }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
+        )
+    }
+
+    // ── 直接永久删除确认对话框 ──
+    if (showPermanentDeleteConfirm && currentItem != null) {
+        val item = currentItem!!
+        AlertDialog(
+            onDismissRequest = { if (!isPermanentDeleting) showPermanentDeleteConfirm = false },
+            title = { Text("永久删除") },
+            text = {
+                Text("文件「${item.fileName}」将被从设备中彻底删除，无法恢复。\n确定要继续吗？")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (isPermanentDeleting) return@Button
+                        isPermanentDeleting = true
+                        pendingDeleteItem = item
+                        showPermanentDeleteConfirm = false
+                        // API 30+ 用 createDeleteRequest，低版本直接 contentResolver.delete
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            try {
+                                val uri = item.uri
+                                if (uri.toString().isBlank()) {
+                                    Toast.makeText(context, "无效的文件 URI", Toast.LENGTH_SHORT).show()
+                                    isPermanentDeleting = false; pendingDeleteItem = null; return@Button
+                                }
+                                val pending = MediaStore.createDeleteRequest(
+                                    context.contentResolver, listOf(uri)
+                                )
+                                permanentDeleteLauncher.launch(
+                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
+                                isPermanentDeleting = false; pendingDeleteItem = null
+                            }
+                        } else {
+                            try {
+                                context.contentResolver.delete(item.uri, null, null)
+                                viewModel.removeFromMediaItems(item)
+                                showInfo = false
+                                Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                            }
+                            isPermanentDeleting = false; pendingDeleteItem = null
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { if (!isPermanentDeleting) showPermanentDeleteConfirm = false }) { Text("取消") } }
         )
     }
 
@@ -345,7 +436,8 @@ fun PreviewScreen(
                         currentItem!!,
                         onDismiss = { showInfo = false },
                         albumDisplayName = currentItem?.albumName ?: "未知",
-                        onAlbumNameClick = { showAlbumRenameDialog = true }
+                        onAlbumNameClick = { showAlbumRenameDialog = true },
+                        onDeleteClick = { showPermanentDeleteConfirm = true }
                     )
                 }
             }
@@ -370,7 +462,8 @@ private fun InfoCard(
     item: com.example.rcgallery.model.MediaItem,
     onDismiss: () -> Unit,
     albumDisplayName: String,
-    onAlbumNameClick: () -> Unit
+    onAlbumNameClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     val context = LocalContext.current
 
@@ -451,14 +544,39 @@ private fun InfoCard(
                 modifier = Modifier.clickable { onAlbumNameClick() }
             )
             Spacer(Modifier.height(4.dp))
-            // Row 4: 目录路径
+            // Row 4: 目录路径（自动换行，不限制行数）
             if (filePath.isNotEmpty()) {
                 Text(
                     text = filePath,
                     color = Color(0xFF777777),
                     fontSize = 11.sp,
-                    maxLines = 1
+                    softWrap = true
                 )
+            }
+            // Row 5: 永久删除按钮（右下角）
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "不经过回收站，直接删除",
+                    color = Color(0xFF666666),
+                    fontSize = 10.sp
+                )
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = onDeleteClick,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                        contentDescription = "永久删除",
+                        tint = Color(0xFFFF5252),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

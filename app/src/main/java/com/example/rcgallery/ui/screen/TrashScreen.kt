@@ -10,8 +10,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -26,22 +27,33 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.rcgallery.model.TrashEntry
+import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// ══════════════════════════════════════
+//  回收站分类 Tab
+// ══════════════════════════════════════
+
+private enum class TrashTab { ALL, IMAGE, VIDEO }
+
+private const val MAX_AGE_DAYS = 30L
+
 /**
  * 回收站全屏覆盖层。
- * 展示已快删的文件，支持恢复和永久删除。
+ * 支持多选、分类筛选、批量操作、清空、过期倒计时。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun TrashScreen(
     onBackClick: () -> Unit = {}
@@ -50,47 +62,116 @@ fun TrashScreen(
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
     val entries by viewModel.trashEntries.collectAsStateWithLifecycle()
-    
 
-    BackHandler { onBackClick() }
+    // ── 多选状态 ──
+    var isMultiSelectMode by remember { mutableStateOf(false) }
+    var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var activeTab by remember { mutableStateOf(TrashTab.ALL) }
 
-    // ── 选中条目操作对话框 ──
+    // ── 单条目对话框状态（保留现有流程）──
     var selectedEntry by remember { mutableStateOf<TrashEntry?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
 
-    // ── 永久删除 launcher（Android 10+ 需要 createDeleteRequest IntentSender）──
+    // ── 批量操作对话框状态 ──
+    var showClearAllConfirm by remember { mutableStateOf(false) }
+    var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    // 待批量删除的条目（用于 IntentSender 回调后操作）
+    val pendingBatchEntries = remember { mutableStateListOf<TrashEntry>() }
+
+    // ── Tab 过滤 ──
+    val filteredEntries = remember(entries, activeTab) {
+        when (activeTab) {
+            TrashTab.ALL -> entries
+            TrashTab.IMAGE -> entries.filter { !it.isVideo }
+            TrashTab.VIDEO -> entries.filter { it.isVideo }
+        }
+    }
+    val imageCount = remember(entries) { entries.count { !it.isVideo } }
+    val videoCount = remember(entries) { entries.count { it.isVideo } }
+
+    // ── 返回键处理：多选模式先退出多选 ──
+    BackHandler {
+        if (isMultiSelectMode) {
+            isMultiSelectMode = false
+            selectedUris = emptySet()
+        } else {
+            onBackClick()
+        }
+    }
+
+    // ── 删除请求 launcher（单条目和批量共用）──
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         try {
             if (result.resultCode == android.app.Activity.RESULT_OK) {
-                val entry = selectedEntry
-                if (entry != null) {
-                    viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
-                    Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                if (pendingBatchEntries.isNotEmpty()) {
+                    // 批量/清空删除
+                    val batchSize = pendingBatchEntries.size
+                    viewModel.batchPermanentlyDeleteConfirmed(
+                        pendingBatchEntries.map { it.uri to it.originalAlbumId }
+                    )
+                    pendingBatchEntries.clear()
+                    Toast.makeText(context, "已永久删除 $batchSize 项", Toast.LENGTH_SHORT).show()
+                } else {
+                    // 单条目删除
+                    val entry = selectedEntry
+                    if (entry != null) {
+                        viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
+                        Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } else {
-                Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
+                if (pendingBatchEntries.isEmpty() && selectedEntry == null) {
+                    // 用户取消了系统弹窗，不做额外操作
+                } else {
+                    Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
+                }
             }
         } catch (e: Exception) {
-            com.example.rcgallery.util.AppLogger.e("Trash", "permanent delete callback error", e)
+            AppLogger.e("Trash", "permanent delete callback error", e)
             Toast.makeText(context, "删除操作异常", Toast.LENGTH_SHORT).show()
         } finally {
             selectedEntry = null
+            selectedUris = emptySet()
+            isMultiSelectMode = false
             isDeleting = false
+            pendingBatchEntries.clear()
         }
     }
 
-    // 退出 TrashScreen 时清理 pending 状态（防止回调访问 stale entry 或启动中状态的 launcher）
-    androidx.compose.runtime.DisposableEffect(Unit) {
+    // 退出 TrashScreen 时清理 pending 状态
+    DisposableEffect(Unit) {
         onDispose {
             showDeleteConfirm = false
             isDeleting = false
+            pendingBatchEntries.clear()
         }
     }
 
-    // 永久删除确认对话框
+    // ── 辅助函数 ──
+
+    fun exitMultiSelect() {
+        isMultiSelectMode = false
+        selectedUris = emptySet()
+    }
+
+    fun toggleSelection(uri: String) {
+        selectedUris = if (uri in selectedUris) selectedUris - uri
+                       else selectedUris + uri
+        if (selectedUris.isEmpty()) {
+            isMultiSelectMode = false  // 全取消后自动退出多选模式
+        }
+    }
+
+    fun selectAll() {
+        selectedUris = filteredEntries.map { it.uri }.toSet()
+    }
+
+    // ── 对话框 ──
+
+    // 单条目永久删除确认（现有流程）
     if (showDeleteConfirm && selectedEntry != null) {
         val entry = selectedEntry!!
         AlertDialog(
@@ -105,7 +186,6 @@ fun TrashScreen(
                         if (isDeleting) return@Button
                         isDeleting = true
                         showDeleteConfirm = false
-                        // 用 createDeleteRequest 物理删除（Android 10+），低版本直接删
                         if (Build.VERSION.SDK_INT >= 30) {
                             try {
                                 val uri = Uri.parse(entry.uri)
@@ -124,7 +204,6 @@ fun TrashScreen(
                                 selectedEntry = null; isDeleting = false
                             }
                         } else {
-                            // Android 9 及以下直接 contentResolver.delete
                             try {
                                 context.contentResolver.delete(Uri.parse(entry.uri), null, null)
                                 viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
@@ -142,12 +221,127 @@ fun TrashScreen(
         )
     }
 
-    // ── 条目操作对话框 ──
-    if (selectedEntry != null && !showDeleteConfirm) {
+    // 清空回收站确认
+    if (showClearAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearAllConfirm = false },
+            title = { Text("清空回收站") },
+            text = {
+                Text("确定要清空回收站吗？\n共 ${entries.size} 个文件将被永久删除，无法恢复。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearAllConfirm = false
+                        if (entries.isEmpty()) return@Button
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            try {
+                                val uris = entries.mapNotNull { Uri.parse(it.uri).takeIf { u -> u.toString().isNotBlank() } }
+                                if (uris.isEmpty()) {
+                                    Toast.makeText(context, "没有有效的文件", Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                pendingBatchEntries.clear()
+                                pendingBatchEntries.addAll(entries)
+                                val pending = MediaStore.createDeleteRequest(context.contentResolver, uris)
+                                deleteRequestLauncher.launch(
+                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
+                                pendingBatchEntries.clear()
+                            }
+                        } else {
+                            // API 29- 直接删除
+                            var successCount = 0
+                            entries.forEach { entry ->
+                                try {
+                                    context.contentResolver.delete(Uri.parse(entry.uri), null, null)
+                                    successCount++
+                                } catch (e: Exception) {
+                                    AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
+                                }
+                            }
+                            viewModel.batchPermanentlyDeleteConfirmed(
+                                entries.map { it.uri to it.originalAlbumId }
+                            )
+                            Toast.makeText(context, "已清空 $successCount/${entries.size} 项", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("清空") }
+            },
+            dismissButton = { TextButton(onClick = { showClearAllConfirm = false }) { Text("取消") } }
+        )
+    }
+
+    // 批量永久删除确认
+    if (showBatchDeleteConfirm && selectedUris.isNotEmpty()) {
+        val count = selectedUris.size
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteConfirm = false },
+            title = { Text("批量永久删除") },
+            text = {
+                Text("确定要永久删除选中的 $count 个文件吗？\n此操作无法恢复。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBatchDeleteConfirm = false
+                        val toDelete = entries.filter { it.uri in selectedUris }
+                        if (toDelete.isEmpty()) return@Button
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            try {
+                                val uris = toDelete.mapNotNull { Uri.parse(it.uri).takeIf { u -> u.toString().isNotBlank() } }
+                                if (uris.isEmpty()) {
+                                    Toast.makeText(context, "没有有效的文件", Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                pendingBatchEntries.clear()
+                                pendingBatchEntries.addAll(toDelete)
+                                val pending = MediaStore.createDeleteRequest(context.contentResolver, uris)
+                                deleteRequestLauncher.launch(
+                                    IntentSenderRequest.Builder(pending.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
+                                pendingBatchEntries.clear()
+                            }
+                        } else {
+                            var successCount = 0
+                            toDelete.forEach { entry ->
+                                try {
+                                    context.contentResolver.delete(Uri.parse(entry.uri), null, null)
+                                    successCount++
+                                } catch (e: Exception) {
+                                    AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
+                                }
+                            }
+                            viewModel.batchPermanentlyDeleteConfirmed(
+                                toDelete.map { it.uri to it.originalAlbumId }
+                            )
+                            Toast.makeText(context, "已永久删除 $successCount/$count 项", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { showBatchDeleteConfirm = false }) { Text("取消") } }
+        )
+    }
+
+    // ── 单条目操作对话框（非多选模式，现有流程）──
+    if (!isMultiSelectMode && selectedEntry != null && !showDeleteConfirm) {
         val entry = selectedEntry!!
         val deleteTimeStr = remember(entry.deleteTime) {
             SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
                 .format(Date(entry.deleteTime))
+        }
+        val remainingDays = remember(entry.deleteTime) {
+            val now = System.currentTimeMillis()
+            val elapsed = now - entry.deleteTime
+            val maxMs = MAX_AGE_DAYS * 24 * 60 * 60 * 1000L
+            if (elapsed >= maxMs) 0L else (maxMs - elapsed) / 86400000L
         }
 
         AlertDialog(
@@ -162,6 +356,11 @@ fun TrashScreen(
                     if (entry.isVideo) {
                         Text("类型：视频", fontSize = 13.sp, color = Color.Gray)
                     }
+                    Text(
+                        text = if (remainingDays > 0) "剩余自动清理：${remainingDays} 天" else "即将自动清理",
+                        fontSize = 12.sp,
+                        color = if (remainingDays > 3) Color(0xFF999999) else Color(0xFFFF9800)
+                    )
                 }
             },
             confirmButton = {
@@ -169,7 +368,7 @@ fun TrashScreen(
                     Button(
                         onClick = {
                             viewModel.restoreFromTrash(entry.uri)
-                            viewModel.loadAlbums()  // 恢复后刷新相册计数
+                            viewModel.loadAlbums()
                             selectedEntry = null
                             Toast.makeText(context, "已恢复", Toast.LENGTH_SHORT).show()
                         }
@@ -184,45 +383,184 @@ fun TrashScreen(
         )
     }
 
+    // ══════════════════════════════════════
+    //  主 UI
+    // ══════════════════════════════════════
+
     Surface(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         Scaffold(
             topBar = {
                 TopAppBar(
                     title = {
                         Text(
-                            "回收站 (${entries.size})",
+                            if (isMultiSelectMode) "已选 ${selectedUris.size} 项"
+                            else "回收站 (${entries.size})",
                             maxLines = 1,
                             color = Color.White
                         )
                     },
                     navigationIcon = {
-                        TextButton(onClick = onBackClick) { Text("← 返回", color = Color.White) }
+                        if (isMultiSelectMode) {
+                            TextButton(onClick = { exitMultiSelect() }) {
+                                Text("取消", color = Color.White)
+                            }
+                        } else {
+                            TextButton(onClick = onBackClick) {
+                                Text("← 返回", color = Color.White)
+                            }
+                        }
+                    },
+                    actions = {
+                        if (isMultiSelectMode) {
+                            TextButton(onClick = { selectAll() }) {
+                                Text(
+                                    if (selectedUris.size == filteredEntries.size) "取消全选" else "全选",
+                                    color = Color.White
+                                )
+                            }
+                        } else {
+                            // 清空回收站按钮（有条目时显示）
+                            if (entries.isNotEmpty()) {
+                                IconButton(onClick = { showClearAllConfirm = true }) {
+                                    Icon(
+                                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                                        contentDescription = "清空回收站",
+                                        tint = Color(0xFFFF5252)
+                                    )
+                                }
+                            }
+                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1A1A1A))
                 )
             },
+            bottomBar = {
+                if (isMultiSelectMode && selectedUris.isNotEmpty()) {
+                    BottomAppBar(
+                        containerColor = Color(0xFF1A1A1A),
+                        tonalElevation = 8.dp
+                    ) {
+                        Text(
+                            "已选 ${selectedUris.size} 项",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(start = 16.dp)
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            onClick = {
+                                val toRestore = entries.filter { it.uri in selectedUris }
+                                val uris = toRestore.map { it.uri }
+                                viewModel.batchRestoreFromTrash(uris)
+                                viewModel.loadAlbums()
+                                exitMultiSelect()
+                                Toast.makeText(context, "已恢复 ${uris.size} 项", Toast.LENGTH_SHORT).show()
+                            }
+                        ) {
+                            Text("还原 (${selectedUris.size})", color = Color(0xFF4CAF50))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                showBatchDeleteConfirm = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("永久删除 (${selectedUris.size})", fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                }
+            },
             containerColor = Color.Black
         ) { padding ->
-            if (entries.isEmpty()) {
-                Box(
-                    Modifier.fillMaxSize().padding(padding),
-                    contentAlignment = Alignment.Center
+            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                // ── 分类 Tab ──
+                TabRow(
+                    selectedTabIndex = activeTab.ordinal,
+                    containerColor = Color(0xFF1A1A1A),
+                    contentColor = Color.White,
+                    divider = { HorizontalDivider(color = Color(0xFF333333)) }
                 ) {
-                    Text("回收站是空的", color = Color.Gray, fontSize = 16.sp)
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                    contentPadding = PaddingValues(2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    items(entries, key = { it.uri }) { entry ->
-                        TrashGridItem(
-                            entry = entry,
-                            onClick = { selectedEntry = entry }
+                    Tab(
+                        selected = activeTab == TrashTab.ALL,
+                        onClick = { activeTab = TrashTab.ALL }
+                    ) {
+                        Text(
+                            "全部",
+                            fontSize = 14.sp,
+                            fontWeight = if (activeTab == TrashTab.ALL) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.padding(vertical = 10.dp)
                         )
+                    }
+                    Tab(
+                        selected = activeTab == TrashTab.IMAGE,
+                        onClick = { activeTab = TrashTab.IMAGE }
+                    ) {
+                        Text(
+                            "图片 ($imageCount)",
+                            fontSize = 14.sp,
+                            fontWeight = if (activeTab == TrashTab.IMAGE) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.padding(vertical = 10.dp)
+                        )
+                    }
+                    Tab(
+                        selected = activeTab == TrashTab.VIDEO,
+                        onClick = { activeTab = TrashTab.VIDEO }
+                    ) {
+                        Text(
+                            "视频 ($videoCount)",
+                            fontSize = 14.sp,
+                            fontWeight = if (activeTab == TrashTab.VIDEO) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.padding(vertical = 10.dp)
+                        )
+                    }
+                }
+
+                // ── 网格内容 ──
+                if (entries.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("回收站是空的", color = Color.Gray, fontSize = 16.sp)
+                    }
+                } else if (filteredEntries.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("没有符合条件的文件", color = Color.Gray, fontSize = 16.sp)
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        items(filteredEntries, key = { it.uri }) { entry ->
+                            TrashGridItem(
+                                entry = entry,
+                                isSelected = entry.uri in selectedUris,
+                                isMultiSelectMode = isMultiSelectMode,
+                                onClick = {
+                                    if (isMultiSelectMode) {
+                                        toggleSelection(entry.uri)
+                                    } else {
+                                        selectedEntry = entry
+                                    }
+                                },
+                                onLongClick = {
+                                    if (!isMultiSelectMode) {
+                                        isMultiSelectMode = true
+                                        selectedUris = setOf(entry.uri)
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -230,35 +568,125 @@ fun TrashScreen(
     }
 }
 
+// ══════════════════════════════════════
+//  网格条目（含多选 checkbox + 过期标签）
+// ══════════════════════════════════════
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TrashGridItem(
     entry: TrashEntry,
-    onClick: () -> Unit
+    isSelected: Boolean,
+    isMultiSelectMode: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
 ) {
+    // 过期天数计算
+    val remainingDays = remember(entry.deleteTime) {
+        val now = System.currentTimeMillis()
+        val elapsed = now - entry.deleteTime
+        val maxMs = MAX_AGE_DAYS * 24 * 60 * 60 * 1000L
+        if (elapsed >= maxMs) 0L else (maxMs - elapsed) / 86400000L
+    }
+
+    val expiryLabel = when {
+        remainingDays <= 0 -> "已过期"
+        remainingDays <= 1 -> "今天"
+        remainingDays <= 7 -> "${remainingDays}天"
+        else -> null  // 超过 7 天不显示
+    }
+    val expiryColor = when {
+        remainingDays <= 0 -> Color(0xFFFF5252)
+        remainingDays <= 1 -> Color(0xFFFF9800)
+        else -> Color(0xFFFFEB3B)
+    }
+
+    val borderColor = if (isSelected) Color(0xFF4CAF50) else Color.Transparent
+    val borderWidth = if (isSelected) 3.dp else 0.dp
+
     Box(
         modifier = Modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(4.dp))
-            .background(Color(0xFF2A2A2A))
-            .clickable { onClick() }
+            .background(if (isSelected) Color(0xFF2A5A2A) else Color(0xFF2A2A2A))
+            .then(
+                if (isSelected) Modifier.padding(0.dp)
+                else Modifier.padding(0.dp)
+            )
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
     ) {
-        // 缩略图（Coil 直接从 URI String 加载，支持 content:// 格式）
+        // 缩略图
         AsyncImage(
             model = entry.uri,
             contentDescription = entry.fileName,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
         )
-        // 右上角红色圆点（代表"已删除"）
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(2.dp)
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(Color.Red)
-        )
-        // 视频标记
+
+        // 多选模式下的选中边框
+        if (isSelected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x804CAF50))  // 半透明绿色覆盖
+                    .clip(RoundedCornerShape(4.dp))
+            )
+        }
+
+        // 多选模式下的 Checkbox（左上角）
+        if (isMultiSelectMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(3.dp)
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(if (isSelected) Color(0xFF4CAF50) else Color(0xCC333333))
+                    .then(
+                        Modifier
+                            .wrapContentSize(Alignment.Center)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isSelected) {
+                    Text("✓", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        } else {
+            // 非多选模式：右上角红色圆点（保留现有设计）
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(2.dp)
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Color.Red)
+            )
+        }
+
+        // 过期倒计时标签（右下角）
+        if (expiryLabel != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(2.dp)
+                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(2.dp))
+                    .padding(horizontal = 3.dp, vertical = 1.dp)
+            ) {
+                Text(
+                    text = expiryLabel,
+                    color = expiryColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+            }
+        }
+
+        // 视频标记（左下角）
         if (entry.isVideo) {
             Box(
                 modifier = Modifier

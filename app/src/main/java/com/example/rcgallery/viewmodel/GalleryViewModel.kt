@@ -247,6 +247,49 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _trashEntries.value = trashManager.getAll()
     }
 
+    // ── 批量回收站操作 ──
+
+    /** 批量从回收站恢复文件（只清除索引标记） */
+    fun batchRestoreFromTrash(uris: List<String>) {
+        trashManager.removeAll(uris)
+        refreshTrashCount()
+        _trashEntries.value = trashManager.getAll()
+        AppLogger.d("VM", "batchRestoreFromTrash: ${uris.size} items")
+    }
+
+    /** 批量永久删除确认（物理删除已由调用方通过 IntentSender 完成） */
+    fun batchPermanentlyDeleteConfirmed(entries: List<Pair<String, String?>>) {
+        val uris = entries.map { it.first }
+        trashManager.removeAll(uris)
+        refreshTrashCount()
+        _trashEntries.value = trashManager.getAll()
+        // 更新相册计数
+        entries.forEach { (_, albumId) ->
+            if (albumId != null) {
+                _albums.value = _albums.value.map { album ->
+                    if (album.bucketId == albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+                }
+            }
+        }
+        AppLogger.d("VM", "batchPermanentlyDeleteConfirmed: ${uris.size} items")
+    }
+
+    // ══════════════════════════════════════
+    //  预览页直接永久删除（不经过回收站）
+    // ══════════════════════════════════════
+
+    /**
+     * 从预览页直接永久删除媒体项（不经过回收站）。
+     * 物理删除由调用方通过 IntentSender 处理，此方法只更新 UI 状态。
+     */
+    fun removeFromMediaItems(item: MediaItem) {
+        _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
+        _albums.value = _albums.value.map { album ->
+            if (album.bucketId == item.albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+        }
+        AppLogger.d("VM", "removeFromMediaItems: ${item.fileName}")
+    }
+
     private fun refreshTrashCount() {
         _trashCount.value = trashManager.count()
     }

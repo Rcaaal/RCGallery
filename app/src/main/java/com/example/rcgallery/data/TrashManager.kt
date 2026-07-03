@@ -91,6 +91,32 @@ class TrashManager(private val context: Context) {
     /** 获取回收站条目数量 */
     fun count(): Int = getAll().size
 
+    /** 获取图片类条目数量 */
+    fun getImageCount(): Int = getAll().count { !it.isVideo }
+
+    /** 获取视频类条目数量 */
+    fun getVideoCount(): Int = getAll().count { it.isVideo }
+
+    /** 清空回收站（返回被清空的 URI 列表，供批量 createDeleteRequest 使用） */
+    fun clearAll(): List<String> {
+        synchronized(lock) {
+            val all = getAll()
+            val uris = all.map { it.uri }
+            writeAll(emptyList())
+            AppLogger.d(TAG, "clearAll: ${uris.size} entries removed")
+            return uris
+        }
+    }
+
+    /** 批量移除条目 */
+    fun removeAll(uris: List<String>) {
+        synchronized(lock) {
+            val list = getAll().filter { it.uri !in uris }
+            writeAll(list)
+            AppLogger.d(TAG, "removeAll: removed ${uris.size} entries, remaining=${list.size}")
+        }
+    }
+
     // ── 原子写入 ──
 
     private fun writeAll(entries: List<TrashEntry>) {
