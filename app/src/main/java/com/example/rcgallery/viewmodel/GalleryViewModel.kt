@@ -305,6 +305,21 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     // ══════════════════════════════════════
+    //  文件重命名
+    // ══════════════════════════════════════
+
+    /**
+     * 重命名文件后同步更新 ViewModel 中的 _mediaItems，确保下次预览时名称正确。
+     * 调用时机：InfoCard 文件重命名成功后。
+     */
+    fun renameFile(uri: String, newFileName: String) {
+        _mediaItems.value = _mediaItems.value.map { item ->
+            if (item.uri.toString() == uri) item.copy(fileName = newFileName) else item
+        }
+        AppLogger.d("VM", "renameFile: $uri → $newFileName")
+    }
+
+    // ══════════════════════════════════════
     //  预览页直接永久删除（不经过回收站）
     // ══════════════════════════════════════
 

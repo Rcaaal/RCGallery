@@ -531,10 +531,12 @@ fun PreviewScreen(
                             onDeleteClick = { showPermanentDeleteConfirm = true },
                             onFileRenamed = { newFileName ->
                                 val pageIdx = pagerState.currentPage
+                                val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
                                 mediaItems = mediaItems.mapIndexed { i, item ->
                                     if (i == pageIdx) item.copy(fileName = newFileName) else item
                                 }
                                 renameVersion++
+                                if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
                             }
                         )
                         }
@@ -560,10 +562,12 @@ fun PreviewScreen(
                             onDeleteClick = { showPermanentDeleteConfirm = true },
                             onFileRenamed = { newFileName ->
                                 val pageIdx = pagerState.currentPage
+                                val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
                                 mediaItems = mediaItems.mapIndexed { i, item ->
                                     if (i == pageIdx) item.copy(fileName = newFileName) else item
                                 }
                                 renameVersion++
+                                if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
                             }
                         )
                         }
