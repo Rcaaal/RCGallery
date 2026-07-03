@@ -166,9 +166,10 @@ fun VideoPlayer(
 
     // App 切后台时暂停（非 PiP 模式），PiP 模式不暂停
     val lifecycleOwner = LocalLifecycleOwner.current
+    val currentHideOverlays by rememberUpdatedState(hideUiOverlays)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE && !hideUiOverlays) {
+            if (event == Lifecycle.Event.ON_PAUSE && !currentHideOverlays) {
                 exoPlayer.playWhenReady = false
             }
         }
