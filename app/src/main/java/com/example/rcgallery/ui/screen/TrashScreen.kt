@@ -13,10 +13,12 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -24,7 +26,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -65,7 +72,8 @@ fun TrashScreen(
 
     // ── 多选状态 ──
     var isMultiSelectMode by remember { mutableStateOf(false) }
-    var selectedUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val selectedUrisState = remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedUris by selectedUrisState  // composable 通过委托访问
     var activeTab by remember { mutableStateOf(TrashTab.ALL) }
 
     // ── 单条目对话框状态（保留现有流程）──
@@ -89,6 +97,32 @@ fun TrashScreen(
     }
     val imageCount = remember(entries) { entries.count { !it.isVideo } }
     val videoCount = remember(entries) { entries.count { it.isVideo } }
+
+    // ── 网格状态（滑多选需要读取 layoutInfo）──
+    val gridState = rememberLazyGridState()
+
+    // ── 多选模式拦截网格滚动（防止拖拽时列表跟随滚动）──
+    val scrollBlockConnection = remember(isMultiSelectMode) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (isMultiSelectMode) return available  // 消耗所有滚动事件
+                return Offset.Zero
+            }
+        }
+    }
+
+    // 滑多选拖拽起点索引
+    var dragStartIndex by remember { mutableIntStateOf(-1) }
+
+    // ── 触摸坐标 → 网格索引 ──
+    fun findItemIndex(touchX: Float, touchY: Float): Int? {
+        val info = gridState.layoutInfo
+        // LazyGridItemInfo: offset = IntOffset(x, y), size = IntSize(width, height)
+        return info.visibleItemsInfo.firstOrNull { item ->
+            touchY >= item.offset.y && touchY <= item.offset.y + item.size.height &&
+            touchX >= item.offset.x && touchX <= item.offset.x + item.size.width
+        }?.index
+    }
 
     // ── 返回键处理：多选模式先退出多选 ──
     BackHandler {
@@ -535,8 +569,42 @@ fun TrashScreen(
                     }
                 } else {
                     LazyVerticalGrid(
+                        state = gridState,
                         columns = GridCells.Fixed(4),
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .nestedScroll(scrollBlockConnection)
+                            .pointerInput(isMultiSelectMode, filteredEntries) {
+                                if (!isMultiSelectMode) return@pointerInput
+                                var lastDragIndex = -1
+                                detectDragGestures(
+                                    onDragStart = { pos ->
+                                        val idx = findItemIndex(pos.x, pos.y) ?: return@detectDragGestures
+                                        val entry = filteredEntries.getOrNull(idx) ?: return@detectDragGestures
+                                        dragStartIndex = idx
+                                        lastDragIndex = idx
+                                        // 选中起始项
+                                        selectedUrisState.value = selectedUrisState.value + entry.uri
+                                    },
+                                    onDrag = { change, _ ->
+                                        change.consume()
+                                        val idx = findItemIndex(change.position.x, change.position.y) ?: return@detectDragGestures
+                                        if (idx == lastDragIndex) return@detectDragGestures
+                                        lastDragIndex = idx
+                                        // 选中起点到当前位置之间的所有项（Google Photos 风格）
+                                        val minIdx = minOf(dragStartIndex, idx)
+                                        val maxIdx = maxOf(dragStartIndex, idx)
+                                        val rangeUris = (minIdx..maxIdx).mapNotNull { i ->
+                                            filteredEntries.getOrNull(i)?.uri
+                                        }.toSet()
+                                        selectedUrisState.value = selectedUrisState.value + rangeUris
+                                        // 自动进入多选模式
+                                        if (!isMultiSelectMode) isMultiSelectMode = true
+                                    },
+                                    onDragEnd = { lastDragIndex = -1 },
+                                    onDragCancel = { lastDragIndex = -1 }
+                                )
+                            },
                         contentPadding = PaddingValues(2.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
