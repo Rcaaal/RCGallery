@@ -59,13 +59,12 @@ fun PreviewScreen(
     val context = LocalContext.current
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
-    // 始终使用 items 参数（与 MediaGridScreen 共享同一引用），不从 ViewModel 收集（防 ContentObserver 异步替换导致 index 错位）
-    val mediaItems = items
+    // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
+    // 不自动从父级同步（防 ContentObserver 异步替换导致 index 错位）。
+    var mediaItems by remember { mutableStateOf(items) }
     val scope = rememberCoroutineScope()
 
-    // 用 remember 快照「进入时」的 items 大小，避免 ViewModel 清空数据时误触发返回
-    val initialItemCount = remember(items) { items.size }
-    AppLogger.d("Preview", "enter initialIndex=$initialIndex items=$initialItemCount")
+    AppLogger.d("Preview", "enter initialIndex=$initialIndex items=${items.size}")
 
     // ── 防崩溃守卫：items 为空时不渲染任何内容，立即退出 ──
     if (mediaItems.isEmpty()) {
@@ -149,6 +148,9 @@ fun PreviewScreen(
                 val item = pendingDeleteItem
                 if (item != null) {
                     viewModel.removeFromMediaItems(item)
+                    // 从本地快照移除，pager 自动跳到下一项
+                    val page = pagerState.currentPage
+                    mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
                     showInfo = false
                     pendingDeleteItem = null
                     Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
@@ -303,6 +305,8 @@ fun PreviewScreen(
                             try {
                                 context.contentResolver.delete(item.uri, null, null)
                                 viewModel.removeFromMediaItems(item)
+                                val page = pagerState.currentPage
+                                mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
                                 showInfo = false
                                 Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
                             } catch (e: Exception) {
@@ -378,7 +382,10 @@ fun PreviewScreen(
                                         if (trashItem != null) {
                                             if (showInfo) showInfo = false
                                             viewModel.moveToTrash(trashItem)
-                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
+                                            // 从本地快照移除，pager 跳到下一项
+                                            val deletedPage = pagerState.currentPage
+                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
+                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
@@ -389,8 +396,11 @@ fun PreviewScreen(
                                                 if (result == SnackbarResult.ActionPerformed) {
                                                     viewModel.restoreFromTrash(trashItem.uri.toString())
                                                     viewModel.addMediaItemBack(trashItem)
+                                                    // 撤销后恢复本地快照
+                                                    mediaItems = (listOf(trashItem) + mediaItems)
+                                                        .sortedByDescending { it.dateAdded }
                                                 }
-                                                if (isLastPage) {
+                                                if (wasLastPage) {
                                                     onBackClick()
                                                 }
                                             }
@@ -420,9 +430,12 @@ fun PreviewScreen(
                                         if (showInfo) {
                                             // 信息栏已展开 → 上划快删
                                             val item = currentItem ?: return@ZoomableImage3
-                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
                                             showInfo = false  // 关闭信息栏，防快速连击
                                             viewModel.moveToTrash(item)
+                                            // 从本地快照移除，pager 跳到下一项
+                                            val deletedPage = pagerState.currentPage
+                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
+                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()
                                                 val result = snackbarHostState.showSnackbar(
@@ -434,9 +447,12 @@ fun PreviewScreen(
                                                     // 撤销：清索引 + 加回列表（增量，不走 loadMedia）
                                                     viewModel.restoreFromTrash(item.uri.toString())
                                                     viewModel.addMediaItemBack(item)
+                                                    // 撤销后恢复本地快照
+                                                    mediaItems = (listOf(item) + mediaItems)
+                                                        .sortedByDescending { it.dateAdded }
                                                 }
                                                 // Snackbar 结束后再退出（保留 coroutine scope 给撤销用）
-                                                if (isLastPage) {
+                                                if (wasLastPage) {
                                                     onBackClick()
                                                 }
                                             }
@@ -483,7 +499,12 @@ fun PreviewScreen(
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
-                            onFileRenamed = { onGoHome() }
+                            onFileRenamed = { newFileName ->
+                                val pageIdx = pagerState.currentPage
+                                mediaItems = mediaItems.mapIndexed { i, item ->
+                                    if (i == pageIdx) item.copy(fileName = newFileName) else item
+                                }
+                            }
                         )
                     }
                 } else {
@@ -504,7 +525,12 @@ fun PreviewScreen(
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
-                            onFileRenamed = { onGoHome() }
+                            onFileRenamed = { newFileName ->
+                                val pageIdx = pagerState.currentPage
+                                mediaItems = mediaItems.mapIndexed { i, item ->
+                                    if (i == pageIdx) item.copy(fileName = newFileName) else item
+                                }
+                            }
                         )
                     }
                 }

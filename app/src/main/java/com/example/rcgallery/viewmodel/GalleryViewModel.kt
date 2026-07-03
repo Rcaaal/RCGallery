@@ -233,10 +233,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
-        // 同步更新相册计数
+        // 同步更新相册计数，count=0 的相册自动移除
         if (albumId != null) {
-            _albums.value = _albums.value.map { album ->
-                if (album.bucketId == albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+            _albums.value = _albums.value.mapNotNull { album ->
+                if (album.bucketId == albumId) {
+                    val newCount = (album.count - 1).coerceAtLeast(0)
+                    if (newCount <= 0) null else album.copy(count = newCount)
+                } else {
+                    album
+                }
             }
         }
         AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
@@ -263,11 +268,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         trashManager.removeAll(uris)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
-        // 更新相册计数
+        // 更新相册计数，count=0 的相册自动移除
         entries.forEach { (_, albumId) ->
             if (albumId != null) {
-                _albums.value = _albums.value.map { album ->
-                    if (album.bucketId == albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+                _albums.value = _albums.value.mapNotNull { album ->
+                    if (album.bucketId == albumId) {
+                        val newCount = (album.count - 1).coerceAtLeast(0)
+                        if (newCount <= 0) null else album.copy(count = newCount)
+                    } else {
+                        album
+                    }
                 }
             }
         }
@@ -284,8 +294,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     fun removeFromMediaItems(item: MediaItem) {
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
-        _albums.value = _albums.value.map { album ->
-            if (album.bucketId == item.albumId) album.copy(count = (album.count - 1).coerceAtLeast(0)) else album
+        _albums.value = _albums.value.mapNotNull { album ->
+            if (album.bucketId == item.albumId) {
+                val newCount = (album.count - 1).coerceAtLeast(0)
+                if (newCount <= 0) null else album.copy(count = newCount)
+            } else {
+                album
+            }
         }
         AppLogger.d("VM", "removeFromMediaItems: ${item.fileName}")
     }
