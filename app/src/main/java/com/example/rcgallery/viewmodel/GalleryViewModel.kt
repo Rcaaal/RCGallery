@@ -122,11 +122,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun refreshCurrentView() {
         AppLogger.d("VM", "refreshCurrentView (observer)")
         loadAlbums()
-        val albumId = pendingAlbumId
-        if (albumId != null) {
-            AppLogger.d("VM", "refreshCurrentView reload media for album=[$albumId]")
-            loadMedia(albumId = albumId)
-        }
+        // 注意：不调用 loadMedia()。mediaItems 由 LaunchedEffect(albumId) 在相册入口时加载，
+        // 以及 moveToTrash/restoreFromTrash 等用户操作增量修改。observer 异步调用 loadMedia
+        // 会替换 _mediaItems 导致网格与预览之间的 index 错位。
     }
 
     // ══════════════════════════════════════

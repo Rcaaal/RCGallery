@@ -34,7 +34,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.rcgallery.PipState
 import com.example.rcgallery.ui.component.InertiaSettings
@@ -55,19 +54,13 @@ fun PreviewScreen(
     onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
     volumeEnabled: Boolean = false,
     onVolumeToggle: () -> Unit = {},
-    items: List<com.example.rcgallery.model.MediaItem>? = null  // 非空时覆盖 ViewModel 的全量数据
+    items: List<com.example.rcgallery.model.MediaItem> = emptyList()  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
-    // 当 items != null（过滤模式）时不收集 ViewModel 数据
-    val mediaItems: List<com.example.rcgallery.model.MediaItem>
-    if (items != null) {
-        mediaItems = items
-    } else {
-        val fullItems by viewModel.mediaItems.collectAsStateWithLifecycle()
-        mediaItems = fullItems
-    }
+    // 始终使用 items 参数（与 MediaGridScreen 共享同一引用），不从 ViewModel 收集
+    val mediaItems = items
     val scope = rememberCoroutineScope()
 
     // 用 remember 快照「进入时」的 items 大小，避免 ViewModel 清空数据时误触发返回
