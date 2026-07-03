@@ -37,13 +37,13 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
-import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
+import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
-import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
+import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
 /**
@@ -71,12 +71,6 @@ private fun ImageView.setRoundedCorner(radiusDp: Int) {
     clipToOutline = true
 }
 
-private fun formatSize(bytes: Long): String = when {
-    bytes < 1024L -> "$bytes B"
-    bytes < 1024L * 1024L -> "%.1f KB".format(bytes / 1024f)
-    bytes < 1024L * 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
-    else -> "%.2f GB".format(bytes / (1024f * 1024f * 1024f))
-}
 
 private infix fun AlbumDisplayMode.isSameAs(other: AlbumDisplayMode): Boolean = when {
     this is AlbumDisplayMode.Grid && other is AlbumDisplayMode.Grid -> this.columns == other.columns
@@ -101,18 +95,7 @@ fun AlbumGridScreen(
         BackHandler { selectedAlbumId = null }
     }
 
-    // ── 设置面板 / 日志 ──
-    var showInertiaSettings by remember { mutableStateOf(false) }
-    var showLogDialog by remember { mutableStateOf(false) }
-    if (showInertiaSettings) InertiaSettingsPanel(
-        onDismiss = { showInertiaSettings = false },
-        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
-    )
-    if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
-    }
+    // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
 
     // ── 权限状态 ──
     var hasPermission by remember {
@@ -186,13 +169,7 @@ fun AlbumGridScreen(
                 )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            // ── 设置齿轮按钮（替代 DevOverlay，内含日志入口）──
-            Box(
-                modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp).size(28.dp)
-                    .clip(CircleShape).background(Color(0xCCFF9800))
-                    .clickable { showInertiaSettings = true },
-                contentAlignment = Alignment.Center
-            ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
+            SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
@@ -631,7 +608,7 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
         iv.load(item.coverUri) { size(160); crossfade(false) }
         nameTv.text = item.bucketName
         infoTv.text = buildString {
-            append(formatSize(item.totalSize))
+            append(FormatUtil.formatFileSize(item.totalSize))
             append(" · ${item.imageCount} 图片")
             if (item.videoCount > 0) append(" · ${item.videoCount} 视频")
             if (item.gifCount > 0) append(" · ${item.gifCount} GIF")

@@ -31,12 +31,11 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
-import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
+import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
-import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
@@ -68,18 +67,7 @@ fun MediaGridScreen(
         if (!isLoading) isLoadingAlbum = false
     }
 
-    // ── 设置面板 / 日志 ──
-    var showInertiaSettings by remember { mutableStateOf(false) }
-    var showLogDialog by remember { mutableStateOf(false) }
-    if (showInertiaSettings) InertiaSettingsPanel(
-        onDismiss = { showInertiaSettings = false },
-        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
-    )
-    if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
-    }
+    // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
 
     // ── Preview overlay 状态（代替 navigation push，防止 RecyclerView 销毁）──
     var selectedPhotoIndex by remember { mutableIntStateOf(-1) }
@@ -175,13 +163,7 @@ fun MediaGridScreen(
                     }
                 }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            // ── 设置齿轮按钮（替代 DevOverlay，内含日志入口）──
-            Box(
-                modifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp).size(28.dp)
-                    .clip(CircleShape).background(Color(0xCCFF9800))
-                    .clickable { showInertiaSettings = true },
-                contentAlignment = Alignment.Center
-            ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
+            SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
 
             // ── 媒体类型过滤按钮（底部居中，略抬上）──
             if (availableTypes.isNotEmpty()) {

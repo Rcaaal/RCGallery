@@ -9,7 +9,6 @@ data class MediaItem(
     val id: Long,
     val uri: Uri,
     val filePath: String = "",      // 文件绝对路径，用于直接 BitmapFactory.decodeFile()
-    val thumbnailUri: Uri? = null,
     val fileName: String,
     val mimeType: String,
     val dateAdded: Long,

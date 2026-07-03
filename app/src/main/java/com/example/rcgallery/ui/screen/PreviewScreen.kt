@@ -37,11 +37,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.rcgallery.PipState
-import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.InertiaSettings
-import com.example.rcgallery.ui.component.InertiaSettingsPanel
+import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.util.AppLogger
+import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,8 +60,14 @@ fun PreviewScreen(
     val context = LocalContext.current
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
-    val fullItems by viewModel.mediaItems.collectAsStateWithLifecycle()
-    val mediaItems = items ?: fullItems
+    // 当 items != null（过滤模式）时不收集 ViewModel 数据
+    val mediaItems: List<com.example.rcgallery.model.MediaItem>
+    if (items != null) {
+        mediaItems = items
+    } else {
+        val fullItems by viewModel.mediaItems.collectAsStateWithLifecycle()
+        mediaItems = fullItems
+    }
     val scope = rememberCoroutineScope()
 
     // 用 remember 快照「进入时」的 items 大小，避免 ViewModel 清空数据时误触发返回
@@ -224,17 +230,7 @@ fun PreviewScreen(
         )
     }
 
-    var showInertiaSettings by remember { mutableStateOf(false) }
-    var showLogDialog by remember { mutableStateOf(false) }
-    if (showInertiaSettings) InertiaSettingsPanel(
-        onDismiss = { showInertiaSettings = false },
-        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
-    )
-    if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
-    }
+    // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
 
     Box(modifier = Modifier.fillMaxSize()) {
         // ── Scaffold（TopAppBar 在 PiP 时隐藏，使 PlayerView 充满屏幕）──
@@ -331,16 +327,7 @@ fun PreviewScreen(
             }
             }
         }
-        // ── 设置按钮（PiP 时隐藏）──
-        if (!pipOverlayHidden) {
-            // ── 惯性设置齿轮按钮（TopEnd，橙色，在搬运按钮左侧）──
-            Box(
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp).size(28.dp)
-                    .clip(CircleShape).background(Color(0xCCFF9800))
-                    .clickable { showInertiaSettings = true },
-                contentAlignment = Alignment.Center
-            ) { Text("⚙", color = Color.White, fontSize = 14.sp) }
-        }
+        SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
     }
 }
 
@@ -348,12 +335,6 @@ fun PreviewScreen(
 //  图片信息卡片（紧凑 4 行布局 + 重命名）
 // ══════════════════════════════════════
 
-private fun formatFileSize(bytes: Long): String = when {
-    bytes < 1024L -> "$bytes B"
-    bytes < 1024L * 1024L -> "%.1f KB".format(bytes / 1024f)
-    bytes < 1024L * 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
-    else -> "%.2f GB".format(bytes / (1024f * 1024f * 1024f))
-}
 
 private fun formatDate(timestamp: Long): String {
     val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
@@ -431,7 +412,7 @@ private fun InfoCard(
             Spacer(Modifier.height(6.dp))
             // Row 2: 大小 · 格式
             Text(
-                text = "${formatFileSize(item.size)} · ${item.mimeType}",
+                text = "${FormatUtil.formatFileSize(item.size)} · ${item.mimeType}",
                 color = Color(0xFF999999),
                 fontSize = 12.sp,
                 maxLines = 1

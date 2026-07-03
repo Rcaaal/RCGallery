@@ -11,6 +11,7 @@ import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,17 +95,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun refreshCurrentView() {
         AppLogger.d("VM", "refreshCurrentView (observer)")
-        viewModelScope.launch {
-            repository.loadAlbums()
-                .onSuccess { albums ->
-                    _albums.value = albums
-                    AppLogger.d("VM", "refreshCurrentView OK albums=${albums.size}")
-                }
-            val albumId = pendingAlbumId
-            if (albumId != null) {
-                AppLogger.d("VM", "refreshCurrentView reload media for album=[$albumId]")
-                loadMedia(albumId = albumId)
-            }
+        loadAlbums()
+        val albumId = pendingAlbumId
+        if (albumId != null) {
+            AppLogger.d("VM", "refreshCurrentView reload media for album=[$albumId]")
+            loadMedia(albumId = albumId)
         }
     }
 
@@ -133,24 +128,27 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             "/storage/emulated/0/$rp"
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch {
             val oldDir = File(dirPath)
             val newDir = File(oldDir.parentFile, newName)
-            try {
-                val ok = oldDir.renameTo(newDir)
-                AppLogger.d("Rename", "renameTo result=$ok: $dirPath → ${newDir.absolutePath}")
-                if (ok) {
-                    // 直接更新 _albums → 立刻显示新名
-                    _albums.value = _albums.value.map {
-                        if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
-                    }
-                    MediaScannerConnection.scanFile(
-                        getApplication<Application>(),
-                        arrayOf(newDir.absolutePath), null, null
-                    )
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    oldDir.renameTo(newDir)
+                } catch (e: Exception) {
+                    AppLogger.e("Rename", "renameTo threw", e)
+                    false
                 }
-            } catch (e: Exception) {
-                AppLogger.e("Rename", "renameNow threw", e)
+            }
+            AppLogger.d("Rename", "renameTo result=$ok: $dirPath → ${newDir.absolutePath}")
+            if (ok) {
+                // 直接更新 _albums → 立刻显示新名（主线程更新 StateFlow）
+                _albums.value = _albums.value.map {
+                    if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
+                }
+                MediaScannerConnection.scanFile(
+                    getApplication<Application>(),
+                    arrayOf(newDir.absolutePath), null, null
+                )
             }
         }
     }

@@ -21,35 +21,8 @@ class MediaRepository(private val context: Context) {
     fun loadAlbums(): Result<List<Album>> = runCatching {
         val albumMap = LinkedHashMap<String, AlbumBuilder>()
 
-        // 查询图片
-        queryBuckets(
-            uri = MediaStoreQuery.IMAGES_URI,
-            projection = MediaStoreQuery.IMAGE_PROJECTION,
-            idIndex = MediaStoreQuery.IMAGE_INDEX_ID,
-            bucketIdIndex = MediaStoreQuery.IMAGE_INDEX_BUCKET_ID,
-            bucketNameIndex = MediaStoreQuery.IMAGE_INDEX_BUCKET_NAME,
-            dateAddedIndex = MediaStoreQuery.IMAGE_INDEX_DATE_ADDED,
-            mimeTypeIndex = MediaStoreQuery.IMAGE_INDEX_MIME,
-            sizeIndex = MediaStoreQuery.IMAGE_INDEX_SIZE,
-            dataIndex = MediaStoreQuery.IMAGE_INDEX_DATA,
-            isVideo = false,
-            albumMap = albumMap
-        )
-
-        // 查询视频
-        queryBuckets(
-            uri = MediaStoreQuery.VIDEOS_URI,
-            projection = MediaStoreQuery.VIDEO_PROJECTION,
-            idIndex = MediaStoreQuery.VIDEO_INDEX_ID,
-            bucketIdIndex = MediaStoreQuery.VIDEO_INDEX_BUCKET_ID,
-            bucketNameIndex = MediaStoreQuery.VIDEO_INDEX_BUCKET_NAME,
-            dateAddedIndex = MediaStoreQuery.VIDEO_INDEX_DATE_ADDED,
-            mimeTypeIndex = MediaStoreQuery.VIDEO_INDEX_MIME,
-            sizeIndex = MediaStoreQuery.VIDEO_INDEX_SIZE,
-            dataIndex = MediaStoreQuery.VIDEO_INDEX_DATA,
-            isVideo = true,
-            albumMap = albumMap
-        )
+        queryBuckets(MediaProjection.Images, albumMap)
+        queryBuckets(MediaProjection.Videos, albumMap)
 
         albumMap.map { (_, b) ->
             Album(
@@ -67,38 +40,29 @@ class MediaRepository(private val context: Context) {
     }
 
     private fun queryBuckets(
-        uri: Uri,
-        projection: Array<String>,
-        idIndex: Int,
-        bucketIdIndex: Int,
-        bucketNameIndex: Int,
-        dateAddedIndex: Int,
-        mimeTypeIndex: Int,
-        sizeIndex: Int,
-        dataIndex: Int,
-        isVideo: Boolean,
+        proj: MediaProjection,
         albumMap: MutableMap<String, AlbumBuilder>
     ) {
         val cursor = context.contentResolver.query(
-            uri, projection, null, null, "date_added DESC"
+            proj.uri, proj.projection, null, null, "date_added DESC"
         )
         cursor?.use { c ->
             while (c.moveToNext()) {
-                val bucketId = c.getString(bucketIdIndex) ?: continue
-                val bucketName = c.getString(bucketNameIndex) ?: "Unknown"
-                val id = c.getLong(idIndex)
-                val dateAdded = c.getLong(dateAddedIndex)
-                val mimeType = c.getString(mimeTypeIndex) ?: ""
-                val size = c.getLong(sizeIndex)
-                val filePath = c.getString(dataIndex) ?: ""
-                val imageUri = Uri.withAppendedPath(uri, id.toString())
+                val bucketId = c.getString(proj.indexBucketId) ?: continue
+                val bucketName = c.getString(proj.indexBucketName) ?: "Unknown"
+                val id = c.getLong(proj.indexId)
+                val dateAdded = c.getLong(proj.indexDateAdded)
+                val mimeType = c.getString(proj.indexMime) ?: ""
+                val size = c.getLong(proj.indexSize)
+                val filePath = c.getString(proj.indexData) ?: ""
+                val imageUri = Uri.withAppendedPath(proj.uri, id.toString())
 
                 val existing = albumMap[bucketId]
                 if (existing != null) {
                     existing.count++
                     existing.totalSize += size
                     when {
-                        isVideo -> existing.videoCount++
+                        proj.isVideo -> existing.videoCount++
                         mimeType.equals("image/gif", ignoreCase = true) -> existing.gifCount++
                         else -> existing.imageCount++
                     }
@@ -118,8 +82,8 @@ class MediaRepository(private val context: Context) {
                         count = 1,
                         latestDate = dateAdded,
                         totalSize = size,
-                        imageCount = if (isVideo) 0 else if (mimeType.equals("image/gif", ignoreCase = true)) 0 else 1,
-                        videoCount = if (isVideo) 1 else 0,
+                        imageCount = if (proj.isVideo) 0 else if (mimeType.equals("image/gif", ignoreCase = true)) 0 else 1,
+                        videoCount = if (proj.isVideo) 1 else 0,
                         gifCount = if (mimeType.equals("image/gif", ignoreCase = true)) 1 else 0,
                         directoryPath = dirPath
                     )
@@ -146,7 +110,7 @@ class MediaRepository(private val context: Context) {
     /**
      * 加载某个相册的媒体项，支持分页。
      * @param albumId 相册 bucketId，传入 null 则加载全部
-     * @param pageSize 每页数量（默认 60）
+     * @param pageSize 每页数量（默认 200）
      * @param offset 偏移量（从 0 开始）
      */
     fun loadMediaItems(
@@ -158,41 +122,18 @@ class MediaRepository(private val context: Context) {
         val selection = if (albumId != null) "bucket_id = ?" else null
         val selectionArgs = if (albumId != null) arrayOf(albumId) else null
 
-        queryMediaItems(
-            uri = MediaStoreQuery.IMAGES_URI,
-            projection = MediaStoreQuery.IMAGE_PROJECTION,
-            selection = selection,
-            selectionArgs = selectionArgs,
-            limit = pageSize,
-            offset = offset,
-            isVideo = false,
-            items = items
-        )
+        queryMediaItems(MediaProjection.Images, selection, selectionArgs, pageSize, offset, items)
+        queryMediaItems(MediaProjection.Videos, selection, selectionArgs, pageSize, offset, items)
 
-        // 查询视频
-        queryMediaItems(
-            uri = MediaStoreQuery.VIDEOS_URI,
-            projection = MediaStoreQuery.VIDEO_PROJECTION,
-            selection = selection,
-            selectionArgs = selectionArgs,
-            limit = pageSize,
-            offset = offset,
-            isVideo = true,
-            items = items
-        )
-
-        // 按 dateAdded 降序合并
         items.sortedByDescending { it.dateAdded }
     }
 
     private fun queryMediaItems(
-        uri: Uri,
-        projection: Array<String>,
+        proj: MediaProjection,
         selection: String?,
         selectionArgs: Array<String>?,
         limit: Int,
         offset: Int,
-        isVideo: Boolean,
         items: MutableList<MediaItem>
     ) {
         val extras = Bundle().apply {
@@ -205,38 +146,33 @@ class MediaRepository(private val context: Context) {
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
             putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
         }
-        val cursor = context.contentResolver.query(
-            uri, projection, extras, null
-        )
+        val cursor = context.contentResolver.query(proj.uri, proj.projection, extras, null)
         cursor?.use { c ->
             while (c.moveToNext()) {
-                val id = c.getLong(if (isVideo) MediaStoreQuery.VIDEO_INDEX_ID else MediaStoreQuery.IMAGE_INDEX_ID)
-                val displayName = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_NAME else MediaStoreQuery.IMAGE_INDEX_NAME) ?: ""
-                val mimeType = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_MIME else MediaStoreQuery.IMAGE_INDEX_MIME) ?: ""
-                val dateAdded = c.getLong(if (isVideo) MediaStoreQuery.VIDEO_INDEX_DATE_ADDED else MediaStoreQuery.IMAGE_INDEX_DATE_ADDED)
-                val dateModified = c.getLong(if (isVideo) MediaStoreQuery.VIDEO_INDEX_DATE_MODIFIED else MediaStoreQuery.IMAGE_INDEX_DATE_MODIFIED)
-                val size = c.getLong(if (isVideo) MediaStoreQuery.VIDEO_INDEX_SIZE else MediaStoreQuery.IMAGE_INDEX_SIZE)
-                val bucketId = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_BUCKET_ID else MediaStoreQuery.IMAGE_INDEX_BUCKET_ID)
-                val bucketName = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_BUCKET_NAME else MediaStoreQuery.IMAGE_INDEX_BUCKET_NAME)
-                val width = c.getInt(if (isVideo) MediaStoreQuery.VIDEO_INDEX_WIDTH else MediaStoreQuery.IMAGE_INDEX_WIDTH)
-                val height = c.getInt(if (isVideo) MediaStoreQuery.VIDEO_INDEX_HEIGHT else MediaStoreQuery.IMAGE_INDEX_HEIGHT)
-                val duration = if (isVideo) c.getLong(MediaStoreQuery.VIDEO_INDEX_DURATION) else 0L
-                val filePath = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_DATA else MediaStoreQuery.IMAGE_INDEX_DATA) ?: ""
-                val relativePath = c.getString(if (isVideo) MediaStoreQuery.VIDEO_INDEX_RELATIVE_PATH else MediaStoreQuery.IMAGE_INDEX_RELATIVE_PATH) ?: ""
+                val id = c.getLong(proj.indexId)
+                val displayName = c.getString(proj.indexName) ?: ""
+                val mimeType = c.getString(proj.indexMime) ?: ""
+                val dateAdded = c.getLong(proj.indexDateAdded)
+                val dateModified = c.getLong(proj.indexDateModified)
+                val size = c.getLong(proj.indexSize)
+                val bucketId = c.getString(proj.indexBucketId)
+                val bucketName = c.getString(proj.indexBucketName)
+                val width = c.getInt(proj.indexWidth)
+                val height = c.getInt(proj.indexHeight)
+                val duration = if (proj.isVideo) c.getLong(proj.indexDuration) else 0L
+                val filePath = c.getString(proj.indexData) ?: ""
+                val relativePath = c.getString(proj.indexRelativePath) ?: ""
 
-                // 过滤无用格式（如 .nomedia）
                 if (displayName.startsWith(".")) continue
                 if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) continue
 
-                val mediaUri = ContentUriBuilder.getContentUri(id, isVideo)
-                val thumbnailUri = ThumbnailUriBuilder.getThumbnailUri(id, isVideo)
+                val mediaUri = ContentUriBuilder.getContentUri(id, proj.isVideo)
 
                 items.add(
                     MediaItem(
                         id = id,
                         uri = mediaUri,
                         filePath = filePath,
-                        thumbnailUri = thumbnailUri,
                         fileName = displayName,
                         mimeType = mimeType,
                         dateAdded = dateAdded,
@@ -256,9 +192,6 @@ class MediaRepository(private val context: Context) {
 
     // ── 删除 ──
 
-    /**
-     * 删除指定的媒体文件（同步 MediaStore）。
-     */
     fun deleteMediaItems(uris: List<Uri>): Result<Unit> = runCatching {
         for (uri in uris) {
             context.contentResolver.delete(uri, null, null)
@@ -272,14 +205,6 @@ class MediaRepository(private val context: Context) {
             val base = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
                        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             return Uri.withAppendedPath(base, id.toString())
-        }
-    }
-
-    private object ThumbnailUriBuilder {
-        fun getThumbnailUri(id: Long, isVideo: Boolean): Uri? {
-            // Coil 可以直接用 content://media/external/images/media/{id} 自己生成缩略图，
-            // 这里返回 null 让 Coil 自动处理
-            return null
         }
     }
 }
