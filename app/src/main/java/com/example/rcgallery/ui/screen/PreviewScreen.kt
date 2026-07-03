@@ -307,6 +307,7 @@ fun PreviewScreen(
                                             // 信息栏已展开 → 上划快删
                                             val item = currentItem ?: return@ZoomableImage3
                                             val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
+                                            showInfo = false  // 关闭信息栏，防快速连击
                                             viewModel.moveToTrash(item)
                                             scope.launch {
                                                 snackbarHostState.currentSnackbarData?.dismiss()

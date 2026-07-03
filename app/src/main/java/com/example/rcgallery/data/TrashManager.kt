@@ -51,6 +51,8 @@ class TrashManager(private val context: Context) {
                         mimeType = obj.optString("mimeType", "")
                     )
                 }.sortedByDescending { it.deleteTime }
+                    // 按 URI 去重（防止快速连续删除产生的重复条目导致 TrashScreen 闪退）
+                    .distinctBy { it.uri }
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to read trash index", e)
                 emptyList()
@@ -58,10 +60,12 @@ class TrashManager(private val context: Context) {
         }
     }
 
-    /** 添加一条快删记录 */
+    /** 添加一条快删记录（如果已存在同 URI 的条目，先移除旧的再加入新的） */
     fun add(entry: TrashEntry) {
         synchronized(lock) {
             val list = getAll().toMutableList()
+            // 移除已存在的同 URI 条目（防止快速连续删除写入重复 key）
+            list.removeAll { it.uri == entry.uri }
             list.add(entry)
             writeAll(list)
             AppLogger.d(TAG, "add: ${entry.fileName} total=${list.size}")

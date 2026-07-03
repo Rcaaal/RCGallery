@@ -69,6 +69,12 @@ fun ZoomableImage3(
     var intrinsicSize by remember { mutableStateOf(Size.Zero) }
     val scope = rememberCoroutineScope()
 
+    // ── rememberUpdatedState：确保 pointerInput 内在回调重组时不捕获陈旧值 ──
+    val currentOnEdgeSwipe by rememberUpdatedState(onEdgeSwipe)
+    val currentOnSwipeDownToBack by rememberUpdatedState(onSwipeDownToBack)
+    val currentOnSwipeUpToShowInfo by rememberUpdatedState(onSwipeUpToShowInfo)
+    val currentOnSingleTap by rememberUpdatedState(onSingleTap)
+
     val animSpec = inertiaState?.let { state ->
         tween<Float>(durationMillis = state.durationMs, easing = LinearEasing)
     } ?: snap()
@@ -166,9 +172,9 @@ fun ZoomableImage3(
                             // 方案 C：边缘翻页仅当 X 为主轴向时才触发（|X| >= |Y| * 1.5），
                             // 斜向到边缘允许 Y 继续滑动
                             if (offsetX >= maxX - EDGE_THRESHOLD_PX && pan.x > InertiaSettings.edgeSwipeMinPx && pan.x.absoluteValue >= pan.y.absoluteValue * 1.5f) {
-                                didEdgeSwipe = true; onEdgeSwipe(-1); break
+                                didEdgeSwipe = true; currentOnEdgeSwipe(-1); break
                             } else if (offsetX <= -maxX + EDGE_THRESHOLD_PX && pan.x < -InertiaSettings.edgeSwipeMinPx && pan.x.absoluteValue >= pan.y.absoluteValue * 1.5f) {
-                                didEdgeSwipe = true; onEdgeSwipe(1); break
+                                didEdgeSwipe = true; currentOnEdgeSwipe(1); break
                             } else {
                                 offsetX = (offsetX + pan.x).coerceIn(-maxX, maxX)
                                 offsetY = (offsetY + pan.y).coerceIn(-maxY, maxY)
@@ -201,7 +207,7 @@ fun ZoomableImage3(
                         smoothY > swipeThresh &&
                         smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                         AppLogger.d("Zoom", "swipe down back V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
-                        onSwipeDownToBack()
+                        currentOnSwipeDownToBack()
                         return@awaitEachGesture
                     }
 
@@ -210,14 +216,14 @@ fun ZoomableImage3(
                         smoothY < -swipeThresh &&
                         smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                         AppLogger.d("Zoom", "swipe up info V(${smoothX.roundToInt()},${smoothY.roundToInt()})")
-                        onSwipeUpToShowInfo()
+                        currentOnSwipeUpToShowInfo()
                         return@awaitEachGesture
                     }
 
                     // ── 记录 lastTapTime：有位移的不是 tap，清除双击计时 ──
                     if (!hadMovement) {
                         lastTapTime = now
-                        onSingleTap()  // 单击返回给外层（关闭信息栏等）
+                        currentOnSingleTap()  // 单击返回给外层（关闭信息栏等）
                     } else {
                         lastTapTime = 0L
                     }
