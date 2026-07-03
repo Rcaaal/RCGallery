@@ -87,6 +87,8 @@ fun PreviewScreen(
 
     // ── 图片信息面板 ──
     var showInfo by remember { mutableStateOf(false) }
+    // 文件重命名版本号——每改名一次 +1，用于 key() 强制 InfoCard 刷新
+    var renameVersion by remember { mutableIntStateOf(0) }
     // 返回键直接退出预览（不拦截），信息面板通过点击图片或翻页关闭
 
     // ── 快删 Snackbar ──
@@ -520,6 +522,7 @@ fun PreviewScreen(
                             .weight(0.3f)
                             .fillMaxWidth()
                     ) {
+                        key(renameVersion) {
                         InfoCard(
                             currentItem!!,
                             onDismiss = { showInfo = false },
@@ -531,8 +534,10 @@ fun PreviewScreen(
                                 mediaItems = mediaItems.mapIndexed { i, item ->
                                     if (i == pageIdx) item.copy(fileName = newFileName) else item
                                 }
+                                renameVersion++
                             }
                         )
+                        }
                     }
                 } else {
                     // ── 图片信息卡片：0.3 + 无额外装饰（#249 前布局）──
@@ -546,6 +551,7 @@ fun PreviewScreen(
                                 }
                             }
                     ) {
+                        key(renameVersion) {
                         InfoCard(
                             currentItem!!,
                             onDismiss = { showInfo = false },
@@ -557,8 +563,10 @@ fun PreviewScreen(
                                 mediaItems = mediaItems.mapIndexed { i, item ->
                                     if (i == pageIdx) item.copy(fileName = newFileName) else item
                                 }
+                                renameVersion++
                             }
                         )
+                        }
                     }
                 }
             }
