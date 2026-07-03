@@ -374,6 +374,7 @@ fun PreviewScreen(
                                     onControlZoneActive = { pagerScrollEnabled = !it },
                                     onRequestPip = { pipTriggered = true },
                                     hideUiOverlays = pipOverlayHidden,
+                                    keepControllerVisible = showInfo && item.isVideo,
                                     onShowInfoClick = { showInfo = true },
                                     onMoveToTrash = {
                                         val trashItem = mediaItems.getOrNull(pagerState.currentPage)
@@ -467,7 +468,7 @@ fun PreviewScreen(
                             tint = Color.White,
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .offset(y = (-22).dp)
+                                .offset(y = (-36).dp)
                                 .padding(end = 4.dp)
                                 .size(20.dp)
                                 .clickable { showInfo = false }
@@ -476,6 +477,7 @@ fun PreviewScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
+                            .padding(top = 8.dp)
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures { _, dragAmount ->
                                     if (dragAmount > 0) showInfo = false

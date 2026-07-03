@@ -75,6 +75,7 @@ fun VideoPlayer(
     modifier: Modifier = Modifier,
     onRequestPip: (() -> Unit)? = null,
     hideUiOverlays: Boolean = false,
+    keepControllerVisible: Boolean = false,
     onShowInfoClick: () -> Unit = {},
     onMoveToTrash: () -> Unit = {},
 ) {
@@ -205,6 +206,18 @@ fun VideoPlayer(
         } else {
             pipControllerDisabled = false
             pvRef.value?.useController = true
+        }
+    }
+
+    // 信息栏打开时控制栏常驻显示（不自动隐藏）
+    LaunchedEffect(keepControllerVisible) {
+        pvRef.value?.let { pv ->
+            if (keepControllerVisible) {
+                pv.controllerShowTimeoutMs = Int.MAX_VALUE
+                pv.showController()
+            } else {
+                pv.controllerShowTimeoutMs = 3000
+            }
         }
     }
 
