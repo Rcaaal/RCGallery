@@ -459,7 +459,7 @@ fun PreviewScreen(
                         .weight(0.3f)
                         .fillMaxWidth()
                 ) {
-                    // ── 视频信息卡片的关闭按钮（在卡片外部右上角，图片不显示）──
+                    // ── 视频信息卡片的关闭按钮（在卡片外部右上方，用 offset 上移，图片不显示）──
                     if (currentItem?.isVideo == true) {
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_close),
@@ -467,8 +467,9 @@ fun PreviewScreen(
                             tint = Color.White,
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .padding(top = 2.dp, end = (-4).dp)
-                                .size(18.dp)
+                                .offset(y = (-22).dp)
+                                .padding(end = 4.dp)
+                                .size(20.dp)
                                 .clickable { showInfo = false }
                         )
                     }
