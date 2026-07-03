@@ -1,14 +1,17 @@
 package com.example.rcgallery.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import android.media.MediaScannerConnection
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
+import com.example.rcgallery.data.TrashManager
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.TrashEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
@@ -24,6 +27,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val repository = MediaRepository(application)
     private val observer = MediaStoreObserver(application)
+    private val trashManager = TrashManager(application)
 
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
@@ -34,10 +38,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    // ── 回收站状态 ──
+    private val _trashEntries = MutableStateFlow<List<TrashEntry>>(emptyList())
+    val trashEntries: StateFlow<List<TrashEntry>> = _trashEntries.asStateFlow()
+
+    private val _trashCount = MutableStateFlow(0)
+    val trashCount: StateFlow<Int> = _trashCount.asStateFlow()
+
     private var loadMediaJob: Job? = null
     private var pendingAlbumId: String? = null
 
     init {
+        refreshTrashCount()
         viewModelScope.launch {
             observer.observeMediaChanges()
                 .debounce(500)
@@ -46,7 +58,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     // ══════════════════════════════════════
-    //  数据加载
+    //  数据加载（含回收站过滤）
     // ══════════════════════════════════════
 
     fun loadAlbums() {
@@ -55,8 +67,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _isLoading.value = true
             repository.loadAlbums()
                 .onSuccess { albums ->
-                    _albums.value = albums
-                    AppLogger.d("VM", "loadAlbums OK count=${albums.size}")
+                    // 从各相册计数中减去已回收的文件数
+                    val trashList = trashManager.getAll()
+                    val trashPerAlbum = trashList
+                        .filter { it.originalAlbumId != null }
+                        .groupBy { it.originalAlbumId }
+                        .mapValues { it.value.size }
+                    val filtered = albums.mapNotNull { album ->
+                        val trashCount = trashPerAlbum[album.bucketId] ?: 0
+                        val newCount = album.count - trashCount
+                        if (newCount <= 0) null
+                        else album.copy(count = newCount)
+                    }
+                    _albums.value = filtered
+                    AppLogger.d("VM", "loadAlbums OK count=${filtered.size} (trashed filtered)")
                 }
                 .onFailure {
                     _albums.value = emptyList()
@@ -78,7 +102,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     val match = pendingAlbumId == albumId
                     AppLogger.d("VM", "loadMedia OK albumId=[$albumId] items=${it.size} pendingMatch=$match")
                     if (match) {
-                        _mediaItems.value = it
+                        // 过滤已回收文件
+                        val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
+                        val filtered = it.filter { item -> item.uri.toString() !in trashedUris }
+                        _mediaItems.value = filtered
                     }
                 }
                 .onFailure {
@@ -105,17 +132,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     // ══════════════════════════════════════
     //  相册重命名 — File.renameTo 直接改名
-    //  无权限时由 UI 层引导跳转 Settings
     // ══════════════════════════════════════
 
-    /**
-     * 立即重命名 — 用户已有 MANAGE_EXTERNAL_STORAGE 权限时调用。
-     * 直接执行 File.renameTo，更新 _albums，触发 MediaScanner。
-     */
     fun renameNow(bucketId: String, newName: String) {
         AppLogger.d("Rename", "renameNow bucket=$bucketId → $newName")
 
-        // 取目录路径
         val allItems = _mediaItems.value.filter { it.albumId == bucketId }
         val dirPath = allItems.firstOrNull()?.let { item ->
             item.filePath.substringBeforeLast("/").takeIf { it.isNotEmpty() }
@@ -141,7 +162,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             AppLogger.d("Rename", "renameTo result=$ok: $dirPath → ${newDir.absolutePath}")
             if (ok) {
-                // 直接更新 _albums → 立刻显示新名（主线程更新 StateFlow）
                 _albums.value = _albums.value.map {
                     if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
                 }
@@ -151,5 +171,69 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
         }
+    }
+
+    // ══════════════════════════════════════
+    //  回收站操作
+    // ══════════════════════════════════════
+
+    /**
+     * 将媒体项移入回收站（逻辑删除——只写索引，不删文件）。
+     */
+    fun moveToTrash(item: MediaItem) {
+        trashManager.add(
+            TrashEntry(
+                uri = item.uri.toString(),
+                filePath = item.filePath,
+                fileName = item.fileName,
+                deleteTime = System.currentTimeMillis(),
+                originalAlbumId = item.albumId,
+                originalAlbumName = item.albumName,
+                mimeType = item.mimeType
+            )
+        )
+        refreshTrashCount()
+        // 如果当前正在浏览该相册，从列表中移除
+        _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
+        // 刷新相册列表（调整计数）
+        loadAlbums()
+        AppLogger.d("VM", "moveToTrash: ${item.fileName}")
+    }
+
+    /**
+     * 从回收站恢复文件（只清除索引标记，不涉及文件操作）。
+     */
+    fun restoreFromTrash(uri: String) {
+        trashManager.remove(uri)
+        refreshTrashCount()
+        refreshCurrentView()
+        AppLogger.d("VM", "restoreFromTrash: $uri")
+    }
+
+    /**
+     * 从回收站永久删除文件（物理删除 + 清除索引）。
+     */
+    fun permanentlyDelete(uri: String, item: MediaItem? = null) {
+        viewModelScope.launch {
+            try {
+                // 物理删除
+                repository.deleteMediaItems(listOf(Uri.parse(uri)))
+            } catch (e: Exception) {
+                AppLogger.e("VM", "permanentlyDelete failed", e)
+            }
+            trashManager.remove(uri)
+            refreshTrashCount()
+            refreshCurrentView()
+            AppLogger.d("VM", "permanentlyDelete: $uri")
+        }
+    }
+
+    /** 获取全部回收站条目（供 TrashScreen 使用） */
+    fun loadTrashEntries() {
+        _trashEntries.value = trashManager.getAll()
+    }
+
+    private fun refreshTrashCount() {
+        _trashCount.value = trashManager.count()
     }
 }

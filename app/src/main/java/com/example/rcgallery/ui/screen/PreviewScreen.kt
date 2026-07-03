@@ -97,6 +97,9 @@ fun PreviewScreen(
     var showInfo by remember { mutableStateOf(false) }
     // 返回键直接退出预览（不拦截），信息面板通过点击图片或翻页关闭
 
+    // ── 快删 Snackbar ──
+    val snackbarHostState = remember { SnackbarHostState() }
+
     // 用户点击"小窗"按钮 → 请求进入 PiP
     // 1. 隐藏全部 UI chrome + 禁用 PlayerView 控制器（useController=false）
     // 2. 同步视频真实尺寸到 PipState
@@ -248,6 +251,7 @@ fun PreviewScreen(
                     )
                 }
             },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             containerColor = Color.Black
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -298,7 +302,32 @@ fun PreviewScreen(
                                         if (showInfo) showInfo = false
                                         else onBackClick()
                                     },
-                                    onSwipeUpToShowInfo = { showInfo = true },
+                                    onSwipeUpToShowInfo = {
+                                        if (showInfo) {
+                                            // 信息栏已展开 → 上划快删
+                                            val item = currentItem ?: return@ZoomableImage3
+                                            viewModel.moveToTrash(item)
+                                            scope.launch {
+                                                snackbarHostState.currentSnackbarData?.dismiss()
+                                                val result = snackbarHostState.showSnackbar(
+                                                    message = "已移至回收站",
+                                                    actionLabel = "撤销",
+                                                    duration = SnackbarDuration.Short
+                                                )
+                                                if (result == SnackbarResult.ActionPerformed) {
+                                                    viewModel.restoreFromTrash(item.uri.toString())
+                                                }
+                                            }
+                                            // 翻到下一张或退出
+                                            if (pagerState.currentPage < mediaItems.lastIndex) {
+                                                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
+                                            } else {
+                                                onBackClick()
+                                            }
+                                        } else {
+                                            showInfo = true
+                                        }
+                                    },
                                     onSingleTap = { if (showInfo) showInfo = false }
                                 )
                             }

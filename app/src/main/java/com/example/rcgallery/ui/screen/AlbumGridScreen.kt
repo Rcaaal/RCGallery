@@ -39,6 +39,7 @@ import coil.load
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.SettingsOverlay
+import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
@@ -96,6 +97,12 @@ fun AlbumGridScreen(
     }
 
     // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
+    // ── 回收站状态 ──
+    val trashCount by viewModel.trashCount.collectAsStateWithLifecycle()
+    var showTrash by remember { mutableStateOf(false) }
+    if (showTrash) {
+        BackHandler { showTrash = false }
+    }
 
     // ── 权限状态 ──
     var hasPermission by remember {
@@ -171,6 +178,31 @@ fun AlbumGridScreen(
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
+            // ── 回收站入口按钮（右上角）──
+            Box(
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp).size(28.dp)
+                    .clip(CircleShape).background(Color(0xCC607D8B))
+                    .clickable {
+                        showTrash = true
+                        viewModel.loadTrashEntries()
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("🗑", color = Color.White, fontSize = 14.sp)
+                if (trashCount > 0) {
+                    Box(
+                        modifier = Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp)
+                            .size(16.dp).clip(CircleShape).background(Color.Red),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Text(
+                            text = if (trashCount > 99) "99+" else trashCount.toString(),
+                            color = Color.White,
+                            fontSize = 9.sp
+                        )
+                    }
+                }
+            }
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
             if (selectedAlbumId != null) {
@@ -179,6 +211,12 @@ fun AlbumGridScreen(
                     albumName = selectedAlbumName,
                     onBackClick = { selectedAlbumId = null },
                     onGoHome = { selectedAlbumId = null }
+                )
+            }
+            // ── 回收站全屏覆盖层 ──
+            if (showTrash) {
+                TrashScreen(
+                    onBackClick = { showTrash = false }
                 )
             }
         }
