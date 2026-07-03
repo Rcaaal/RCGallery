@@ -340,7 +340,7 @@ fun PreviewScreen(
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // ── 图片/视频区域（信息面板展开时被推到上半部分）──
-                val isInfoShown = showInfo && currentItem != null && !currentItem.isVideo
+                val isInfoShown = showInfo && currentItem != null
                 Box(
                     modifier = Modifier
                         .weight(if (isInfoShown) 0.7f else 1f)
@@ -365,7 +365,31 @@ fun PreviewScreen(
                                     savedPositions = savedPositions,
                                     onControlZoneActive = { pagerScrollEnabled = !it },
                                     onRequestPip = { pipTriggered = true },
-                                    hideUiOverlays = pipOverlayHidden
+                                    hideUiOverlays = pipOverlayHidden,
+                                    onShowInfoClick = { showInfo = true },
+                                    onMoveToTrash = {
+                                        val trashItem = mediaItems.getOrNull(pagerState.currentPage)
+                                        if (trashItem != null) {
+                                            val isLastPage = pagerState.currentPage >= mediaItems.lastIndex
+                                            if (showInfo) showInfo = false
+                                            viewModel.moveToTrash(trashItem)
+                                            scope.launch {
+                                                snackbarHostState.currentSnackbarData?.dismiss()
+                                                val result = snackbarHostState.showSnackbar(
+                                                    message = "已移至回收站",
+                                                    actionLabel = "撤销",
+                                                    duration = SnackbarDuration.Short
+                                                )
+                                                if (result == SnackbarResult.ActionPerformed) {
+                                                    viewModel.restoreFromTrash(trashItem.uri.toString())
+                                                    viewModel.addMediaItemBack(trashItem)
+                                                }
+                                                if (isLastPage) {
+                                                    onBackClick()
+                                                }
+                                            }
+                                        }
+                                    }
                                 )
                             } else {
                                 ZoomableImage3(
