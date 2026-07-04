@@ -90,6 +90,7 @@ fun TrashScreen(
 
     // ── 批量操作对话框状态 ──
     var showClearAllConfirm by remember { mutableStateOf(false) }
+    var showRestoreAllConfirm by remember { mutableStateOf(false) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
     // 待批量删除的条目（用于 IntentSender 回调后操作）
     val pendingBatchEntries = remember { mutableStateListOf<TrashEntry>() }
@@ -322,6 +323,30 @@ fun TrashScreen(
         )
     }
 
+    // 全部还原确认
+    if (showRestoreAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRestoreAllConfirm = false },
+            title = { Text("全部还原") },
+            text = {
+                Text("确定要还原回收站中所有 ${entries.size} 个文件吗？\n文件将恢复到原始相册。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRestoreAllConfirm = false
+                        if (entries.isEmpty()) return@Button
+                        viewModel.batchRestoreFromTrash(entries.map { it.uri })
+                        viewModel.loadAlbums()
+                        Toast.makeText(context, "已还原 ${entries.size} 项", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                ) { Text("全部还原") }
+            },
+            dismissButton = { TextButton(onClick = { showRestoreAllConfirm = false }) { Text("取消") } }
+        )
+    }
+
     // 批量永久删除确认
     if (showBatchDeleteConfirm && selectedUris.isNotEmpty()) {
         val count = selectedUris.size
@@ -472,8 +497,15 @@ fun TrashScreen(
                                 )
                             }
                         } else {
-                            // 清空回收站按钮（有条目时显示）
+                            // 全部还原 + 清空回收站按钮（有条目时显示）
                             if (entries.isNotEmpty()) {
+                                IconButton(onClick = { showRestoreAllConfirm = true }) {
+                                    Icon(
+                                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_restore),
+                                        contentDescription = "全部还原",
+                                        tint = Color(0xFF4CAF50)
+                                    )
+                                }
                                 IconButton(onClick = { showClearAllConfirm = true }) {
                                     Icon(
                                         painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_trash),
