@@ -92,7 +92,12 @@ fun AlbumGridScreen(
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
-    var selectedAlbumName by remember { mutableStateOf("") }
+    // 从 _albums 实时派生相册名（VM renameNow 更新后自动刷新 TopAppBar）
+    val selectedAlbumName by remember(albums, selectedAlbumId) {
+        derivedStateOf {
+            albums.find { it.bucketId == selectedAlbumId }?.bucketName ?: ""
+        }
+    }
     if (selectedAlbumId != null) {
         BackHandler { selectedAlbumId = null }
     }
@@ -162,7 +167,6 @@ fun AlbumGridScreen(
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
-                        selectedAlbumName = album.bucketName
                     },
                     onRefresh = { viewModel.loadAlbums() },
                     displayMode = displayMode,
