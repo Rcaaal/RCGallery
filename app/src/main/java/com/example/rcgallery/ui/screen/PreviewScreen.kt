@@ -245,12 +245,19 @@ fun PreviewScreen(
                     if (newName.isEmpty()) return@Button
                     showAlbumRenameDialog = false
                     val bucketId = currentItem?.albumId ?: return@Button
-                    val oldName = currentAlbumName
                     if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
                         // 有权限 → 直接改名
-                        viewModel.renameNow(bucketId, newName)
-                        Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
-                        onGoHome()
+                        viewModel.renameNow(bucketId, newName) { ok ->
+                            if (ok) {
+                                // 同步本地快照中的 albumName
+                                mediaItems = mediaItems.map { item ->
+                                    if (item.albumId == bucketId) item.copy(albumName = newName) else item
+                                }
+                                Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "重命名失败，请重试", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     } else {
                         // 无权限 → 跳转系统设置
                         try {

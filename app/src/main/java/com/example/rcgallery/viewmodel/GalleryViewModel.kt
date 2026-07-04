@@ -131,7 +131,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     //  相册重命名 — File.renameTo 直接改名
     // ══════════════════════════════════════
 
-    fun renameNow(bucketId: String, newName: String) {
+    /**
+     * 重命名相册（磁盘目录重命名 + _albums/_mediaItems 同步更新）。
+     * @param onResult 异步结果回调：true=成功，false=失败/不可操作
+     */
+    fun renameNow(bucketId: String, newName: String, onResult: (Boolean) -> Unit = {}) {
         AppLogger.d("Rename", "renameNow bucket=$bucketId → $newName")
 
         val allItems = _mediaItems.value.filter { it.albumId == bucketId }
@@ -141,6 +145,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val rp = allItems.firstOrNull()?.relativePath
             if (rp.isNullOrEmpty()) {
                 AppLogger.d("Rename", "No path available, skip renameNow")
+                onResult(false)
                 return
             }
             "/storage/emulated/0/$rp"
@@ -162,11 +167,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _albums.value = _albums.value.map {
                     if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
                 }
+                // 同步更新 _mediaItems 中的 albumName，使 InfoCard 显示新名称
+                _mediaItems.value = _mediaItems.value.map { item ->
+                    if (item.albumId == bucketId) item.copy(albumName = newName) else item
+                }
                 MediaScannerConnection.scanFile(
                     getApplication<Application>(),
                     arrayOf(newDir.absolutePath), null, null
                 )
             }
+            onResult(ok)
         }
     }
 
