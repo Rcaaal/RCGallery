@@ -20,9 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -743,42 +741,64 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
     }
 }
 
-// ── 显示模式选择器（悬浮在列表上方，Elevation + 阴影不被遮盖）──
+// ── 显示模式选择器（下拉框，代替之前的横向按钮）──
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DisplayModeSelector(
     currentMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = modifier
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        listOf(
-            AlbumDisplayMode.Grid(2) to "▦ 2列",
-            AlbumDisplayMode.Grid(3) to "▦ 3列",
-            AlbumDisplayMode.Grid(4) to "▦ 4列",
-            AlbumDisplayMode.Grid(5) to "▦ 5列",
-            AlbumDisplayMode.List to "☰ 列表"
-        ).forEach { (mode, label) ->
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = if (mode isSameAs currentMode) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surface,
-                tonalElevation = if (mode isSameAs currentMode) 0.dp else 3.dp,
-                shadowElevation = if (mode isSameAs currentMode) 0.dp else 4.dp,
-                onClick = { onSelectMode(mode) }
+    val options = listOf(
+        AlbumDisplayMode.Grid(2) to "2列",
+        AlbumDisplayMode.Grid(3) to "3列",
+        AlbumDisplayMode.Grid(4) to "4列",
+        AlbumDisplayMode.Grid(5) to "5列",
+        AlbumDisplayMode.List to "列表"
+    )
+    val currentLabel = options.first { it.first isSameAs currentMode }.second
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier.padding(start = 12.dp, top = 8.dp)) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = !expanded }
+        ) {
+            OutlinedTextField(
+                value = currentLabel,
+                onValueChange = {},
+                readOnly = true,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.labelMedium,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
+                ),
+                modifier = Modifier
+                    .menuAnchor()
+                    .widthIn(min = 100.dp, max = 140.dp)
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
             ) {
-                Text(
-                    text = label,
-                    color = if (mode isSameAs currentMode) MaterialTheme.colorScheme.onPrimaryContainer
-                            else MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                )
+                options.forEach { (mode, label) ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        },
+                        onClick = {
+                            onSelectMode(mode)
+                            expanded = false
+                        },
+                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    )
+                }
             }
         }
     }
