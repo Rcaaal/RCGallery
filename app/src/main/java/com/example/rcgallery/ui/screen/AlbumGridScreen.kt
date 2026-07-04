@@ -496,6 +496,12 @@ private fun AlbumGridContent(
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
                     } else {
+                        // 仅星标变化时先用 payload 局部更新颜色（即时反馈），再全量 rebind 排序
+                        if (prevStarred != starredIds) {
+                            for (i in 0 until adapter.itemCount) {
+                                adapter.notifyItemChanged(i, STAR_PAYLOAD)
+                            }
+                        }
                         adapter.notifyDataSetChanged()
                     }
                 },
@@ -514,6 +520,9 @@ private fun AlbumGridContent(
 // ══════════════════════════════════════
 //  RecyclerView Adapter — Grid / List 模式
 // ══════════════════════════════════════
+
+/** Payload for star-only partial bind — skips image/text reload */
+private val STAR_PAYLOAD = Any()
 
 private class AlbumGridAdapter(
     var items: List<Album>,
@@ -546,6 +555,20 @@ private class AlbumGridAdapter(
             is ListVH -> holder.bind(item, position, starredIds)
         }
     }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty()) {
+            // Star-only partial bind: 不从 items[position] 读数据，
+            // 而是从 holder 已有 tag 读 bucketId，避免 dispatchUpdatesTo 期间 position 漂移
+            when (holder) {
+                is GridVH -> holder.bindStarOnly(starredIds)
+                is ListVH -> holder.bindStarOnly(starredIds)
+            }
+            return
+        }
+        onBindViewHolder(holder, position)
+    }
+
 }
 
 private const val VIEW_TYPE_GRID = 0
@@ -722,6 +745,16 @@ private class GridVH private constructor(
         (root.getChildAt(1) as TextView).text = item.bucketName
         (root.getChildAt(2) as TextView).text = "${item.count} 项"
         val isStarred = item.bucketId in starredIds
+        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
+    }
+
+    /** 星标局部绑定：不从参数读 item，而从 starContainer 已有 tag 读 bucketId */
+    fun bindStarOnly(starredIds: Set<String>) {
+        val bucketId = starContainer.tag as? String ?: return
+        val isStarred = bucketId in starredIds
         starIv.colorFilter = android.graphics.PorterDuffColorFilter(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
             android.graphics.PorterDuff.Mode.SRC_IN
@@ -908,6 +941,16 @@ private class ListVH private constructor(
         pathTv.text = item.directoryPath
         pathTv.visibility = if (item.directoryPath.isNotEmpty()) android.view.View.VISIBLE else android.view.View.GONE
         val isStarred = item.bucketId in starredIds
+        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
+    }
+
+    /** 星标局部绑定：不从参数读 item，而从 starContainer 已有 tag 读 bucketId */
+    fun bindStarOnly(starredIds: Set<String>) {
+        val bucketId = starContainer.tag as? String ?: return
+        val isStarred = bucketId in starredIds
         starIv.colorFilter = android.graphics.PorterDuffColorFilter(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
             android.graphics.PorterDuff.Mode.SRC_IN

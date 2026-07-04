@@ -185,10 +185,6 @@ fun MediaGridScreen(
         }
     }
 
-    // ── sortedItems 的 MutableRef（解决 AndroidView.factory 闭包捕获陈旧引用的问题）──
-    val sortedItemsRef = remember { mutableStateOf(sortedItems) }
-    SideEffect { sortedItemsRef.value = sortedItems }
-
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             if (isLoadingAlbum) {
@@ -221,27 +217,27 @@ fun MediaGridScreen(
                     } else {
                         AndroidView(
                             factory = { ctx ->
-                                val rv = RecyclerView(ctx).apply {
-                                    layoutManager = GridLayoutManager(ctx, 4)
-                                    adapter = SimpleGridAdapter(
-                                        onClick = { item ->
-                                            val items = sortedItemsRef.value
-                                            var index = items.indexOf(item)
-                                            if (index < 0) {
-                                                // fallback: 按 URI 搜索（handle data class equals 不匹配的极端情况）
-                                                val uriStr = item.uri.toString()
-                                                index = items.indexOfFirst { it.uri.toString() == uriStr }
-                                            }
-                                            AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${items.size}")
-                                            if (index >= 0) {
-                                                selectedPhotoIndex = index
-                                            }
-                                        },
-                                        onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
-                                        context = ctx
-                                    )
-                                    clipToPadding = false
-                                }
+                                // rv 先声明再使用
+                                val rv = RecyclerView(ctx)
+                                rv.layoutManager = GridLayoutManager(ctx, 4)
+                                rv.clipToPadding = false
+                                rv.adapter = SimpleGridAdapter(
+                                    onClick = { item ->
+                                        val items = (rv.adapter as SimpleGridAdapter).items
+                                        var index = items.indexOf(item)
+                                        if (index < 0) {
+                                            // fallback: 按 URI 搜索（handle data class equals 不匹配的极端情况）
+                                            val uriStr = item.uri.toString()
+                                            index = items.indexOfFirst { it.uri.toString() == uriStr }
+                                        }
+                                        AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${items.size}")
+                                        if (index >= 0) {
+                                            selectedPhotoIndex = index
+                                        }
+                                    },
+                                    onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
+                                    context = ctx
+                                )
                                 mediaRvRef.value = rv
                                 val scroller = FastScrollerView(ctx, rv)
                                 FrameLayout(ctx).apply {
@@ -253,8 +249,16 @@ fun MediaGridScreen(
                                 val rv = (container as FrameLayout).getChildAt(0) as RecyclerView
                                 val scroller = container.getChildAt(1) as FastScrollerView
                                 val adapter = rv.adapter as SimpleGridAdapter
+                                val prevStarred = adapter.starredUris
                                 adapter.items = sortedItems
                                 adapter.starredUris = starredMediaUris
+                                // 仅星标变化时先用 payload 局部更新颜色（即时反馈）
+                                if (prevStarred != starredMediaUris) {
+                                    for (i in 0 until adapter.itemCount) {
+                                        adapter.notifyItemChanged(i, MEDIA_STAR_PAYLOAD)
+                                    }
+                                }
+                                adapter.notifyDataSetChanged()
                                 scroller.refresh()
                             },
                             modifier = Modifier
@@ -390,6 +394,9 @@ private enum class MediaFilterType(val label: String) {
     IMAGE("图片"), VIDEO("视频"), GIF("GIF")
 }
 
+/** Payload for media star-only partial bind */
+private val MEDIA_STAR_PAYLOAD = Any()
+
 private class SimpleGridAdapter(
     private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
     private val onToggleStar: (String) -> Unit,
@@ -397,19 +404,7 @@ private class SimpleGridAdapter(
 ) : RecyclerView.Adapter<SimpleGridAdapter.VH>() {
 
     var items: List<com.example.rcgallery.model.MediaItem> = emptyList()
-        set(value) {
-            if (field !== value) {
-                field = value
-                notifyDataSetChanged()
-            }
-        }
     var starredUris: Set<String> = emptySet()
-        set(value) {
-            if (field != value) {
-                field = value
-                notifyDataSetChanged()
-            }
-        }
 
     override fun getItemCount() = items.size
 
@@ -497,6 +492,21 @@ private class SimpleGridAdapter(
             android.graphics.PorterDuff.Mode.SRC_IN
         )
         holder.bind(item, position)
+    }
+
+    override fun onBindViewHolder(holder: VH, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty()) {
+            // Star-only partial bind: 不从 items[position] 读数据，
+            // 从 holder.starContainer 已有 tag 读 uriStr，避免 dispatchUpdatesTo 期间 position 漂移
+            val uriStr = holder.starContainer.tag as? String ?: return
+            val isStarred = uriStr in starredUris
+            holder.starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+                if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+                android.graphics.PorterDuff.Mode.SRC_IN
+            )
+            return
+        }
+        onBindViewHolder(holder, position)
     }
 
     class VH(
