@@ -44,10 +44,21 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _trashCount = MutableStateFlow(0)
     val trashCount: StateFlow<Int> = _trashCount.asStateFlow()
 
+    // ── 星标状态 ──
+    private val _starredBucketIds = MutableStateFlow<Set<String>>(emptySet())
+    val starredBucketIds: StateFlow<Set<String>> = _starredBucketIds.asStateFlow()
+
+    // ── 媒体项星标状态 ──
+    private val _starredMediaUris = MutableStateFlow<Set<String>>(emptySet())
+    val starredMediaUris: StateFlow<Set<String>> = _starredMediaUris.asStateFlow()
+
     private var loadMediaJob: Job? = null
     private var pendingAlbumId: String? = null
 
     init {
+        // 从 SharedPreferences 恢复星标状态
+        _starredBucketIds.value = loadStarredIds()
+        _starredMediaUris.value = loadMediaStarredIds()
         refreshTrashCount()
         viewModelScope.launch {
             observer.observeMediaChanges()
@@ -363,6 +374,76 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         AppLogger.d("VM", "removeFromMediaItems: ${item.fileName}")
+    }
+
+    // ══════════════════════════════════════
+    //  星标操作
+    // ══════════════════════════════════════
+
+    /** 切换相册星标状态（灰色 ⇄ 黄色），并持久化到 SharedPreferences */
+    fun toggleStar(bucketId: String) {
+        val current = _starredBucketIds.value
+        val updated = if (bucketId in current) current - bucketId else current + bucketId
+        _starredBucketIds.value = updated
+        saveStarredIds(updated)
+        AppLogger.d("VM", "toggleStar bucket=$bucketId starred=${bucketId in updated}")
+    }
+
+    private fun loadStarredIds(): Set<String> {
+        return try {
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .getStringSet("starred_albums", emptySet()) ?: emptySet()
+        } catch (e: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun saveStarredIds(ids: Set<String>) {
+        try {
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putStringSet("starred_albums", ids)
+                .apply()
+        } catch (e: Exception) {
+            AppLogger.e("VM", "saveStarredIds FAIL", e)
+        }
+    }
+
+    // ══════════════════════════════════════
+    //  媒体项星标操作
+    // ══════════════════════════════════════
+
+    /** 切换媒体项星标状态（灰色 ⇄ 黄色），并持久化到 SharedPreferences */
+    fun toggleMediaStar(uriStr: String) {
+        val current = _starredMediaUris.value
+        val updated = if (uriStr in current) current - uriStr else current + uriStr
+        _starredMediaUris.value = updated
+        saveMediaStarredIds(updated)
+        AppLogger.d("VM", "toggleMediaStar uri=$uriStr starred=${uriStr in updated}")
+    }
+
+    private fun loadMediaStarredIds(): Set<String> {
+        return try {
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .getStringSet("starred_media", emptySet()) ?: emptySet()
+        } catch (e: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun saveMediaStarredIds(ids: Set<String>) {
+        try {
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putStringSet("starred_media", ids)
+                .apply()
+        } catch (e: Exception) {
+            AppLogger.e("VM", "saveMediaStarredIds FAIL", e)
+        }
     }
 
     private fun refreshTrashCount() {

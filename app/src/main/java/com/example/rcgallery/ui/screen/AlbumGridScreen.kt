@@ -44,8 +44,9 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
+import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
-import com.example.rcgallery.ui.component.SettingsOverlay
+import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
@@ -93,7 +94,12 @@ fun AlbumGridScreen(
 ) {
     val context = LocalContext.current
     val viewModel: GalleryViewModel = viewModel(context as ComponentActivity)
-    val albums by viewModel.albums.collectAsStateWithLifecycle()
+    val rawAlbums by viewModel.albums.collectAsStateWithLifecycle()
+    val starredIds by viewModel.starredBucketIds.collectAsStateWithLifecycle()
+    // 本地排序：星标相册在前
+    val albums = remember(rawAlbums, starredIds) {
+        rawAlbums.sortedByDescending { it.bucketId in starredIds }
+    }
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
@@ -117,6 +123,13 @@ fun AlbumGridScreen(
     var showTrash by remember { mutableStateOf(false) }
     if (showTrash) {
         BackHandler { showTrash = false }
+    }
+    // ── 日志面板 ──
+    var showLogDialog by remember { mutableStateOf(false) }
+    if (showLogDialog) {
+        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
+            DevOverlay(initialShow = true)
+        }
     }
 
     // ── 相册重命名状态 ──
@@ -234,6 +247,7 @@ fun AlbumGridScreen(
             } else {
                 AlbumGridContent(
                     albums = albums,
+                    starredIds = starredIds,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
@@ -243,6 +257,7 @@ fun AlbumGridScreen(
                         renameTargetAlbum = album
                         showAlbumRenameDialog = true
                     },
+                    onToggleStar = { bucketId -> viewModel.toggleStar(bucketId) },
                     onRefresh = { viewModel.loadAlbums() },
                     displayMode = displayMode,
                     onSelectMode = { mode ->
@@ -256,7 +271,53 @@ fun AlbumGridScreen(
                 )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
+            // ── 齿轮图标 + 下拉菜单（设置 / 日志）──
+            var showGearMenu by remember { mutableStateOf(false) }
+            var showInertiaSettings by remember { mutableStateOf(false) }
+            if (showInertiaSettings) InertiaSettingsPanel(
+                onDismiss = { showInertiaSettings = false },
+                onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 60.dp, start = 8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xCCFF9800))
+                        .clickable { showGearMenu = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                        contentDescription = "设置",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = showGearMenu,
+                    onDismissRequest = { showGearMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("设置") },
+                        onClick = {
+                            showGearMenu = false
+                            showInertiaSettings = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("日志") },
+                        onClick = {
+                            showGearMenu = false
+                            showLogDialog = true
+                        }
+                    )
+                }
+            }
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
             // ── 回收站入口按钮（右上角，纯 SVG 图标）──
             Icon(
@@ -368,8 +429,10 @@ private fun EmptyContent(onRefresh: () -> Unit) {
 @Composable
 private fun AlbumGridContent(
     albums: List<Album>,
+    starredIds: Set<String>,
     onAlbumClick: (Album) -> Unit,
     onAlbumLongClick: (Album) -> Unit,
+    onToggleStar: (String) -> Unit,
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
@@ -392,7 +455,8 @@ private fun AlbumGridContent(
                     val adapter = AlbumGridAdapter(
                         items = albums,
                         onClick = onAlbumClick,
-                        onLongClick = onAlbumLongClick
+                        onLongClick = onAlbumLongClick,
+                        onToggleStar = onToggleStar
                     )
                     val rv = RecyclerView(ctx).apply {
                         layoutManager = when (displayMode) {
@@ -415,9 +479,10 @@ private fun AlbumGridContent(
                     val rv = (container as FrameLayout).getChildAt(0) as RecyclerView
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
-                    val prevItems = adapter.items
-                    adapter.items = albums
                     val prevMode = adapter.currentMode
+                    val prevStarred = adapter.starredIds
+                    adapter.items = albums
+                    adapter.starredIds = starredIds
                     if (prevMode != displayMode) {
                         adapter.currentMode = displayMode
                         val spanCount = when (displayMode) {
@@ -430,9 +495,8 @@ private fun AlbumGridContent(
                         }
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
-                    } else if (prevItems !== albums) {
+                    } else {
                         adapter.notifyDataSetChanged()
-                        scroller.refresh()
                     }
                 },
                 modifier = Modifier.fillMaxSize()
@@ -454,10 +518,12 @@ private fun AlbumGridContent(
 private class AlbumGridAdapter(
     var items: List<Album>,
     private val onClick: (Album) -> Unit,
-    private val onLongClick: (Album) -> Unit
+    private val onLongClick: (Album) -> Unit,
+    private val onToggleStar: (String) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
+    var starredIds: Set<String> = emptySet()
 
     override fun getItemCount() = items.size
 
@@ -467,17 +533,17 @@ private class AlbumGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return if (viewType == VIEW_TYPE_LIST) {
-            ListVH.create(parent, onClick, onLongClick)
+            ListVH.create(parent, onClick, onLongClick, onToggleStar)
         } else {
-            GridVH.create(parent, onClick, onLongClick)
+            GridVH.create(parent, onClick, onLongClick, onToggleStar)
         }
     }
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val item = items[position]
         when (holder) {
-            is GridVH -> holder.bind(item, position)
-            is ListVH -> holder.bind(item, position)
+            is GridVH -> holder.bind(item, position, starredIds)
+            is ListVH -> holder.bind(item, position, starredIds)
         }
     }
 }
@@ -516,10 +582,14 @@ private class AlbumGridSpacing(context: android.content.Context) : RecyclerView.
 // │ N 项             │  TextView
 // └──────────────────┘
 
-private class GridVH private constructor(itemView: android.view.View) : RecyclerView.ViewHolder(itemView) {
+private class GridVH private constructor(
+    itemView: android.view.View,
+    private val starContainer: FrameLayout,
+    private val starIv: ImageView
+) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit): GridVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit, onToggleStar: (String) -> Unit): GridVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val margin = (6 * density).toInt()
@@ -531,8 +601,8 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            // 正方形缩略图（通过 onMeasure 保持 1:1）
-            val iv = object : ImageView(ctx) {
+            // 正方形封面 FrameLayout（代替原来的 ImageView，用于叠加星标）
+            val coverFrame = object : FrameLayout(ctx) {
                 override fun onMeasure(widthSpec: Int, heightSpec: Int) {
                     super.onMeasure(widthSpec, widthSpec)
                 }
@@ -541,11 +611,65 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     0
                 )
+            }
+            val iv = ImageView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 id = android.R.id.icon
                 setRoundedCorner(ITEM_CORNER_RADIUS_DP)
             }
-            root.addView(iv)
+            coverFrame.addView(iv)
+
+            // ── 星标：左上（半透明黑底圆形 + 星标正居中）──
+            val starContainer = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (48 * density).toInt(),
+                    (48 * density).toInt(),
+                    android.view.Gravity.TOP or android.view.Gravity.START
+                ).apply {
+                    setMargins((4 * density).toInt(), (4 * density).toInt(), 0, 0)
+                }
+                isClickable = true
+                focusable = View.FOCUSABLE
+            }
+            // 小 FrameLayout 包裹圆形背景 + 星标图标（25dp，定位在容器左上角）
+            val starWrapper = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (25 * density).toInt(),
+                    (25 * density).toInt(),
+                    android.view.Gravity.TOP or android.view.Gravity.START
+                ).apply {
+                    setMargins((3 * density).toInt(), (3 * density).toInt(), 0, 0)
+                }
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                    setColor(android.graphics.Color.argb(120, 0, 0, 0))
+                }
+            }
+            val starIv = ImageView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (18 * density).toInt(),
+                    (18 * density).toInt(),
+                    android.view.Gravity.CENTER
+                )
+                scaleType = ImageView.ScaleType.FIT_XY
+                setImageResource(com.example.rcgallery.R.drawable.ic_star)
+            }
+            starWrapper.addView(starIv)
+            starContainer.addView(starWrapper)
+            coverFrame.addView(starContainer)
+
+            root.addView(coverFrame)
+
+            // ── 星标点击：使用 starContainer 自身的 tag（bucketId），
+            //    不依赖 root.tag，防止 RecyclerView 重绑时 position 被覆盖 ──
+            starContainer.setOnClickListener {
+                val bucketId = starContainer.tag as? String ?: return@setOnClickListener
+                onToggleStar(bucketId)
+            }
 
             val nameTv = TextView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -585,17 +709,23 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
                 }
                 true
             }
-            return GridVH(root)
+            return GridVH(root, starContainer, starIv)
         }
     }
 
-    fun bind(item: Album, pos: Int) {
+    fun bind(item: Album, pos: Int, starredIds: Set<String>) {
         itemView.tag = pos
+        starContainer.tag = item.bucketId
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
         iv.load(item.coverUri) { size(180); crossfade(false) }
         val root = itemView as LinearLayout
         (root.getChildAt(1) as TextView).text = item.bucketName
         (root.getChildAt(2) as TextView).text = "${item.count} 项"
+        val isStarred = item.bucketId in starredIds
+        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
     }
 }
 
@@ -609,10 +739,14 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
 // │                   分隔线                         │
 // └─────────────────────────────────────────────────┘
 
-private class ListVH private constructor(itemView: android.view.View) : RecyclerView.ViewHolder(itemView) {
+private class ListVH private constructor(
+    itemView: android.view.View,
+    private val starContainer: FrameLayout,
+    private val starIv: ImageView
+) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit): ListVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit, onToggleStar: (String) -> Unit): ListVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
@@ -622,7 +756,7 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            // ── 内容行（封面 + 文字）──
+            // ── 内容行（封面 + 文字 + 星标）──
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
@@ -691,6 +825,31 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
             textColumn.addView(pathTv)
 
             row.addView(textColumn)
+
+            // ── 星标：方形大触控区域（48dp，图标 24dp 居中）──
+            val starContainer = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (48 * density).toInt(),
+                    (48 * density).toInt()
+                ).apply {
+                    setMargins((8 * density).toInt(), 0, (3 * density).toInt(), 0)
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                isClickable = true
+                focusable = View.FOCUSABLE
+            }
+            val starIv = ImageView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (24 * density).toInt(),
+                    (24 * density).toInt(),
+                    android.view.Gravity.CENTER
+                )
+                scaleType = ImageView.ScaleType.FIT_XY
+                setImageResource(com.example.rcgallery.R.drawable.ic_star)
+            }
+            starContainer.addView(starIv)
+            row.addView(starContainer)
+
             root.addView(row)
 
             // ── 分隔线 ──
@@ -702,6 +861,12 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
                 setBackgroundColor(android.graphics.Color.argb(25, 255, 255, 255))
             }
             root.addView(divider)
+
+            // ── 星标点击：使用 starContainer 自身的 tag（bucketId），不依赖 root.tag ──
+            starContainer.setOnClickListener {
+                val bucketId = starContainer.tag as? String ?: return@setOnClickListener
+                onToggleStar(bucketId)
+            }
 
             root.setOnClickListener {
                 val pos = root.tag as? Int ?: return@setOnClickListener
@@ -718,12 +883,13 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
                 }
                 true
             }
-            return ListVH(root)
+            return ListVH(root, starContainer, starIv)
         }
     }
 
-    fun bind(item: Album, pos: Int) {
+    fun bind(item: Album, pos: Int, starredIds: Set<String>) {
         itemView.tag = pos
+        starContainer.tag = item.bucketId
         val row = (itemView as LinearLayout).getChildAt(0) as LinearLayout
         val iv = row.getChildAt(0) as ImageView
         val textColumn = row.getChildAt(1) as LinearLayout
@@ -741,6 +907,11 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
         }
         pathTv.text = item.directoryPath
         pathTv.visibility = if (item.directoryPath.isNotEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+        val isStarred = item.bucketId in starredIds
+        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
     }
 }
 

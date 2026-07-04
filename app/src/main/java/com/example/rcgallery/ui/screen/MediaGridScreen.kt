@@ -28,18 +28,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
+import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
+import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
@@ -60,6 +61,7 @@ fun MediaGridScreen(
     val viewModel: GalleryViewModel = viewModel(activity)
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
 
     LaunchedEffect(albumId) {
         AppLogger.d("MediaGrid", "LaunchedEffect albumId=[$albumId]  items.size=${mediaItems.size}")
@@ -167,13 +169,25 @@ fun MediaGridScreen(
             }
         }
     }
+    // 星标排序：星标项排在前面
+    val sortedItems = remember(filteredItems, starredMediaUris) {
+        filteredItems.sortedByDescending { it.uri.toString() in starredMediaUris }
+    }
 
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
-    // ── filteredItems 的 MutableRef（解决 AndroidView.factory 闭包捕获陈旧引用的问题）──
-    val filteredItemsRef = remember { mutableStateOf(filteredItems) }
-    SideEffect { filteredItemsRef.value = filteredItems }
+    // ── 日志面板 ──
+    var showLogDialog by remember { mutableStateOf(false) }
+    if (showLogDialog) {
+        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
+            DevOverlay(initialShow = true)
+        }
+    }
+
+    // ── sortedItems 的 MutableRef（解决 AndroidView.factory 闭包捕获陈旧引用的问题）──
+    val sortedItemsRef = remember { mutableStateOf(sortedItems) }
+    SideEffect { sortedItemsRef.value = sortedItems }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
@@ -211,7 +225,7 @@ fun MediaGridScreen(
                                     layoutManager = GridLayoutManager(ctx, 4)
                                     adapter = SimpleGridAdapter(
                                         onClick = { item ->
-                                            val items = filteredItemsRef.value
+                                            val items = sortedItemsRef.value
                                             var index = items.indexOf(item)
                                             if (index < 0) {
                                                 // fallback: 按 URI 搜索（handle data class equals 不匹配的极端情况）
@@ -223,6 +237,7 @@ fun MediaGridScreen(
                                                 selectedPhotoIndex = index
                                             }
                                         },
+                                        onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
                                         context = ctx
                                     )
                                     clipToPadding = false
@@ -238,9 +253,9 @@ fun MediaGridScreen(
                                 val rv = (container as FrameLayout).getChildAt(0) as RecyclerView
                                 val scroller = container.getChildAt(1) as FastScrollerView
                                 val adapter = rv.adapter as SimpleGridAdapter
-                                adapter.submitList(filteredItems) {
-                                    scroller.refresh()
-                                }
+                                adapter.items = sortedItems
+                                adapter.starredUris = starredMediaUris
+                                scroller.refresh()
                             },
                             modifier = Modifier
                                 .fillMaxSize()
@@ -250,7 +265,53 @@ fun MediaGridScreen(
                     }
                 }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            SettingsOverlay(gearModifier = Modifier.align(Alignment.TopStart).padding(top = 60.dp, start = 8.dp))
+            // ── 齿轮图标 + 下拉菜单（设置 / 日志）──
+            var showGearMenu by remember { mutableStateOf(false) }
+            var showInertiaSettings by remember { mutableStateOf(false) }
+            if (showInertiaSettings) InertiaSettingsPanel(
+                onDismiss = { showInertiaSettings = false },
+                onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 60.dp, start = 8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xCCFF9800))
+                        .clickable { showGearMenu = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                        contentDescription = "设置",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = showGearMenu,
+                    onDismissRequest = { showGearMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("设置") },
+                        onClick = {
+                            showGearMenu = false
+                            showInertiaSettings = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("日志") },
+                        onClick = {
+                            showGearMenu = false
+                            showLogDialog = true
+                        }
+                    )
+                }
+            }
 
             // ── 媒体类型过滤按钮（底部居中，略抬上）──
             if (availableTypes.isNotEmpty()) {
@@ -317,7 +378,7 @@ fun MediaGridScreen(
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
-                    items = filteredItems
+                    items = sortedItems
                 )
             }
         }
@@ -331,8 +392,26 @@ private enum class MediaFilterType(val label: String) {
 
 private class SimpleGridAdapter(
     private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
+    private val onToggleStar: (String) -> Unit,
     private val context: android.content.Context
-) : ListAdapter<com.example.rcgallery.model.MediaItem, SimpleGridAdapter.VH>(DiffCallback()) {
+) : RecyclerView.Adapter<SimpleGridAdapter.VH>() {
+
+    var items: List<com.example.rcgallery.model.MediaItem> = emptyList()
+        set(value) {
+            if (field !== value) {
+                field = value
+                notifyDataSetChanged()
+            }
+        }
+    var starredUris: Set<String> = emptySet()
+        set(value) {
+            if (field != value) {
+                field = value
+                notifyDataSetChanged()
+            }
+        }
+
+    override fun getItemCount() = items.size
 
     private val density = context.resources.displayMetrics.density
     private val gapPx = (2 * density).toInt()
@@ -363,22 +442,69 @@ private class SimpleGridAdapter(
             visibility = android.view.View.GONE
         }
         frame.addView(tv)
-        return VH(frame, iv, tv, onClick, itemSize, context)
+
+        // ── 星标：左上角叠加（与相册 Grid 一致）──
+        val starContainer = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                (48 * density).toInt(),
+                (48 * density).toInt(),
+                android.view.Gravity.TOP or android.view.Gravity.START
+            )
+            isClickable = true
+            focusable = android.view.View.FOCUSABLE
+        }
+        val starWrapper = FrameLayout(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                (25 * density).toInt(),
+                (25 * density).toInt(),
+                android.view.Gravity.TOP or android.view.Gravity.START
+            ).apply {
+                setMargins((3 * density).toInt(), (3 * density).toInt(), 0, 0)
+            }
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                setColor(android.graphics.Color.argb(120, 0, 0, 0))
+            }
+        }
+        val starIv = ImageView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                (18 * density).toInt(),
+                (18 * density).toInt(),
+                android.view.Gravity.CENTER
+            )
+            scaleType = ImageView.ScaleType.FIT_XY
+            setImageResource(com.example.rcgallery.R.drawable.ic_star)
+        }
+        starWrapper.addView(starIv)
+        starContainer.addView(starWrapper)
+        frame.addView(starContainer)
+
+        // ── 星标点击 ──
+        starContainer.setOnClickListener {
+            val uriStr = it.tag as? String ?: return@setOnClickListener
+            onToggleStar(uriStr)
+        }
+
+        return VH(frame, iv, tv, starIv, starContainer, onClick, itemSize, context)
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.bind(getItem(position), position)
-    }
-
-    private class DiffCallback : DiffUtil.ItemCallback<com.example.rcgallery.model.MediaItem>() {
-        override fun areItemsTheSame(a: com.example.rcgallery.model.MediaItem, b: com.example.rcgallery.model.MediaItem) = a.uri == b.uri
-        override fun areContentsTheSame(a: com.example.rcgallery.model.MediaItem, b: com.example.rcgallery.model.MediaItem) = a == b
+        val item = items[position]
+        holder.starContainer.tag = item.uri.toString()
+        val isStarred = item.uri.toString() in starredUris
+        holder.starIv.colorFilter = android.graphics.PorterDuffColorFilter(
+            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
+            android.graphics.PorterDuff.Mode.SRC_IN
+        )
+        holder.bind(item, position)
     }
 
     class VH(
         itemView: android.view.View,
         private val iv: ImageView,
         private val tv: TextView,
+        val starIv: ImageView,
+        val starContainer: android.view.View,
         private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
         private val thumbSize: Int,
         private val context: android.content.Context
@@ -393,7 +519,6 @@ private class SimpleGridAdapter(
         fun bind(item: com.example.rcgallery.model.MediaItem, position: Int) {
             currentItem = item
             if (item.isVideo) {
-                // 视频用 Coil 异步加载帧（Coil 2.7.0 内置 VideoFrameDecoder，自动缓存）
                 iv.load(item.uri) { size(thumbSize); crossfade(true) }
             } else {
                 iv.load(item.uri) { size(thumbSize); crossfade(false) }
