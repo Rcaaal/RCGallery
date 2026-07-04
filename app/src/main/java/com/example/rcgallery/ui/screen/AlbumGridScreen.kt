@@ -750,17 +750,17 @@ private fun DisplayModeSelector(
     onSelectMode: (AlbumDisplayMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val options = listOf(
+    val gridOptions = listOf(
         AlbumDisplayMode.Grid(2) to "2列",
         AlbumDisplayMode.Grid(3) to "3列",
         AlbumDisplayMode.Grid(4) to "4列",
         AlbumDisplayMode.Grid(5) to "5列",
-        AlbumDisplayMode.List to "列表"
     )
-    val currentLabel = options.first { it.first isSameAs currentMode }.second
+    val isListMode = currentMode is AlbumDisplayMode.List
+    val currentLabel = if (isListMode) "列数" else gridOptions.first { it.first isSameAs currentMode }.second
     var expanded by remember { mutableStateOf(false) }
 
-    Box(modifier = modifier.padding(start = 12.dp, top = 8.dp)) {
+    Row(modifier = modifier.padding(start = 12.dp, top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         ExposedDropdownMenuBox(
             expanded = expanded,
             onExpandedChange = { expanded = !expanded }
@@ -778,13 +778,13 @@ private fun DisplayModeSelector(
                 ),
                 modifier = Modifier
                     .menuAnchor()
-                    .widthIn(min = 100.dp, max = 140.dp)
+                    .widthIn(min = 80.dp, max = 100.dp)
             )
             ExposedDropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
-                options.forEach { (mode, label) ->
+                gridOptions.forEach { (mode, label) ->
                     DropdownMenuItem(
                         text = {
                             Text(
@@ -800,6 +800,23 @@ private fun DisplayModeSelector(
                     )
                 }
             }
+        }
+        // 列表模式单独保留为按钮
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (isListMode) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+            tonalElevation = if (isListMode) 0.dp else 3.dp,
+            shadowElevation = if (isListMode) 0.dp else 4.dp,
+            onClick = { onSelectMode(AlbumDisplayMode.List) }
+        ) {
+            Text(
+                text = "☰ 列表",
+                color = if (isListMode) MaterialTheme.colorScheme.onPrimaryContainer
+                        else MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            )
         }
     }
 }
