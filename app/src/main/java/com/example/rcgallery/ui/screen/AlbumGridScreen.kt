@@ -23,6 +23,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -757,46 +760,66 @@ private fun DisplayModeSelector(
         AlbumDisplayMode.Grid(5) to "5列",
     )
     val isListMode = currentMode is AlbumDisplayMode.List
-    val currentLabel = if (isListMode) "列数" else gridOptions.first { it.first isSameAs currentMode }.second
+    val isSelected = { mode: AlbumDisplayMode -> mode isSameAs currentMode }
     var expanded by remember { mutableStateOf(false) }
 
     Row(modifier = modifier.padding(start = 12.dp, top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = !expanded }
-        ) {
-            OutlinedTextField(
-                value = currentLabel,
-                onValueChange = {},
-                readOnly = true,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.labelMedium,
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
-                ),
-                modifier = Modifier
-                    .menuAnchor()
-                    .widthIn(min = 80.dp, max = 100.dp)
-            )
-            ExposedDropdownMenu(
+        // 列数选择 — 同款 Surface chip 风格
+        Box {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (!isListMode) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                tonalElevation = if (!isListMode) 0.dp else 3.dp,
+                shadowElevation = if (!isListMode) 0.dp else 4.dp,
+                onClick = { expanded = true }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                ) {
+                    Text(
+                        text = if (isListMode) "列数" else gridOptions.first { isSelected(it.first) }.second,
+                        color = if (!isListMode) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = "展开",
+                        modifier = Modifier.size(16.dp),
+                        tint = if (!isListMode) MaterialTheme.colorScheme.onPrimaryContainer
+                               else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false }
             ) {
                 gridOptions.forEach { (mode, label) ->
                     DropdownMenuItem(
                         text = {
-                            Text(
-                                text = label,
-                                style = MaterialTheme.typography.labelMedium
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected(mode)) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                         },
                         onClick = {
                             onSelectMode(mode)
                             expanded = false
-                        },
-                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                        }
                     )
                 }
             }
