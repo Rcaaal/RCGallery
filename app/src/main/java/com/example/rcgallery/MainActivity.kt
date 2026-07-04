@@ -7,11 +7,11 @@ import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Surface
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.navigation.NavType
@@ -21,10 +21,13 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.rcgallery.ui.navigation.Route
 import com.example.rcgallery.ui.screen.AlbumGridScreen
+import com.example.rcgallery.ui.screen.NetworkBrowserScreen
 import com.example.rcgallery.ui.screen.SearchScreen
 import com.example.rcgallery.ui.theme.RCGalleryTheme
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.player.VideoPlayerScreen
+import com.example.rcgallery.viewmodel.GalleryViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 /** PiP 状态与工具方法 */
 object PipState {
@@ -57,43 +60,73 @@ class MainActivity : ComponentActivity() {
         setContent {
             RCGalleryTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val navController = rememberNavController()
+                    val viewModel: GalleryViewModel = viewModel()
+                    val currentTab by viewModel.currentTab.collectAsState()
 
-                    NavHost(
-                        navController = navController,
-                        startDestination = Route.AlbumGrid.route
-                    ) {
-                        composable(Route.AlbumGrid.route) {
-                            AlbumGridScreen(
-                                onSearchClick = {
-                                    AppLogger.d("Nav", "navigate → Search")
-                                    navController.navigate(Route.Search.route)
-                                }
-                            )
+                    Scaffold(
+                        bottomBar = {
+                            NavigationBar {
+                                NavigationBarItem(
+                                    icon = { Text("📁") },
+                                    label = { Text("本地") },
+                                    selected = currentTab == 0,
+                                    onClick = { viewModel.switchTab(0) }
+                                )
+                                NavigationBarItem(
+                                    icon = { Text("🌐") },
+                                    label = { Text("网络") },
+                                    selected = currentTab == 1,
+                                    onClick = { viewModel.switchTab(1) }
+                                )
+                            }
                         }
+                    ) { innerPadding ->
+                        Box(modifier = Modifier.padding(innerPadding)) {
+                            when (currentTab) {
+                                0 -> {
+                                    val navController = rememberNavController()
+                                    NavHost(
+                                        navController = navController,
+                                        startDestination = Route.AlbumGrid.route
+                                    ) {
+                                        composable(Route.AlbumGrid.route) {
+                                            AlbumGridScreen(
+                                                onSearchClick = {
+                                                    AppLogger.d("Nav", "navigate → Search")
+                                                    navController.navigate(Route.Search.route)
+                                                }
+                                            )
+                                        }
 
-                        composable(
-                            route = Route.VideoPlayer.route,
-                            arguments = listOf(navArgument("mediaId") { type = NavType.LongType })
-                        ) { backStackEntry ->
-                            val mediaId = backStackEntry.arguments?.getLong("mediaId") ?: 0L
-                            AppLogger.d("Nav", "→ VideoPlayer enter mediaId=$mediaId")
-                            VideoPlayerScreen(
-                                mediaId = mediaId,
-                                onBackClick = {
-                                    AppLogger.d("Nav", "← popBackStack from VideoPlayer")
-                                    navController.popBackStack()
-                                }
-                            )
-                        }
+                                        composable(
+                                            route = Route.VideoPlayer.route,
+                                            arguments = listOf(navArgument("mediaId") { type = NavType.LongType })
+                                        ) { backStackEntry ->
+                                            val mediaId = backStackEntry.arguments?.getLong("mediaId") ?: 0L
+                                            AppLogger.d("Nav", "→ VideoPlayer enter mediaId=$mediaId")
+                                            VideoPlayerScreen(
+                                                mediaId = mediaId,
+                                                onBackClick = {
+                                                    AppLogger.d("Nav", "← popBackStack from VideoPlayer")
+                                                    navController.popBackStack()
+                                                }
+                                            )
+                                        }
 
-                        composable(Route.Search.route) {
-                            SearchScreen(
-                                onBackClick = {
-                                    AppLogger.d("Nav", "← popBackStack from Search")
-                                    navController.popBackStack()
+                                        composable(Route.Search.route) {
+                                            SearchScreen(
+                                                onBackClick = {
+                                                    AppLogger.d("Nav", "← popBackStack from Search")
+                                                    navController.popBackStack()
+                                                }
+                                            )
+                                        }
+                                    }
                                 }
-                            )
+                                1 -> {
+                                    NetworkBrowserScreen(viewModel = viewModel)
+                                }
+                            }
                         }
                     }
                 }

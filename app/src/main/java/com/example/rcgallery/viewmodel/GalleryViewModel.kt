@@ -6,6 +6,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
 import com.example.rcgallery.data.TrashManager
+import com.example.rcgallery.data.smb.SmbBrowseState
+import com.example.rcgallery.data.smb.SmbDevice
+import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
@@ -37,6 +40,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    // ── Tab 切换（本地 / 网络）──
+    private val _currentTab = MutableStateFlow(0)  // 0=本地, 1=网络
+    val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
+
+    fun switchTab(tab: Int) {
+        _currentTab.value = tab
+    }
+
+    // ── SMB 网络浏览状态 ──
+    private val _smbBrowseState = MutableStateFlow<SmbBrowseState>(SmbBrowseState.DeviceList)
+    val smbBrowseState: StateFlow<SmbBrowseState> = _smbBrowseState.asStateFlow()
+
+    private val _smbDevices = MutableStateFlow<List<SmbDevice>>(emptyList())
+    val smbDevices: StateFlow<List<SmbDevice>> = _smbDevices.asStateFlow()
+
+    private val smbRepository = SmbRepository.getInstance()
+
+    // SMB 浏览历史栈（支持上一级回退不走重新连接）
+    private val _smbBackStack = mutableListOf<SmbBrowseState>()
+    // 当前正在扫描的路径（防竞态：扫描完成时如果用户已按返回，忽略结果）
+    private var pendingScanPath: String? = null
+
     // ── 回收站状态 ──
     private val _trashEntries = MutableStateFlow<List<TrashEntry>>(emptyList())
     val trashEntries: StateFlow<List<TrashEntry>> = _trashEntries.asStateFlow()
@@ -59,6 +84,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         // 从 SharedPreferences 恢复星标状态
         _starredBucketIds.value = loadStarredIds()
         _starredMediaUris.value = loadMediaStarredIds()
+        // 恢复已保存的 SMB 设备列表
+        _smbDevices.value = loadSmbDevices()
         refreshTrashCount()
         viewModelScope.launch {
             observer.observeMediaChanges()
@@ -460,5 +487,168 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun refreshTrashCount() {
         _trashCount.value = trashManager.count()
+    }
+
+    // ══════════════════════════════════════
+    //  SMB 网络共享操作（文件夹相册模式）
+    // ══════════════════════════════════════
+
+    /**
+     * 连接主机并枚举共享。
+     *
+     * 认证路径从 `smb://host/` 改为 `smb://host/IPC$/`，
+     * 更符合 Windows SMB 共享发现机制。
+     */
+    fun smbConnect(host: String) {
+        _smbBackStack.clear()
+        _smbBrowseState.value = SmbBrowseState.Connecting(host, "正在连接 $host ...")
+        viewModelScope.launch {
+            smbRepository.listShares(host)
+                .onSuccess { shares ->
+                    val device = SmbDevice(host = host, displayName = host)
+                    val existing = _smbDevices.value.find { it.host == host }
+                    if (existing == null) {
+                        _smbDevices.value = _smbDevices.value + device
+                        saveSmbDevices(_smbDevices.value)
+                    }
+                    _smbBrowseState.value = SmbBrowseState.ShareList(host, shares)
+                }
+                .onFailure { e ->
+                    AppLogger.e("SMB", "connect failed host=$host", e)
+                    val msg = e.message ?: "连接失败，请确认：\n1. PC 已开启网络共享\n2. IP 地址正确\n3. 在同一局域网"
+                    _smbBrowseState.value = SmbBrowseState.Error(msg)
+                }
+        }
+    }
+
+    /**
+     * 打开一个路径（共享或子文件夹），扫描其内容。
+     *
+     * 将当前状态推入历史栈，供 smbGoBack 使用。
+     * 使用 pendingScanPath 防竞态：如果用户在扫描期间按了返回，忽略结果。
+     */
+    fun smbOpenFolder(path: String, folderName: String) {
+        val state = _smbBrowseState.value
+        val host = when (state) {
+            is SmbBrowseState.ShareList -> state.host
+            is SmbBrowseState.FolderContent -> state.host
+            else -> return
+        }
+
+        // 将当前状态推入历史栈
+        _smbBackStack.add(state)
+        pendingScanPath = path
+
+        _smbBrowseState.value = SmbBrowseState.Connecting(host, "正在扫描 $folderName ...")
+
+        viewModelScope.launch {
+            smbRepository.scanFolderContent(
+                url = path,
+                onProgress = { scanned, total ->
+                    // 只更新当前正在扫描的路径进度
+                    if (pendingScanPath == path) {
+                        _smbBrowseState.value = SmbBrowseState.Connecting(
+                            host = host,
+                            progressMessage = "扫描子文件夹 $scanned/$total ..."
+                        )
+                    }
+                }
+            )
+                .onSuccess { result ->
+                    if (pendingScanPath == path) {
+                        pendingScanPath = null
+                        _smbBrowseState.value = SmbBrowseState.FolderContent(
+                            host = host,
+                            currentPath = path,
+                            folderName = folderName,
+                            subFolders = result.subFolders,
+                            mediaFiles = result.mediaFiles
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    AppLogger.e("SMB", "scanFolder failed path=$path", e)
+                    if (pendingScanPath == path) {
+                        pendingScanPath = null
+                        if (_smbBackStack.isNotEmpty()) {
+                            _smbBrowseState.value = _smbBackStack.removeLast()
+                        } else {
+                            _smbBrowseState.value = SmbBrowseState.Error(e.message ?: "无法扫描文件夹")
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * 返回上一级。
+     *
+     * 使用历史栈直接回退，不重新连接服务器。
+     * 取消当前正在进行的扫描。
+     */
+    fun smbGoBack() {
+        pendingScanPath = null
+        val state = _smbBrowseState.value
+        when (state) {
+            is SmbBrowseState.FolderContent,
+            is SmbBrowseState.ShareList -> {
+                if (_smbBackStack.isNotEmpty()) {
+                    _smbBrowseState.value = _smbBackStack.removeLast()
+                } else {
+                    _smbBrowseState.value = SmbBrowseState.DeviceList
+                }
+            }
+            is SmbBrowseState.Error -> {
+                _smbBrowseState.value = SmbBrowseState.DeviceList
+            }
+            else -> {}
+        }
+    }
+
+    fun smbResetState() {
+        _smbBackStack.clear()
+        _smbBrowseState.value = SmbBrowseState.DeviceList
+    }
+
+    /**
+     * 删除设备：从 UI 列表移除 + 清理认证缓存。
+     */
+    fun smbRemoveDevice(deviceId: String) {
+        val device = _smbDevices.value.find { it.id == deviceId } ?: return
+        _smbDevices.value = _smbDevices.value.filter { it.id != deviceId }
+        saveSmbDevices(_smbDevices.value)
+        // 清理该主机对应的认证缓存
+        smbRepository.clearAuthCache(device.host)
+        AppLogger.d("SMB", "removed device $deviceId (${device.host}), auth cache cleared")
+    }
+
+    // ── SMB 设备持久化（SharedPreferences）──
+
+    private fun saveSmbDevices(devices: List<SmbDevice>) {
+        try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_smb_prefs", android.content.Context.MODE_PRIVATE)
+            val json = devices.joinToString("|") { "${it.id},${it.host},${it.displayName}" }
+            prefs.edit().putString("smb_devices", json).apply()
+        } catch (e: Exception) {
+            AppLogger.e("SMB", "saveSmbDevices FAIL", e)
+        }
+    }
+
+    private fun loadSmbDevices(): List<SmbDevice> {
+        return try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_smb_prefs", android.content.Context.MODE_PRIVATE)
+            val json = prefs.getString("smb_devices", "") ?: ""
+            if (json.isEmpty()) return emptyList()
+            json.split("|").mapNotNull { part ->
+                val segs = part.split(",")
+                if (segs.size >= 2) {
+                    SmbDevice(id = segs[0], host = segs[1], displayName = segs.getOrElse(2) { "" })
+                } else null
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 }

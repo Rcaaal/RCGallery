@@ -103,13 +103,18 @@ dependencies {
     // RecyclerView — 原生高性能网格
     implementation(libs.recyclerview)
 
-    // Media3 — 视频播放 + PiP MediaSession
+    // Media3 — 视频播放 + PiP MediaSession + SMB 缓存
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
     implementation(libs.media3.session)
+    // media3-datasource 包含 SimpleCache/CacheDataSource 等缓存类
+    implementation(libs.media3.datasource)
 
     // Room — 自定义相册 / 收藏 / 回收站
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     kapt(libs.room.compiler)
+
+    // jcifs-ng — SMB 网络共享访问
+    implementation(libs.jcifs.ng)
 }
