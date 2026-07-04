@@ -81,6 +81,15 @@ private fun ImageView.setRoundedCorner(radiusDp: Int) {
 }
 
 
+/** 星标缩放因子：根据 Grid 列数调整，列数越多星标越小 */
+private fun getAlbumStarScale(columns: Int): Float = when (columns) {
+    2 -> 1.15f
+    3 -> 1.0f
+    4 -> 0.85f
+    5 -> 0.7f
+    else -> 1.0f
+}
+
 private infix fun AlbumDisplayMode.isSameAs(other: AlbumDisplayMode): Boolean = when {
     this is AlbumDisplayMode.Grid && other is AlbumDisplayMode.Grid -> this.columns == other.columns
     this is AlbumDisplayMode.List && other is AlbumDisplayMode.List -> true
@@ -106,11 +115,22 @@ fun AlbumGridScreen(
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
     var selectedAlbumName by remember { mutableStateOf("") }
     // albums（来自 ViewModel）变化时联动更新相册名
-    // 若 bucketId 匹配则用新名，找不到则保持旧名（防止 loadAlbums 后 bucketId 变动导致标题变空）
+    // 优先按 bucketId 匹配；如果 bucketId 变了（如改名后 MediaStore 重新扫描），按相册名回退
     LaunchedEffect(albums, selectedAlbumId) {
         val id = selectedAlbumId
         if (id != null) {
-            selectedAlbumName = albums.find { it.bucketId == id }?.bucketName ?: selectedAlbumName
+            val found = albums.find { it.bucketId == id }
+            if (found != null) {
+                selectedAlbumName = found.bucketName
+            } else {
+                // bucketId 变了：尝试用当前名字匹配（改名后 MediaStore 分配新 bucketId）
+                val byName = albums.find { it.bucketName == selectedAlbumName }
+                if (byName != null) {
+                    selectedAlbumName = byName.bucketName
+                    selectedAlbumId = byName.bucketId
+                }
+                // 都找不到则保持现状
+            }
         }
     }
     if (selectedAlbumId != null) {
@@ -550,8 +570,12 @@ private class AlbumGridAdapter(
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val item = items[position]
+        val columns = when (val mode = currentMode) {
+            is AlbumDisplayMode.Grid -> mode.columns
+            is AlbumDisplayMode.List -> 1
+        }
         when (holder) {
-            is GridVH -> holder.bind(item, position, starredIds)
+            is GridVH -> holder.bind(item, position, starredIds, columns)
             is ListVH -> holder.bind(item, position, starredIds)
         }
     }
@@ -608,6 +632,7 @@ private class AlbumGridSpacing(context: android.content.Context) : RecyclerView.
 private class GridVH private constructor(
     itemView: android.view.View,
     private val starContainer: FrameLayout,
+    private val starWrapper: FrameLayout,
     private val starIv: ImageView
 ) : RecyclerView.ViewHolder(itemView) {
 
@@ -732,11 +757,11 @@ private class GridVH private constructor(
                 }
                 true
             }
-            return GridVH(root, starContainer, starIv)
+            return GridVH(root, starContainer, starWrapper, starIv)
         }
     }
 
-    fun bind(item: Album, pos: Int, starredIds: Set<String>) {
+    fun bind(item: Album, pos: Int, starredIds: Set<String>, columns: Int = 3) {
         itemView.tag = pos
         starContainer.tag = item.bucketId
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
@@ -749,6 +774,27 @@ private class GridVH private constructor(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
             android.graphics.PorterDuff.Mode.SRC_IN
         )
+        // 根据列数缩放星标大小
+        updateStarSize(columns)
+    }
+
+    /** 动态调整星标三个层级的尺寸，与 Grid 列数适配 */
+    private fun updateStarSize(columns: Int) {
+        val density = itemView.resources.displayMetrics.density
+        val scale = getAlbumStarScale(columns)
+        starContainer.layoutParams = (starContainer.layoutParams as FrameLayout.LayoutParams).apply {
+            width = (48 * density * scale).toInt()
+            height = (48 * density * scale).toInt()
+        }
+        starWrapper.layoutParams = (starWrapper.layoutParams as FrameLayout.LayoutParams).apply {
+            width = (25 * density * scale).toInt()
+            height = (25 * density * scale).toInt()
+            setMargins((3 * density * scale).toInt(), (3 * density * scale).toInt(), 0, 0)
+        }
+        starIv.layoutParams = (starIv.layoutParams as FrameLayout.LayoutParams).apply {
+            width = (18 * density * scale).toInt()
+            height = (18 * density * scale).toInt()
+        }
     }
 
     /** 星标局部绑定：不从参数读 item，而从 starContainer 已有 tag 读 bucketId */

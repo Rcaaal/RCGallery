@@ -178,10 +178,22 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _albums.value = _albums.value.map {
                     if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
                 }
-                // 同步更新 _mediaItems 中的 albumName，使 InfoCard 显示新名称
+                // 同步更新 _mediaItems 中的 albumName 和 filePath
+                val oldDirStr = dirPath.trimEnd('/')
+                val newDirStr = newDir.absolutePath.trimEnd('/')
                 _mediaItems.value = _mediaItems.value.map { item ->
-                    if (item.albumId == bucketId) item.copy(albumName = newName) else item
+                    if (item.albumId == bucketId) {
+                        val newFilePath = if (item.filePath.startsWith(oldDirStr)) {
+                            item.filePath.replace(oldDirStr, newDirStr)
+                        } else {
+                            item.filePath
+                        }
+                        item.copy(albumName = newName, filePath = newFilePath)
+                    } else {
+                        item
+                    }
                 }
+                // scanFile 让 MediaStore 感知目录改名，使后续 loadMedia 能正确匹配新路径
                 MediaScannerConnection.scanFile(
                     getApplication<Application>(),
                     arrayOf(newDir.absolutePath), null, null
