@@ -6,21 +6,23 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import com.example.rcgallery.util.AppLogger
+import jcifs.smb.SmbFileInputStream
 import jcifs.smb.SmbRandomAccessFile
 
 /**
- * ExoPlayer 自定义 DataSource — 通过 SMB 协议直接流式读取媒体文件。
+ * ExoPlayer 自定义 DataSource — SMB 协议流式读取。
  *
- * ### 自适应预读
+ * ### 双模式策略
  *
- * | 场景 | 预读大小 | 耗时(@40MB/s) | 可播放时长(~8Mbps) |
- * |------|---------|-------------|------------------|
- * | 首次打开(position=0) | 16MB | ~400ms | ~30-60s |
- * | 快进跳转(position>0) | 2MB | ~50ms | ~3-6s |
- * | 持续播放 | 8MB | ~200ms | ~15-30s |
+ * jcifs-ng 两个 API：
+ * - [SmbFileInputStream]：大块读 17-35MB/s（已验证）
+ * - [SmbRandomAccessFile]：大块读 0.7-1.6MB/s，但支持 seek()
  *
- * 快进后用小块预读（2MB），ExoPlayer 只需求关键帧附近的数据即可开始解码，
- * 比每次都读 8MB 快 4 倍。
+ * | 场景 | 用什么 | 原因 |
+ * |------|--------|------|
+ * | 首次打开(pos=0) | SmbFileInputStream | 快读 16MB (~1s)，seek 不需要 |
+ * | 快进跳转(pos>0) | SmbRandomAccessFile | seek() 到位置，读 2MB（无需跳过大量数据）|
+ * | seek 后连续播放 | SmbRandomAccessFile | 慢但已是最坏情况可接受 |
  */
 class SmbDataSource : DataSource {
 
@@ -30,9 +32,9 @@ class SmbDataSource : DataSource {
         private const val SEEK_CHUNK = 2 * 1024 * 1024
     }
 
+    private var inputStream: SmbFileInputStream? = null
     private var raf: SmbRandomAccessFile? = null
     private var currentUri: Uri? = null
-    private var fileLen: Long = 0L
     @Volatile private var closed = false
 
     // ── 预读缓冲区 ──
@@ -46,30 +48,32 @@ class SmbDataSource : DataSource {
         val url = dataSpec.uri.toString()
         val position = dataSpec.position
 
-        AppLogger.d("SMB-IO", "open: pos=$position")
-
         bufPos = 0
         bufSize = 0
-
-        // 根据是否 seek 选择初始缓冲区大小
         readBuf = if (position == 0L) ByteArray(FIRST_CHUNK) else ByteArray(SEEK_CHUNK)
 
         val repo = SmbRepository.getInstance()
-        val result = repo.getRandomAccessFile(url)
-        val file = result.getOrThrow()
-        if (position != 0L) file.seek(position)
-        raf = file
-        fileLen = file.length()
 
-        AppLogger.d("SMB-IO", "open OK: chunk=${readBuf.size / 1024}KB len=$fileLen")
-        return fileLen - position
+        if (position == 0L) {
+            // ── 首次打开：SmbFileInputStream 快读 ──
+            val stream = repo.getInputStreamForFile(url).getOrThrow()
+            inputStream = stream
+            AppLogger.d("SMB-IO", "open(pos=0): stream mode, chunk=${readBuf.size / 1024}KB")
+        } else {
+            // ── seek：SmbRandomAccessFile 跳转 ──
+            val file = repo.getRandomAccessFile(url).getOrThrow()
+            try { file.seek(position) } catch (e: Exception) { file.close(); throw e }
+            raf = file
+            AppLogger.d("SMB-IO", "open(pos=$position): RAF mode, chunk=${readBuf.size / 1024}KB")
+        }
+
+        return C.LENGTH_UNSET.toLong()
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (closed) return C.RESULT_END_OF_INPUT
-        val file = raf ?: throw IllegalStateException("DataSource not opened")
 
-        // ── 缓冲区有剩余 → 直接返回 ──
+        // ── 缓冲有数据 → 直接返回 ──
         val remaining = bufSize - bufPos
         if (remaining > 0) {
             val toCopy = minOf(length, remaining)
@@ -78,35 +82,41 @@ class SmbDataSource : DataSource {
             return toCopy
         }
 
-        // ── 缓冲区耗尽 → 一次性读一大块 ──
-        // 第一块(16MB 或 2MB)读完，后续都切到 8MB
-        if (readBuf.size != NEXT_CHUNK) {
-            readBuf = ByteArray(NEXT_CHUNK)
+        // ── 缓冲耗尽 → 从 SMB 读下一块 ──
+        if (readBuf.size != NEXT_CHUNK) readBuf = ByteArray(NEXT_CHUNK)
+        val chunk = readBuf.size
+
+        val n = if (inputStream != null) {
+            // 流模式：快读
+            try { inputStream!!.read(readBuf, 0, chunk) }
+            catch (e: Exception) { if (closed) return C.RESULT_END_OF_INPUT; throw e }
+        } else if (raf != null) {
+            // RAF 模式：慢读（支持 seek 的代价）
+            try { raf!!.read(readBuf, 0, chunk) }
+            catch (e: Exception) { if (closed) return C.RESULT_END_OF_INPUT; throw e }
+        } else {
+            return C.RESULT_END_OF_INPUT
         }
 
-        AppLogger.d("SMB-IO", "read ${NEXT_CHUNK / 1024}KB from SMB...")
-        val n = file.read(readBuf, 0, NEXT_CHUNK)
-        if (n <= 0) return n
+        if (n <= 0) return C.RESULT_END_OF_INPUT
 
         bufSize = n
         bufPos = 0
-
         val toCopy = minOf(length, n)
         System.arraycopy(readBuf, 0, buffer, offset, toCopy)
         bufPos = toCopy
-        AppLogger.d("SMB-IO", "read DONE: ${n / 1024}KB")
+        AppLogger.d("SMB-IO", "  refill: ${n / 1024}KB (stream=${inputStream != null})")
         return toCopy
     }
 
     override fun getUri(): Uri? = currentUri
 
     override fun close() {
-        AppLogger.d("SMB-IO", "close")
         closed = true
-        bufSize = 0
-        bufPos = 0
+        bufSize = 0; bufPos = 0
+        try { inputStream?.close() } catch (_: Exception) { }
         try { raf?.close() } catch (_: Exception) { }
-        raf = null
+        inputStream = null; raf = null
     }
 
     override fun addTransferListener(listener: TransferListener) { }

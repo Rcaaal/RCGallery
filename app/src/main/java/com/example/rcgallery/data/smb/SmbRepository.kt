@@ -330,6 +330,15 @@ class SmbRepository {
         SmbRandomAccessFile(SmbFile(url, ctx), "r")
     }
 
+    /**
+     * 同步获取 SMB 文件输入流。
+     * 与 [getRandomAccessFile] 相比，实测大块顺序读性能显著更好。
+     */
+    fun getInputStreamForFile(url: String): Result<SmbFileInputStream> = runCatching {
+        val ctx = getContextForPath(url)
+        SmbFileInputStream(SmbFile(url, ctx))
+    }
+
     // ══════════════════════════════════════
     //  工具
     // ══════════════════════════════════════

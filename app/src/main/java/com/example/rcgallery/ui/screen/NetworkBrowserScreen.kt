@@ -2,7 +2,6 @@ package com.example.rcgallery.ui.screen
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -670,26 +669,11 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
 }
 
 /**
- * SMB 视频播放器 — 通过 SmbDataSource 直接流式播放，无需等待复制。
+ * SMB 视频播放器 — 通过 SmbDataSource 直接流式播放。
  *
- * ### 架构
- * ExoPlayer → ProgressiveMediaSource.Factory → SmbDataSource (8MB 预读缓冲)
- *
- * - 点开视频：ExoPlayer 立即调用 SmbDataSource.open() 打开 SMB 文件
- * - 第一次 read()：同步读 8MB 到内部缓冲区（~200ms @ 40MB/s）
- * - 后续 read()：从缓冲区返回，零网络 I/O
- * - 8MB 耗尽 → 再同步读 8MB
- *
- * ### 对比 CacheDataSource 方案
- * CacheDataSource 层缓存粒度太小，ExoPlayer 频繁因数据不足而缓冲。
- * 去掉中间层，SmbDataSource 直接管理 8MB 大缓冲区，减少 SMB 交互次数。
- *
- * ### 中断安全
- * [SmbDataSource.close()] 立即关闭底层 SMB 连接，
- * 确保 [ExoPlayer.release()] 不会因 SMB 读取阻塞而超时崩溃。
- *
- * ### TextureView 修复黑屏
- * Compose overlay 中 SurfaceView 渲染在不可见层 → 改用 texture_view。
+ * 内部使用 SmbFileInputStream（实测 ~17-35MB/s），
+ * 非 SmbRandomAccessFile（仅 ~1MB/s 大块读）。
+ * 不套 CacheDataSource — 简化路径，减少意外延迟。
  */
 @Composable
 private fun SmbVideoPlayer(
@@ -705,30 +689,25 @@ private fun SmbVideoPlayer(
         ExoPlayer.Builder(context)
             .setLoadControl(DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    30_000,    // minBufferMs
-                    60_000,    // maxBufferMs
-                    3_000,     // bufferForPlaybackMs: 缓冲 3s 即可开始（8MB ≈ 10-30s）
-                    5_000      // bufferForPlaybackAfterRebufferMs
-                )
-                .build()
+                    30_000, 60_000, 2000, 3000
+                ).build()
             )
             .build().apply {
                 val mediaSource = ProgressiveMediaSource.Factory(SmbDataSource.Factory())
-                    .createMediaSource(MediaItem.fromUri(Uri.parse(fileInfo.path)))
+                    .createMediaSource(MediaItem.fromUri(android.net.Uri.parse(fileInfo.path)))
                 setMediaSource(mediaSource)
                 prepare()
                 playWhenReady = true
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         playbackState = state
-                        if (state == Player.STATE_READY) {
+                        if (state == Player.STATE_READY)
                             AppLogger.d("SMB-VIDEO", "Player READY")
-                        } else if (state == Player.STATE_BUFFERING) {
+                        else if (state == Player.STATE_BUFFERING)
                             AppLogger.d("SMB-VIDEO", "Player BUFFERING")
-                        }
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        AppLogger.e("SMB-VIDEO", "playback error: ${error.message}", error)
+                        AppLogger.e("SMB-VIDEO", "error: ${error.message}", error)
                         hasError = true
                         errorMessage = error.message ?: "播放失败"
                     }
@@ -739,7 +718,7 @@ private fun SmbVideoPlayer(
     // ── 清理 ──
     DisposableEffect(fileInfo.path) {
         onDispose {
-            AppLogger.d("SMB-VIDEO", "onDispose: stop & release")
+            AppLogger.d("SMB-VIDEO", "onDispose")
             exoPlayer.stop()
             exoPlayer.release()
         }
@@ -767,7 +746,6 @@ private fun SmbVideoPlayer(
                 }
             }
             playbackState == Player.STATE_READY -> {
-                // 使用 TextureView（修复 SurfaceView 在 Compose overlay 中黑屏）
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
@@ -792,7 +770,6 @@ private fun SmbVideoPlayer(
                 )
             }
             else -> {
-                // 缓冲/加载中 — 显示 "点击返回" 按钮
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = Color.White)
