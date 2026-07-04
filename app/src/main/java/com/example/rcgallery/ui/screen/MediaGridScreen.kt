@@ -1,11 +1,19 @@
 package com.example.rcgallery.ui.screen
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -79,6 +87,65 @@ fun MediaGridScreen(
     // 音量开关：相册级别记忆（退出相册后自动重置）
     var volumeEnabled by remember { mutableStateOf(false) }
 
+    // ── 相册重命名 ──
+    var showAlbumRenameDialog by remember { mutableStateOf(false) }
+    val renameContext = LocalContext.current
+    val manageStorageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        Toast.makeText(renameContext, "授权成功，请重新点击标题进行改名", Toast.LENGTH_SHORT).show()
+    }
+    if (showAlbumRenameDialog && albumId.isNotEmpty()) {
+        val currentName = albumName.ifEmpty { "未知" }
+        var editText by remember { mutableStateOf(currentName) }
+        AlertDialog(
+            onDismissRequest = { showAlbumRenameDialog = false },
+            title = { Text("重命名相册") },
+            text = {
+                Column {
+                    val hasManageStorage = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+                    val hint = if (hasManageStorage) "相册名立即更改，文件夹同时重命名。"
+                               else "首次改名需授权，将跳转至系统设置开启权限。"
+                    Text(hint, color = Color(0xFF999999), fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        singleLine = true,
+                        label = { Text("新相册名") }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newName = editText.trim()
+                    if (newName.isEmpty()) return@Button
+                    showAlbumRenameDialog = false
+                    if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                        viewModel.renameNow(albumId, newName) { ok ->
+                            if (ok) {
+                                Toast.makeText(renameContext, "相册已重命名", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(renameContext, "重命名失败，请重试", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } else {
+                        try {
+                            manageStorageLauncher.launch(
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${renameContext.packageName}")
+                                }
+                            )
+                        } catch (e: Exception) {
+                            Toast.makeText(renameContext, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }) { Text("确认") }
+            },
+            dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
+        )
+    }
+
     // ── 媒体类型过滤 ──
     val availableTypes = remember(mediaItems) {
         mutableSetOf<MediaFilterType>().apply {
@@ -117,7 +184,13 @@ fun MediaGridScreen(
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text(if (albumName.isNotEmpty()) albumName else "所有文件", maxLines = 1) },
+                            title = {
+                                Text(
+                                    text = if (albumName.isNotEmpty()) albumName else "所有文件",
+                                    maxLines = 1,
+                                    modifier = Modifier.clickable { showAlbumRenameDialog = true }
+                                )
+                            },
                             navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回") } },
                             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                         )

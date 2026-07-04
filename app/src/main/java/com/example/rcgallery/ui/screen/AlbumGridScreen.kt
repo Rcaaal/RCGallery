@@ -2,13 +2,18 @@ package com.example.rcgallery.ui.screen
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -113,6 +118,67 @@ fun AlbumGridScreen(
         BackHandler { showTrash = false }
     }
 
+    // ── 相册重命名状态 ──
+    var showAlbumRenameDialog by remember { mutableStateOf(false) }
+    var renameTargetAlbum by remember { mutableStateOf<Album?>(null) }
+    val renameLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        Toast.makeText(context, "授权成功，请重新长按相册进行改名", Toast.LENGTH_SHORT).show()
+    }
+    if (showAlbumRenameDialog && renameTargetAlbum != null) {
+        val target = renameTargetAlbum!!
+        val currentName = target.bucketName.ifEmpty { "未知" }
+        var editText by remember { mutableStateOf(currentName) }
+        AlertDialog(
+            onDismissRequest = { showAlbumRenameDialog = false },
+            title = { Text("重命名相册") },
+            text = {
+                Column {
+                    val hasManageStorage = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+                    val hint = if (hasManageStorage) "相册名立即更改，文件夹同时重命名。"
+                               else "首次改名需授权，将跳转至系统设置开启权限。"
+                    Text(hint, color = Color(0xFF999999), fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = editText,
+                        onValueChange = { editText = it },
+                        singleLine = true,
+                        label = { Text("新相册名") }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val newName = editText.trim()
+                    if (newName.isEmpty()) return@Button
+                    showAlbumRenameDialog = false
+                    renameTargetAlbum = null
+                    if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                        viewModel.renameNow(target.bucketId, newName) { ok ->
+                            if (ok) {
+                                Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "重命名失败，请重试", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } else {
+                        try {
+                            renameLauncher.launch(
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                            )
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }) { Text("确认") }
+            },
+            dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false; renameTargetAlbum = null }) { Text("取消") } }
+        )
+    }
+
     // ── 权限状态 ──
     var hasPermission by remember {
         mutableStateOf(checkPermission(context))
@@ -171,6 +237,10 @@ fun AlbumGridScreen(
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
+                    },
+                    onAlbumLongClick = { album ->
+                        renameTargetAlbum = album
+                        showAlbumRenameDialog = true
                     },
                     onRefresh = { viewModel.loadAlbums() },
                     displayMode = displayMode,
@@ -298,6 +368,7 @@ private fun EmptyContent(onRefresh: () -> Unit) {
 private fun AlbumGridContent(
     albums: List<Album>,
     onAlbumClick: (Album) -> Unit,
+    onAlbumLongClick: (Album) -> Unit,
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
@@ -319,7 +390,8 @@ private fun AlbumGridContent(
                 factory = { ctx ->
                     val adapter = AlbumGridAdapter(
                         items = albums,
-                        onClick = onAlbumClick
+                        onClick = onAlbumClick,
+                        onLongClick = onAlbumLongClick
                     )
                     val rv = RecyclerView(ctx).apply {
                         layoutManager = when (displayMode) {
@@ -380,7 +452,8 @@ private fun AlbumGridContent(
 
 private class AlbumGridAdapter(
     var items: List<Album>,
-    private val onClick: (Album) -> Unit
+    private val onClick: (Album) -> Unit,
+    private val onLongClick: (Album) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
@@ -393,9 +466,9 @@ private class AlbumGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return if (viewType == VIEW_TYPE_LIST) {
-            ListVH.create(parent, onClick)
+            ListVH.create(parent, onClick, onLongClick)
         } else {
-            GridVH.create(parent, onClick)
+            GridVH.create(parent, onClick, onLongClick)
         }
     }
 
@@ -445,7 +518,7 @@ private class AlbumGridSpacing(context: android.content.Context) : RecyclerView.
 private class GridVH private constructor(itemView: android.view.View) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit): GridVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit): GridVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val margin = (6 * density).toInt()
@@ -503,6 +576,14 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
                     (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onClick(it) }
                 }
             }
+            root.setOnLongClickListener {
+                val pos = root.tag as? Int ?: return@setOnLongClickListener true
+                if (pos >= 0) {
+                    val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
+                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onLongClick(it) }
+                }
+                true
+            }
             return GridVH(root)
         }
     }
@@ -530,7 +611,7 @@ private class GridVH private constructor(itemView: android.view.View) : Recycler
 private class ListVH private constructor(itemView: android.view.View) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit): ListVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit): ListVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
@@ -627,6 +708,14 @@ private class ListVH private constructor(itemView: android.view.View) : Recycler
                     val rv = root.parent as? RecyclerView ?: return@setOnClickListener
                     (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onClick(it) }
                 }
+            }
+            root.setOnLongClickListener {
+                val pos = root.tag as? Int ?: return@setOnLongClickListener true
+                if (pos >= 0) {
+                    val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
+                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onLongClick(it) }
+                }
+                true
             }
             return ListVH(root)
         }
