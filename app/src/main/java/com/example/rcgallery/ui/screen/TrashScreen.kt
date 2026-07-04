@@ -75,6 +75,14 @@ fun TrashScreen(
     var selectedUris by selectedUrisState  // composable 通过委托访问
     var activeTab by remember { mutableStateOf(TrashTab.ALL) }
 
+    // ── Tab 切换时自动退出多选模式，防止选中项残留 ──
+    LaunchedEffect(activeTab) {
+        if (isMultiSelectMode) {
+            isMultiSelectMode = false
+            selectedUris = emptySet()
+        }
+    }
+
     // ── 单条目对话框状态（保留现有流程）──
     var selectedEntry by remember { mutableStateOf<TrashEntry?>(null) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -287,18 +295,24 @@ fun TrashScreen(
                         } else {
                             // API 29- 直接删除
                             var successCount = 0
+                            val failedNames = mutableListOf<String>()
                             entries.forEach { entry ->
                                 try {
                                     context.contentResolver.delete(Uri.parse(entry.uri), null, null)
                                     successCount++
                                 } catch (e: Exception) {
                                     AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
+                                    failedNames.add(entry.fileName)
                                 }
                             }
                             viewModel.batchPermanentlyDeleteConfirmed(
                                 entries.map { it.uri to it.originalAlbumId }
                             )
-                            Toast.makeText(context, "已清空 $successCount/${entries.size} 项", Toast.LENGTH_SHORT).show()
+                            if (successCount == entries.size) {
+                                Toast.makeText(context, "已清空 $successCount 项", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "已清空 $successCount/${entries.size} 项，${failedNames.size} 项删除失败", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -342,18 +356,24 @@ fun TrashScreen(
                             }
                         } else {
                             var successCount = 0
+                            val failedNames = mutableListOf<String>()
                             toDelete.forEach { entry ->
                                 try {
                                     context.contentResolver.delete(Uri.parse(entry.uri), null, null)
                                     successCount++
                                 } catch (e: Exception) {
                                     AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
+                                    failedNames.add(entry.fileName)
                                 }
                             }
                             viewModel.batchPermanentlyDeleteConfirmed(
                                 toDelete.map { it.uri to it.originalAlbumId }
                             )
-                            Toast.makeText(context, "已永久删除 $successCount/$count 项", Toast.LENGTH_SHORT).show()
+                            if (successCount == count) {
+                                Toast.makeText(context, "已永久删除 $successCount 项", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "已删除 $successCount/$count 项，${failedNames.size} 项失败", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)

@@ -6,6 +6,7 @@ import com.example.rcgallery.util.AppLogger
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * 回收站管理器——逻辑删除的索引存储。
@@ -117,26 +118,37 @@ class TrashManager(private val context: Context) {
         }
     }
 
-    // ── 原子写入 ──
+    // ── 原子写入（带 fsync 落盘确认）──
 
     private fun writeAll(entries: List<TrashEntry>) {
         val temp = File(file.absolutePath + ".tmp")
-        val arr = JSONArray()
-        entries.forEach { entry ->
-            arr.put(JSONObject().apply {
-                put("uri", entry.uri)
-                put("filePath", entry.filePath)
-                put("fileName", entry.fileName)
-                put("deleteTime", entry.deleteTime)
-                put("originalAlbumId", entry.originalAlbumId ?: JSONObject.NULL)
-                put("originalAlbumName", entry.originalAlbumName ?: JSONObject.NULL)
-                put("mimeType", entry.mimeType)
-            })
+        try {
+            val arr = JSONArray()
+            entries.forEach { entry ->
+                arr.put(JSONObject().apply {
+                    put("uri", entry.uri)
+                    put("filePath", entry.filePath)
+                    put("fileName", entry.fileName)
+                    put("deleteTime", entry.deleteTime)
+                    put("originalAlbumId", entry.originalAlbumId ?: JSONObject.NULL)
+                    put("originalAlbumName", entry.originalAlbumName ?: JSONObject.NULL)
+                    put("mimeType", entry.mimeType)
+                })
+            }
+            // 写入临时文件 + fsync 确保数据落盘
+            FileOutputStream(temp).use { fos ->
+                fos.write(arr.toString().toByteArray(Charsets.UTF_8))
+                fos.fd.sync()
+            }
+            // 原子替换：rename(2) 在 Linux/Android 上即使目标存在也是原子的
+            // 不需要先 delete()，避免断电窗口
+            temp.renameTo(file)
+            AppLogger.d(TAG, "writeAll: ${entries.size} entries")
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to write trash index", e)
+            // 写入失败时清理临时文件
+            try { temp.delete() } catch (_: Exception) {}
         }
-        temp.writeText(arr.toString())
-        // 原子替换
-        file.delete()
-        temp.renameTo(file)
     }
 
     // ── 自动清理过期条目 ──

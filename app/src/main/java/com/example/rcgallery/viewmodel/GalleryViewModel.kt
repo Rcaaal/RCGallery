@@ -331,9 +331,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /**
      * 从预览页直接永久删除媒体项（不经过回收站）。
      * 物理删除由调用方通过 IntentSender 处理，此方法只更新 UI 状态。
+     *
+     * 同时清理回收站索引（如果该文件之前被快删），防止幽灵条目。
      */
     fun removeFromMediaItems(item: MediaItem) {
-        _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
+        val uriStr = item.uri.toString()
+        // 清理回收站索引（防止该文件之前已移入回收站）
+        if (trashManager.isTrashed(uriStr)) {
+            trashManager.remove(uriStr)
+            refreshTrashCount()
+            _trashEntries.value = trashManager.getAll()
+            AppLogger.d("VM", "removeFromMediaItems: also removed from trash index")
+        }
+        _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != uriStr }
         _albums.value = _albums.value.mapNotNull { album ->
             if (album.bucketId == item.albumId) {
                 val newCount = (album.count - 1).coerceAtLeast(0)
