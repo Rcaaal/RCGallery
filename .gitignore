@@ -12,3 +12,4 @@ local.properties
 # APK archive (永久存档于硬盘，不入 git — 6.1GB 二进制)
 /apk_archive/
 Test/
+launch_emu.bat
