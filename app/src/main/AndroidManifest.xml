@@ -13,6 +13,12 @@
     <!-- 全存储管理权限 — 用于文件系统级的目录重命名（File.renameTo） -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- 前台服务（SMB HTTP 代理流式播放保持存活） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Wi-Fi 锁（SMB 流式播放时防止 Wi-Fi 休眠） -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:name=".RCGalleryApplication"
         android:allowBackup="true"
@@ -33,6 +39,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".data.smb.SmbProxyService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
     </application>
 

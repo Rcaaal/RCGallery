@@ -1,7 +1,9 @@
 package com.example.rcgallery.ui.screen
-
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.content.Intent
+
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -37,6 +39,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.media3.datasource.DefaultDataSource
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.rcgallery.data.smb.SmbBrowseState
@@ -45,12 +48,16 @@ import com.example.rcgallery.data.smb.SmbDevice
 import com.example.rcgallery.data.smb.SmbFileInfo
 import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.smb.SmbSubFolder
+import com.example.rcgallery.data.smb.SmbProxyService
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.SmbConnectDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import androidx.compose.ui.layout.ContentScale
 
 /**
@@ -66,8 +73,13 @@ fun NetworkBrowserScreen(
     val smbBrowseState by viewModel.smbBrowseState.collectAsState()
     val smbDevices by viewModel.smbDevices.collectAsState()
 
+    val context = LocalContext.current
+
     var showConnectDialog by remember { mutableStateOf(false) }
     var previewFileInfo by remember { mutableStateOf<SmbFileInfo?>(null) }
+
+    // 初始化 SMB 缩略图磁盘缓存
+    LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
 
     Box(Modifier.fillMaxSize()) {
         // ── 主内容（包括 Scaffold 的 TopAppBar + NavigationBar）──
@@ -301,8 +313,7 @@ private fun FolderMixedContent(
             }
         },
         update = { rv ->
-            val changed = adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles
-            if (changed) {
+            if (adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles) {
                 adapter.subFolders = subFolders
                 adapter.mediaFiles = mediaFiles
                 adapter.notifyDataSetChanged()
@@ -588,25 +599,41 @@ private fun SmbPreviewOverlay(
     fileInfo: SmbFileInfo,
     onDismiss: () -> Unit
 ) {
+    var cacheModeEnabled by remember { mutableStateOf(true) }
+    val svcContext = LocalContext.current
+    LaunchedEffect(Unit) { svcContext.startService(Intent(svcContext, SmbProxyService::class.java)) }
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
         if (fileInfo.isVideo) {
-            SmbVideoPlayer(fileInfo, onDismiss)
+            if (cacheModeEnabled) SmbCachedVideoPlayer(fileInfo, onDismiss) else SmbVideoPlayer(fileInfo, onDismiss)
         } else {
             SmbImageViewer(fileInfo)
         }
 
         // 顶部关闭按钮
         TextButton(
-            onClick = onDismiss,
+            onClick = { onDismiss() },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(8.dp)
         ) {
             Text("← 返回", color = Color.White)
+        }
+        // -- 缓存模式切换 --
+        TextButton(
+            onClick = { cacheModeEnabled = !cacheModeEnabled },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text(
+                if (cacheModeEnabled) "♦ CX缓存" else "◆ RAF流式",
+                color = if (cacheModeEnabled) Color(0xFF4CAF50) else Color(0xFF9E9E9E),
+                fontSize = 12.sp
+            )
         }
     }
 }
@@ -669,11 +696,15 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
 }
 
 /**
- * SMB 视频播放器 — 通过 SmbDataSource 直接流式播放。
+ * SMB 视频播放器 — 通过 [SmbDataSource] 直接流式播放。
  *
- * 内部使用 SmbFileInputStream（实测 ~17-35MB/s），
- * 非 SmbRandomAccessFile（仅 ~1MB/s 大块读）。
- * 不套 CacheDataSource — 简化路径，减少意外延迟。
+ * ### 架构
+ * SmbRandomAccessFile 提供原生 seek（毫秒级），4MB 大块预读缓冲。
+ *
+ * - `open()` 仅预填 64KB → 快速返回，ExoPlayer 立即开始解码
+ * - `read()` 首次 refill 升到 4MB → 大块读取减少 SMB 事务
+ * - RAF seek() <5ms → 拖进度即时跳转
+ * - `onDispose` 释放 ExoPlayer + RAF 连接
  */
 @Composable
 private fun SmbVideoPlayer(
@@ -689,15 +720,14 @@ private fun SmbVideoPlayer(
         ExoPlayer.Builder(context)
             .setLoadControl(DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    30_000, 60_000, 2000, 3000
+                    // minBuffer, maxBuffer, bufferForPlayback(缓冲5s再开始), bufferForPlaybackAfterRebuffer(10s)
+                    30_000, 60_000, 5000, 10000
                 ).build()
             )
             .build().apply {
                 val mediaSource = ProgressiveMediaSource.Factory(SmbDataSource.Factory())
                     .createMediaSource(MediaItem.fromUri(android.net.Uri.parse(fileInfo.path)))
                 setMediaSource(mediaSource)
-                prepare()
-                playWhenReady = true
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         playbackState = state
@@ -712,9 +742,10 @@ private fun SmbVideoPlayer(
                         errorMessage = error.message ?: "播放失败"
                     }
                 })
+                // ❌ prepare() 延迟到 PlayerView surface 就绪后再调用
+                //    否则 codec 无 surface 初始化 → setOutputSurface 失败 → BAD_INDEX
             }
     }
-
     // ── 清理 ──
     DisposableEffect(fileInfo.path) {
         onDispose {
@@ -724,53 +755,220 @@ private fun SmbVideoPlayer(
         }
     }
 
-    // ── 渲染 ──
+    // 始终渲染 PlayerView（TextureView 需要过早绑定 surface 才能接收视频解码输出）
+    // 加载中的状态通过叠加层显示，不影响底层 PlayerView 的 surface 初始化
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        when {
-            hasError -> {
-                Column(
-                    Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("⚠️", fontSize = 40.sp)
-                    Spacer(Modifier.height(12.dp))
-                    Text("视频加载失败", color = Color.White,
-                        style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(4.dp))
-                    if (errorMessage.isNotEmpty()) {
-                        Text(errorMessage, color = Color.Gray,
-                            style = MaterialTheme.typography.bodySmall)
+        if (hasError) {
+            Column(
+                Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("⚠️", fontSize = 40.sp)
+                Spacer(Modifier.height(12.dp))
+                Text("视频加载失败", color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                if (errorMessage.isNotEmpty()) {
+                    Text(errorMessage, color = Color.Gray,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onDismiss) { Text("返回") }
+            }
+        } else {
+            // PlayerView 始终渲染，确保 TextureView surface 在 compose attach 后就绪
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val pvAttrs = ctx.resources.getXml(
+                        com.example.rcgallery.R.xml.player_view_texture
+                    ).let { parser ->
+                        parser.next()
+                        parser.nextTag()
+                        android.util.Xml.asAttributeSet(parser)
                     }
-                    Spacer(Modifier.height(16.dp))
-                    Button(onClick = onDismiss) { Text("返回") }
+                    PlayerView(ctx, pvAttrs).apply {
+                        useController = true
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        // 1) 先绑定 player 到 PlayerView（TextureView surface 准备就绪后自动通知 codec）
+                        player = exoPlayer
+                        // 2) post 一帧确保 surface 已创建 → 再 prepare() 让 codec 带着 surface 初始化
+                        post {
+                            AppLogger.d("SMB-VIDEO", "surface ready, calling prepare()")
+                            exoPlayer.prepare()
+                            exoPlayer.playWhenReady = true
+                        }
+                    }
+                }
+            )
+
+            // 加载中覆盖层（不影响底层 PlayerView 的 surface 初始化）
+            if (playbackState != Player.STATE_READY) {
+                Box(
+                    Modifier.fillMaxSize().background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = Color.White)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在从网络加载视频...",
+                            color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                    }
                 }
             }
-            playbackState == Player.STATE_READY -> {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        val pvAttrs = ctx.resources.getXml(
-                            com.example.rcgallery.R.xml.player_view_texture
-                        ).let { parser ->
-                            parser.next()
-                            parser.nextTag()
-                            android.util.Xml.asAttributeSet(parser)
-                        }
-                        PlayerView(ctx, pvAttrs).apply {
-                            this.player = exoPlayer
-                            useController = true
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        }
-                    },
-                    update = { it.player = exoPlayer }
-                )
+        }
+    }
+}
+
+/**
+ * CX 文件管理器式 SMB HTTP 代理视频播放器（100% 复刻 CX 架构）。
+ *
+ * ### 架构（与 CX File Explorer 一致）
+ *
+ * ```text
+ * 1. Service 启动 → 动态端口 HTTP 代理 → 持久 SmbRandomAccessFile
+ * 2. ExoPlayer → DefaultHttpDataSource → http://127.0.0.1:{port}/smb/{tag}
+ * 3. HTTP Range: bytes=X- → RAF seek(X) → read() → 206 Partial Content
+ * ```
+ *
+ * ### 与 RAF [SmbVideoPlayer] 的区别
+ * | 维度 | RAF 流式 | CX 代理（本播放器） |
+ * |:-----|:---------|:------------------|
+ * | 数据源 | SmbDataSource (自定义) | DefaultHttpDataSource (HTTP→Proxy→RAF) |
+ * | SMB 连接 | 每次 open() 新建 | 持久连接跨播放会话 |
+ * | seek | RAF seek <5ms | HTTP Range → RAF seek <5ms |
+ * | ExoPlayer | 自定义 LoadControl | 标准 HTTP LoadControl |
+ * | 生命周期 | Compose overlay | Android Foreground Service |
+ */
+@Composable
+private fun SmbCachedVideoPlayer(
+    fileInfo: SmbFileInfo,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var hasError by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf("") }
+    var playbackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    var httpUrl by remember { mutableStateOf<String?>(null) }
+    var tag by remember { mutableStateOf<String?>(null) }
+
+    // 注册 SMB 文件到代理服务 获取 HTTP URL
+    LaunchedEffect(fileInfo.path) {
+        kotlinx.coroutines.delay(300)
+        val url = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            SmbProxyService.register(fileInfo.path)
+        }
+        if (url != null) {
+            httpUrl = url
+            tag = url.substringAfterLast("/smb/")
+            AppLogger.d("SMB-VIDEO", "proxy URL: $url")
+        } else {
+            hasError = true
+            errorMessage = "无法打开 SMB 文件"
+        }
+    }
+
+    // 同步创建 ExoPlayer（HTTP proxy -> SMB）
+    val exoPlayer = remember(httpUrl) {
+        if (httpUrl == null) return@remember null
+        ExoPlayer.Builder(context)
+            .build().apply {
+                val mediaSource = ProgressiveMediaSource.Factory(
+                    DefaultDataSource.Factory(context)
+                ).createMediaSource(MediaItem.fromUri(Uri.parse(httpUrl)))
+                setMediaSource(mediaSource)
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        playbackState = state
+                        if (state == Player.STATE_READY)
+                            AppLogger.d("SMB-VIDEO", "proxy Player READY")
+                        else if (state == Player.STATE_BUFFERING)
+                            AppLogger.d("SMB-VIDEO", "proxy Player BUFFERING")
+                    }
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        AppLogger.e("SMB-VIDEO", "proxy error: ${error.message}", error)
+                        hasError = true
+                        errorMessage = error.message ?: "播放失败"
+                    }
+                })
             }
-            else -> {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    }
+
+    // 清理——用 rememberUpdatedState 确保 onDispose 始终读取最新 exoPlayer
+    val currentPlayer = rememberUpdatedState(exoPlayer)
+    DisposableEffect(fileInfo.path) {
+        onDispose {
+            AppLogger.d("SMB-VIDEO", "proxy onDispose")
+            currentPlayer.value?.stop()
+            currentPlayer.value?.release()
+            tag?.let { SmbProxyService.unregister(it) }
+        }
+    }
+
+    // 渲染
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (hasError) {
+            Column(
+                Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("⚠️", fontSize = 40.sp)
+                Spacer(Modifier.height(12.dp))
+                Text("视频加载失败", color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                if (errorMessage.isNotEmpty()) {
+                    Text(errorMessage, color = Color.Gray,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onDismiss) { Text("返回") }
+            }
+        } else if (httpUrl == null) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
+                    Spacer(Modifier.height(12.dp))
+                    Text("正在连接...",
+                        color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        } else {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val pvAttrs = ctx.resources.getXml(
+                        com.example.rcgallery.R.xml.player_view_texture
+                    ).let { parser ->
+                        parser.next()
+                        parser.nextTag()
+                        android.util.Xml.asAttributeSet(parser)
+                    }
+                    PlayerView(ctx, pvAttrs).apply {
+                        useController = true
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        player = exoPlayer
+                        post {
+                            AppLogger.d("SMB-VIDEO", "proxy surface ready, calling prepare()")
+                            exoPlayer?.prepare()
+                            exoPlayer?.playWhenReady = true
+                        }
+                    }
+                }
+            )
+            if (playbackState != Player.STATE_READY) {
+                Box(
+                    Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center
+                ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(color = Color.White)
                         Spacer(Modifier.height(12.dp))

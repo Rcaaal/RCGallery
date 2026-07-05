@@ -16,6 +16,7 @@ import com.example.rcgallery.model.MediaItem
 import com.example.rcgallery.model.TrashEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -524,8 +525,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /**
      * 打开一个路径（共享或子文件夹），扫描其内容。
      *
-     * 将当前状态推入历史栈，供 smbGoBack 使用。
-     * 使用 pendingScanPath 防竞态：如果用户在扫描期间按了返回，忽略结果。
+     * ### 两阶段加载策略
+     *
+     * 1. **Phase 1（快速）**: 只做顶层 `listFiles()` 区分文件夹/媒体文件，
+     *    子文件夹的计数和封面暂不扫描 → **立即显示** FolderContent。
+     * 2. **Phase 2（后台并行）**: 所有子文件夹同时扫描（async 并发），
+     *    每完成一个就把计数+封面更新到界面上。
+     *
+     * 与 CX 文件管理器行为一致：点击共享文件夹 → 瞬间显示内容，
+     * 文件夹计数约几百毫秒后逐个填充。
+     *
+     * 使用 pendingScanPath 防竞态：用户在 Phase 2 期间按返回，
+     * 后续更新自动被忽略。
      */
     fun smbOpenFolder(path: String, folderName: String) {
         val state = _smbBrowseState.value
@@ -539,35 +550,52 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbBackStack.add(state)
         pendingScanPath = path
 
-        _smbBrowseState.value = SmbBrowseState.Connecting(host, "正在扫描 $folderName ...")
-
         viewModelScope.launch {
-            smbRepository.scanFolderContent(
-                url = path,
-                onProgress = { scanned, total ->
-                    // 只更新当前正在扫描的路径进度
-                    if (pendingScanPath == path) {
-                        _smbBrowseState.value = SmbBrowseState.Connecting(
-                            host = host,
-                            progressMessage = "扫描子文件夹 $scanned/$total ..."
-                        )
-                    }
-                }
-            )
+            // ══ Phase 1: 快速扫描顶层 → 立即显示 ══
+            smbRepository.quickScanFolderContent(path)
                 .onSuccess { result ->
-                    if (pendingScanPath == path) {
+                    if (pendingScanPath != path) return@launch
+
+                    // 使用 MutableList 以便后续更新
+                    val mutableFolders = result.subFolders.toMutableList()
+
+                    // 跳转 Connecting，直接显示 FolderContent
+                    _smbBrowseState.value = SmbBrowseState.FolderContent(
+                        host = host,
+                        currentPath = path,
+                        folderName = folderName,
+                        subFolders = mutableFolders.toList(),
+                        mediaFiles = result.mediaFiles
+                    )
+
+                    // ══ Phase 2: 并行扫描所有子文件夹 → 一次更新 ══
+                    // 收集所有结果，避免逐个 emit 导致 UI 闪烁
+                    val deferreds = mutableFolders.indices.map { i ->
+                        async(Dispatchers.IO) {
+                            val updated = smbRepository.scanSingleFolder(mutableFolders[i])
+                            i to updated
+                        }
+                    }
+                    // 等全部完成再一次性更新
+                    var allDone = true
+                    for (d in deferreds) {
+                        if (pendingScanPath != path) { allDone = false; break }
+                        val (idx, updated) = d.await()
+                        mutableFolders[idx] = updated
+                    }
+                    if (allDone && pendingScanPath == path) {
                         pendingScanPath = null
                         _smbBrowseState.value = SmbBrowseState.FolderContent(
                             host = host,
                             currentPath = path,
                             folderName = folderName,
-                            subFolders = result.subFolders,
+                            subFolders = mutableFolders.toList(),
                             mediaFiles = result.mediaFiles
                         )
                     }
                 }
                 .onFailure { e ->
-                    AppLogger.e("SMB", "scanFolder failed path=$path", e)
+                    AppLogger.e("SMB", "quickScanFolder failed path=$path", e)
                     if (pendingScanPath == path) {
                         pendingScanPath = null
                         if (_smbBackStack.isNotEmpty()) {
