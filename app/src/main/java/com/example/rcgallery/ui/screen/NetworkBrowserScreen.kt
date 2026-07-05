@@ -41,6 +41,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.media3.datasource.DefaultDataSource
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDataSource
@@ -55,11 +56,11 @@ import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import androidx.compose.ui.layout.ContentScale
+import androidx.activity.compose.BackHandler
 
 /**
  * 网络浏览主界面 — 文件夹相册混合模式。
@@ -81,6 +82,11 @@ fun NetworkBrowserScreen(
 
     // 初始化 SMB 缩略图磁盘缓存
     LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
+
+    // 系统侧滑返回 — 不在 DeviceList 时调用 smbGoBack()
+    BackHandler(enabled = smbBrowseState !is SmbBrowseState.DeviceList) {
+        viewModel.smbGoBack()
+    }
 
     Box(Modifier.fillMaxSize()) {
         // ── 主内容（包括 Scaffold 的 TopAppBar + NavigationBar）──
@@ -267,7 +273,7 @@ private fun ShareGridContent(
 }
 
 // ══════════════════════════════════════
-//  混合内容视图（RecyclerView）
+//  混合内容视图（RecyclerView）— 列表/网格双模式
 // ══════════════════════════════════════
 
 private const val SM_GRID_COLUMNS = 3
@@ -281,6 +287,7 @@ private fun FolderMixedContent(
     onFileClick: (SmbFileInfo) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    var isListMode by remember { mutableStateOf(true) } // 默认列表模式
 
     if (subFolders.isEmpty() && mediaFiles.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -295,58 +302,87 @@ private fun FolderMixedContent(
             mediaFiles = mediaFiles,
             onFolderClick = onFolderClick,
             onFileClick = onFileClick,
-            scope = scope
+            scope = scope,
+            isListMode = isListMode
         )
     }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            RecyclerView(ctx).apply {
-                layoutManager = GridLayoutManager(ctx, SM_GRID_COLUMNS).apply {
-                    spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
-                        override fun getSpanSize(position: Int): Int = 1
+    Box(Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                RecyclerView(ctx).apply {
+                    layoutManager = if (isListMode) {
+                        androidx.recyclerview.widget.LinearLayoutManager(ctx)
+                    } else {
+                        GridLayoutManager(ctx, SM_GRID_COLUMNS).apply {
+                            spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                                override fun getSpanSize(position: Int): Int = 1
+                            }
+                        }
                     }
+                    this.adapter = adapter
+                    clipToPadding = false
+                    setPadding(4, 4, 4, 4)
                 }
-                this.adapter = adapter
-                clipToPadding = false
-                setPadding(4, 4, 4, 4)
+            },
+            update = { rv ->
+                // 模式切换：重新设置 LayoutManager + notifyDataSetChanged
+                if (adapter.isListMode != isListMode) {
+                    adapter.isListMode = isListMode
+                    rv.layoutManager = if (isListMode) {
+                        androidx.recyclerview.widget.LinearLayoutManager(rv.context)
+                    } else {
+                        GridLayoutManager(rv.context, SM_GRID_COLUMNS).apply {
+                            spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                                override fun getSpanSize(position: Int): Int = 1
+                            }
+                        }
+                    }
+                    adapter.notifyDataSetChanged()
+                }
+                if (adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles) {
+                    adapter.subFolders = subFolders
+                    adapter.mediaFiles = mediaFiles
+                    adapter.notifyDataSetChanged()
+                }
             }
-        },
-        update = { rv ->
-            if (adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles) {
-                // 取消旧的缩略图协程 + 清空待处理队列，释放 SMB 连接
-                adapter.thumbJob.cancel()
-                adapter.thumbJob = Job()
-                SmbThumbnailLoader.cancelPending()
-                adapter.generation++
-                adapter.subFolders = subFolders
-                adapter.mediaFiles = mediaFiles
-                adapter.notifyDataSetChanged()
-            }
+        )
+
+        // 列表/网格切换按钮
+        TextButton(
+            onClick = { isListMode = !isListMode },
+            modifier = Modifier
+                .align(androidx.compose.ui.Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text(
+                if (isListMode) "⊞ 网格" else "⊟ 列表",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 12.sp
+            )
         }
-    )
+    }
 }
 
 /**
  * 单个 RecyclerView 适配器，混合显示文件夹卡片 + 媒体缩略图。
+ * 支持列表/网格双模式。
  */
 private class FolderMixedAdapter(
     var subFolders: List<SmbSubFolder>,
     var mediaFiles: List<SmbFileInfo>,
     private val onFolderClick: (SmbSubFolder) -> Unit,
     private val onFileClick: (SmbFileInfo) -> Unit,
-    val scope: CoroutineScope
+    val scope: CoroutineScope,
+    @Volatile var isListMode: Boolean = true
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
-    /** 代次计数器：每次 data change 递增，ViewHolder 检查代次丢弃旧协程结果 */
-    @Volatile var generation: Int = 0
-    /** 缩略图协程父 Job — 每次 data change 取消旧的、创建新的 */
-    @Volatile var thumbJob: Job = Job()
-
     companion object {
-        private const val TYPE_FOLDER = 0
-        private const val TYPE_MEDIA = 1
+        private const val TYPE_FOLDER_GRID = 0
+        private const val TYPE_MEDIA_GRID = 1
+        private const val TYPE_FOLDER_LIST = 2
+        private const val TYPE_MEDIA_LIST = 3
     }
 
     val folderCount get() = subFolders.size
@@ -355,14 +391,21 @@ private class FolderMixedAdapter(
     override fun getItemCount() = folderCount + mediaCount
 
     override fun getItemViewType(position: Int): Int {
-        return if (position < folderCount) TYPE_FOLDER else TYPE_MEDIA
+        val isFolder = position < folderCount
+        return if (isListMode) {
+            if (isFolder) TYPE_FOLDER_LIST else TYPE_MEDIA_LIST
+        } else {
+            if (isFolder) TYPE_FOLDER_GRID else TYPE_MEDIA_GRID
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-        return if (viewType == TYPE_FOLDER) {
-            FolderVH.create(parent, onFolderClick, scope, genRef = { generation }, jobRef = { thumbJob })
-        } else {
-            MediaVH.create(parent, onFileClick, scope, genRef = { generation }, jobRef = { thumbJob })
+        return when (viewType) {
+            TYPE_FOLDER_GRID -> FolderVH.create(parent, onFolderClick, scope)
+            TYPE_MEDIA_GRID -> MediaVH.create(parent, onFileClick, scope)
+            TYPE_FOLDER_LIST -> FolderListVH.create(parent, onFolderClick)
+            TYPE_MEDIA_LIST -> MediaListVH.create(parent, onFileClick, scope)
+            else -> throw IllegalArgumentException("unknown viewType=$viewType")
         }
     }
 
@@ -370,11 +413,13 @@ private class FolderMixedAdapter(
         when (holder) {
             is FolderVH -> holder.bind(subFolders[position], position)
             is MediaVH -> holder.bind(mediaFiles[position - folderCount], position)
+            is FolderListVH -> holder.bind(subFolders[position])
+            is MediaListVH -> holder.bind(mediaFiles[position - folderCount])
         }
     }
 }
 
-// ── 文件夹相册卡片 ViewHolder ──
+// ── 网格模式：文件夹卡片 ──
 
 private class FolderVH private constructor(
     itemView: View,
@@ -382,9 +427,7 @@ private class FolderVH private constructor(
     private val nameTv: TextView,
     private val countTv: TextView,
     private val onFolderClick: (SmbSubFolder) -> Unit,
-    private val scope: CoroutineScope,
-    private val genRef: () -> Int,
-    private val jobRef: () -> Job
+    private val scope: CoroutineScope
 ) : RecyclerView.ViewHolder(itemView) {
 
     init {
@@ -396,7 +439,7 @@ private class FolderVH private constructor(
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFolderClick: (SmbSubFolder) -> Unit, scope: CoroutineScope, genRef: () -> Int, jobRef: () -> Job): FolderVH {
+        fun create(parent: ViewGroup, onFolderClick: (SmbSubFolder) -> Unit, scope: CoroutineScope): FolderVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val margin = (6 * d).toInt()
@@ -436,7 +479,6 @@ private class FolderVH private constructor(
             }
             coverFrame.addView(iv)
 
-            // 文件夹图标覆盖层（空，保留做占位）
             val folderIcon = ImageView(ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     (32 * d).toInt(), (32 * d).toInt(), Gravity.CENTER
@@ -447,7 +489,6 @@ private class FolderVH private constructor(
             coverFrame.addView(folderIcon)
             root.addView(coverFrame)
 
-            // 名称
             val nameTv = TextView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -461,7 +502,6 @@ private class FolderVH private constructor(
             }
             root.addView(nameTv)
 
-            // 计数
             val countTv = TextView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -472,8 +512,7 @@ private class FolderVH private constructor(
             }
             root.addView(countTv)
 
-            // 点击在 bind 中处理（用 tag 存 SmbSubFolder 对象）
-            return FolderVH(root, iv, nameTv, countTv, onFolderClick, scope, genRef, jobRef)
+            return FolderVH(root, iv, nameTv, countTv, onFolderClick, scope)
         }
     }
 
@@ -483,17 +522,15 @@ private class FolderVH private constructor(
         countTv.text = "${folder.mediaCount} 项"
 
         val path = folder.coverPath
-        // 同一封面不重复清除
         if (coverIv.tag != path) {
             coverIv.setImageDrawable(null)
             coverIv.setBackgroundColor(0xFF2A2A2A.toInt())
             coverIv.tag = path
 
             if (path.isNotEmpty()) {
-                val bindGen = genRef()
-                scope.launch(jobRef()) {
+                scope.launch {
                     val bm = SmbThumbnailLoader.load(url = path, maxPx = 300)
-                    if (bm != null && coverIv.tag == path && bindGen == genRef()) {
+                    if (bm != null && coverIv.tag == path) {
                         coverIv.setImageBitmap(bm)
                     }
                 }
@@ -502,16 +539,14 @@ private class FolderVH private constructor(
     }
 }
 
-// ── 媒体缩略图 ViewHolder ──
+// ── 网格模式：媒体缩略图 ──
 
 private class MediaVH private constructor(
     itemView: View,
     private val iv: ImageView,
     private val playIcon: TextView,
     private val scope: CoroutineScope,
-    private val onFileClick: (SmbFileInfo) -> Unit,
-    private val genRef: () -> Int,
-    private val jobRef: () -> Job
+    private val onFileClick: (SmbFileInfo) -> Unit
 ) : RecyclerView.ViewHolder(itemView) {
 
     init {
@@ -523,7 +558,7 @@ private class MediaVH private constructor(
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope, genRef: () -> Int, jobRef: () -> Job): MediaVH {
+        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope): MediaVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val gapPx = (SM_GAP_DP * d).toInt()
@@ -555,7 +590,6 @@ private class MediaVH private constructor(
             }
             root.addView(iv)
 
-            // 视频播放图标叠加层
             val playIcon = TextView(ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -569,7 +603,7 @@ private class MediaVH private constructor(
             }
             root.addView(playIcon)
 
-            return MediaVH(root, iv, playIcon, scope, onFileClick, genRef, jobRef)
+            return MediaVH(root, iv, playIcon, scope, onFileClick)
         }
     }
 
@@ -581,11 +615,8 @@ private class MediaVH private constructor(
         val isVideo = file.isVideo
 
         AppLogger.d("SMB-THUMB", "bind pos=$pos name=${file.name} isVideo=$isVideo path=$path")
-
-        // 设置视频播放图标（必须在每次 bind 时设置，RecyclerView 回收会重置）
         playIcon.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
 
-        // 同一路径且之前已成功加载 → 跳过
         if (path == currentPath) return
 
         currentPath = path
@@ -593,20 +624,223 @@ private class MediaVH private constructor(
         iv.setBackgroundColor(if (isVideo) 0xFF333333.toInt() else 0xFF1A1A1A.toInt())
         iv.tag = path
 
-        val bindGen = genRef()
-        // 为图片和视频都加载缩略图（视频用 partial read + MediaMetadataRetriever）
-        scope.launch(jobRef()) {
+        scope.launch {
             val context = itemView.context
-            AppLogger.d("SMB-THUMB", "load() called: isVideo=$isVideo path=$path")
             val bm = SmbThumbnailLoader.load(url = path, fileSize = file.size, maxPx = 300, context = context)
-            if (bm != null && iv.tag == path && bindGen == genRef()) {
-                AppLogger.d("SMB-THUMB", "setImageBitmap: isVideo=$isVideo path=$path")
+            if (bm != null && iv.tag == path) {
                 iv.setImageBitmap(bm)
-            } else if (bm == null && iv.tag == path && currentPath == path && bindGen == genRef()) {
-                // 加载失败 → 清理 currentPath，下次 bind 可重试
+            } else if (bm == null && iv.tag == path && currentPath == path) {
                 currentPath = null
             }
         }
+    }
+}
+
+// ── 列表模式：文件夹行 ──
+
+private class FolderListVH private constructor(
+    itemView: View,
+    private val nameTv: TextView,
+    private val countTv: TextView,
+    private val onFolderClick: (SmbSubFolder) -> Unit
+) : RecyclerView.ViewHolder(itemView) {
+
+    init {
+        itemView.setOnClickListener {
+            val folder = it.tag as? SmbSubFolder ?: return@setOnClickListener
+            AppLogger.d("SMB", "folder click: ${folder.name}")
+            onFolderClick(folder)
+        }
+    }
+
+    companion object {
+        fun create(parent: ViewGroup, onFolderClick: (SmbSubFolder) -> Unit): FolderListVH {
+            val ctx = parent.context
+            val d = ctx.resources.displayMetrics.density
+            val root = LinearLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                setPadding((12 * d).toInt(), (10 * d).toInt(), (12 * d).toInt(), (10 * d).toInt())
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(0xFF1A1A1A.toInt())
+            }
+
+            val icon = TextView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (36 * d).toInt(), (36 * d).toInt()
+                )
+                text = "📁"
+                textSize = 22f
+                gravity = Gravity.CENTER
+            }
+            root.addView(icon)
+
+            val nameTv = TextView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                ).apply { setMargins((8 * d).toInt(), 0, (8 * d).toInt(), 0) }
+                setTextSize(14f)
+                setTextColor(android.graphics.Color.WHITE)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            root.addView(nameTv)
+
+            val countTv = TextView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                setTextSize(12f)
+                setTextColor(android.graphics.Color.GRAY)
+            }
+            root.addView(countTv)
+
+            return FolderListVH(root, nameTv, countTv, onFolderClick)
+        }
+    }
+
+    fun bind(folder: SmbSubFolder) {
+        itemView.tag = folder
+        nameTv.text = folder.name
+        countTv.text = "${folder.mediaCount} 项"
+    }
+}
+
+// ── 列表模式：媒体行（小缩略图 64dp）──
+
+private class MediaListVH private constructor(
+    itemView: View,
+    private val iv: ImageView,
+    private val nameTv: TextView,
+    private val sizeTv: TextView,
+    private val playLabel: TextView,
+    private val scope: CoroutineScope,
+    private val onFileClick: (SmbFileInfo) -> Unit
+) : RecyclerView.ViewHolder(itemView) {
+
+    init {
+        itemView.setOnClickListener {
+            val file = it.tag as? SmbFileInfo ?: return@setOnClickListener
+            AppLogger.d("SMB", "click media: ${file.name} path=${file.path}")
+            onFileClick(file)
+        }
+    }
+
+    companion object {
+        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope): MediaListVH {
+            val ctx = parent.context
+            val d = ctx.resources.displayMetrics.density
+            val thumbPx = (56 * d).toInt()
+            val root = LinearLayout(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                setPadding((4 * d).toInt(), (4 * d).toInt(), (12 * d).toInt(), (4 * d).toInt())
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            // 缩略图容器
+            val thumbFrame = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(thumbPx, thumbPx).apply {
+                    setMargins((4 * d).toInt(), 0, (8 * d).toInt(), 0)
+                }
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                    setCornerRadius(4 * d)
+                    setColor(0xFF1A1A1A.toInt())
+                }
+                clipToOutline = true
+            }
+            val iv = ImageView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            thumbFrame.addView(iv)
+            val playLabel = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+                text = "▶"
+                setTextSize(16f)
+                setTextColor(android.graphics.Color.WHITE)
+                visibility = android.view.View.GONE
+            }
+            thumbFrame.addView(playLabel)
+            root.addView(thumbFrame)
+
+            // 文件名
+            val nameTv = TextView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+                ).apply { setMargins(0, 0, (8 * d).toInt(), 0) }
+                setTextSize(13f)
+                setTextColor(android.graphics.Color.WHITE)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            root.addView(nameTv)
+
+            // 文件大小
+            val sizeTv = TextView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                setTextSize(11f)
+                setTextColor(android.graphics.Color.GRAY)
+            }
+            root.addView(sizeTv)
+
+            return MediaListVH(root, iv, nameTv, sizeTv, playLabel, scope, onFileClick)
+        }
+    }
+
+    private var currentPath: String? = null
+
+    fun bind(file: SmbFileInfo) {
+        itemView.tag = file
+        val path = file.path
+        val isVideo = file.isVideo
+
+        nameTv.text = file.name
+        sizeTv.text = formatFileSize(file.size)
+        playLabel.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
+
+        if (path == currentPath) return
+        currentPath = path
+        iv.setImageDrawable(null)
+        iv.setBackgroundColor(0xFF1A1A1A.toInt())
+        iv.tag = path
+
+        // 列表模式用小缩略图（64dp → maxPx=120），加载更快
+        scope.launch {
+            val context = itemView.context
+            val bm = SmbThumbnailLoader.load(url = path, fileSize = file.size, maxPx = 120, context = context)
+            if (bm != null && iv.tag == path) {
+                iv.setImageBitmap(bm)
+            } else if (bm == null && iv.tag == path && currentPath == path) {
+                currentPath = null
+            }
+        }
+    }
+
+    private fun formatFileSize(bytes: Long): String = when {
+        bytes <= 0 -> ""
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
+        else -> "${bytes / (1024 * 1024 * 1024)} GB"
     }
 }
 
@@ -666,33 +900,53 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
     LaunchedEffect(fileInfo.path) {
         AppLogger.d("SMB", "preview start: ${fileInfo.name} size=${fileInfo.size}")
         val repo = SmbRepository.getInstance()
-        val bytes = repo.readBytes(fileInfo.path).getOrNull()
-        if (bytes == null) {
-            AppLogger.d("SMB-WARN", "preview readBytes failed: ${fileInfo.name}")
-            isError = true
+
+        // ① 先尝试从磁盘缓存加载缩略图（即时显示，后续后台加载全分辨率）
+        val thumbCache = SmbThumbnailLoader.getDiskCacheBitmap(fileInfo.path)
+        if (thumbCache != null) {
+            AppLogger.d("SMB", "preview show cached thumbnail first: ${fileInfo.name}")
+            bitmap = thumbCache
+        }
+
+        // ② 后台加载全分辨率采样图（用 decodeStream 流式解码，无需全文件 ByteArray）
+        val streamResult = repo.getInputStream(fileInfo.path)
+        val stream = streamResult.getOrNull()
+        if (stream == null) {
+            AppLogger.d("SMB-WARN", "preview stream open failed: ${fileInfo.name}")
+            if (thumbCache == null) isError = true
             return@LaunchedEffect
         }
-        // 计算采样率以适配屏幕
-        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
-        val sample = if (boundsOpts.outWidth > 0 && boundsOpts.outHeight > 0) {
-            var s = 1
-            while (boundsOpts.outWidth / s > 1080 || boundsOpts.outHeight / s > 1080) { s *= 2 }
-            s
-        } else { 1 }
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = sample
-            // 全屏预览用 ARGB_8888 保证色彩质量
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+        try {
+            val buffered = java.io.BufferedInputStream(stream, 512 * 1024)
+            buffered.mark(512 * 1024)
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeStream(buffered, null, boundsOpts)
+            buffered.reset()
+
+            val sample = if (boundsOpts.outWidth > 0 && boundsOpts.outHeight > 0) {
+                var s = 1
+                while (boundsOpts.outWidth / s > 1080 || boundsOpts.outHeight / s > 1080) { s *= 2 }
+                s
+            } else { 1 }
+
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bm = BitmapFactory.decodeStream(buffered, null, opts)
+            if (bm != null) {
+                AppLogger.d("SMB", "preview done: ${fileInfo.name} ${bm.width}x${bm.height} sample=$sample")
+                bitmap = bm
+            } else if (thumbCache == null) {
+                AppLogger.d("SMB-WARN", "preview decode failed: ${fileInfo.name}")
+                isError = true
+            }
+        } catch (e: Exception) {
+            AppLogger.d("SMB-WARN", "preview error: ${e.message}")
+            if (thumbCache == null) isError = true
+        } finally {
+            try { stream.close() } catch (_: Exception) { }
         }
-        val bm = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-        if (bm != null) {
-            AppLogger.d("SMB", "preview done: ${fileInfo.name} ${bm.width}x${bm.height} sample=$sample")
-        } else {
-            AppLogger.d("SMB-WARN", "preview decode failed: ${fileInfo.name}")
-            isError = true
-        }
-        bitmap = bm
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

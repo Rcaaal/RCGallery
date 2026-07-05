@@ -63,8 +63,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _smbBackStack = mutableListOf<SmbBrowseState>()
     // 当前正在扫描的路径（防竞态：扫描完成时如果用户已按返回，忽略结果）
     private var pendingScanPath: String? = null
-    /** 当前 SMB 扫描协程 Job — 每次开/关文件夹时取消旧的，防止 SMB 连接堆积 */
-    private var scanJob: Job? = null
+    /** 是否正在扫描文件夹。CX 式守卫：扫描中不响应新的文件夹点击，防止堆积 */
+    private var scanningFolder = false
 
     // ── 回收站状态 ──
     private val _trashEntries = MutableStateFlow<List<TrashEntry>>(emptyList())
@@ -542,6 +542,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 后续更新自动被忽略。
      */
     fun smbOpenFolder(path: String, folderName: String) {
+        // CX 式：扫描中不响应新点击，防止扫描协程堆积
+        if (scanningFolder) {
+            AppLogger.d("SMB", "scanFolder: already scanning, ignore click path=$path")
+            return
+        }
+
         val state = _smbBrowseState.value
         val host = when (state) {
             is SmbBrowseState.ShareList -> state.host
@@ -549,18 +555,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             else -> return
         }
 
-        // 取消旧的扫描协程（释放其 SMB 连接）
-        scanJob?.cancel()
-        scanJob = null
-
-        // 将当前状态推入历史栈
         _smbBackStack.add(state)
         pendingScanPath = path
+        scanningFolder = true
 
-        scanJob = viewModelScope.launch {
-            // ══ Phase 1: 快速扫描顶层 → 立即显示 ══
-            // 加 30s 超时避免 SMB 连接耗尽时无限等待
-            val quickResult = try {
+        viewModelScope.launch {
+            try {
+                // ══ Phase 1: 快速扫描顶层 → 立即显示 ══
+                // 加 30s 超时避免 SMB 连接耗尽时无限等待
+                val quickResult = try {
                 withTimeout(30_000L) {
                     smbRepository.quickScanFolderContent(path)
                 }
@@ -631,6 +634,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                 }
+            } finally {
+                scanningFolder = false
+            }
         }
     }
 
@@ -638,12 +644,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 返回上一级。
      *
      * 使用历史栈直接回退，不重新连接服务器。
-     * 取消当前正在进行的扫描。
+     * CX 式：不取消旧扫描协程，让其自然完成。
+     * 重置 scanningFolder 守卫，允许用户立即点其他文件夹。
      */
     fun smbGoBack() {
-        // 取消扫描协程，释放 SMB 连接
-        scanJob?.cancel()
-        scanJob = null
+        scanningFolder = false
         pendingScanPath = null
         val state = _smbBrowseState.value
         when (state) {

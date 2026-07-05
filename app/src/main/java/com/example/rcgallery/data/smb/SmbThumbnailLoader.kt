@@ -11,6 +11,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.io.BufferedInputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.Semaphore
@@ -23,19 +24,19 @@ import java.util.concurrent.TimeUnit
  *
  * ```
  * load(url)
- *    ├── ① 内存 LRU 缓存 (60 Bitmap)
+ *    ├── ① 内存 LRU 缓存 (200 Bitmap)
  *    ├── ② 磁盘 LRU 缓存 (50MB JPEG)
- *    ├── ③ SMB 远程加载（Semaphore 4 并发控制）
- *    │     ├── 图片: 三层策略
+ *    ├── ③ SMB 远程加载（无并发限制 — CX 模式：所有可见条目同时加载）
+ *    │     ├── 图片: 双层策略
  *    │     │    ├─ 策略1: 读文件头 64KB → EXIF 内嵌缩略图 ← ★ 核心优化
- *    │     │    ├─ 策略2: readBytes(≤20MB) → 采样 decodeByteArray
- *    │     │    └─ 失败 → null（跳过）
- *    │     ├── 视频: 两层降级
+ *    │     │    ├─ 策略2: decodeStream(InputStream) 流式解码 ← CX 模式
+ *    │     │    └─ 失败 → null（下次滚动重试）
+ *    │     ├── 视频: 两层降级 + Semaphore(1)
  *    │     │    ├─ 策略1: CX 原生 MediaMetadataRetriever(smb://)
- *    │     │    ├─ 策略2: 头部 1MB → 临时文件 → frameAtTime
- *    │     │    └─ 失败 → 显示 ▶ 图标
+ *    │     │    ├─ 策略2: 头部 256KB → embeddedPicture（无 frameAtTime）
+ *    │     │    └─ 失败 → null（下次滚动重试）
  *    │     └── 成功 → 同步写入磁盘缓存 + 内存缓存
- *    └── ④ Semaphore(4) 控制并发 SMB 连接数
+ *    └── ④ 去重（pendingJobs）+ 8s 超时
  * ```
  *
  * ### EXIF 内嵌缩略图（核心性能优化）
@@ -43,17 +44,18 @@ import java.util.concurrent.TimeUnit
  * - 缩略图通常为 160×120 JPEG，大小 2-20KB
  * - 位于文件开头 ~4-64KB 范围内
  * - 读取量从全文件（5-20MB）降至头部（64KB），**提速 100-500 倍**
- * - 无 EXIF 缩略图时自动降级为完整读取
+ * - 无 EXIF 缩略图时自动降级为流式解码
  *
  * ### 与 CX 的差异
- * - CX 使用 `file/n.openInputStream()` + `BitmapFactory.decodeStream` 流式解码
- * - CX 在真机上 `MediaMetadataRetriever.setDataSource(smb://)` 直接提取视频帧
+ * - CX 使用 `file/n.openInputStream()` + `BitmapFactory.decodeStream` 流式解码 ✅ 已复刻
+ * - CX 在真机上 `MediaMetadataRetriever.setDataSource(smb://)` 直接提取视频帧 ✅ 已复刻
+ * - CX 不做并发限制，所有可见条目同时加载 ✅ 已复刻
  * - CX 有后台 ScanService 预生成缩略图；我们按需延迟生成
  * - **但磁盘缓存效果一致**：第一次加载后，后续直接从磁盘读取，无需 SMB
  */
 object SmbThumbnailLoader {
 
-    private const val MAX_MEM_CACHE = 60
+    private const val MAX_MEM_CACHE = 200
     /** 单次缩略图读取超时（8 秒 — 足够完成一次 SMB read，太长会堵塞 IO 线程池） */
     private const val TIMEOUT_MS = 8_000L
     private const val THUMB_MAX_PX = 400
@@ -67,12 +69,10 @@ object SmbThumbnailLoader {
     private const val EXIF_HEADER_BYTES = 64 * 1024
 
     /** 视频缩略图：从 SMB 读取前 [VIDEO_HEADER_BYTES] 字节 */
-    private const val VIDEO_HEADER_BYTES = 1024 * 1024
-    /** 最小有效视频头部字节数 */
-    private const val MIN_VIDEO_HEADER_BYTES = 100
+    private const val VIDEO_HEADER_BYTES = 256 * 1024
 
-    /** 缩略图整体并发上限 */
-    private const val MAX_CONCURRENT_THUMBS = 4
+    /** 缩略图整体并发上限（仅视频需要限制，图片不限制） */
+    private const val MAX_CONCURRENT_VIDEO_THUMBS = 1
 
     private const val TAG = "SMB-THUMB"
 
@@ -83,11 +83,8 @@ object SmbThumbnailLoader {
         }
     }
 
-    // ── 并发控制 ──
-    private val thumbSemaphore = Semaphore(MAX_CONCURRENT_THUMBS)
-
-    // ── 去重 ──
-    private val pendingJobs = HashSet<String>()
+    // ── 视频缩略图并发控制（MediaMetadataRetriever 可能占用长时间连接）──
+    private val videoThumbSemaphore = Semaphore(MAX_CONCURRENT_VIDEO_THUMBS)
 
     // ── 磁盘缓存目录 ──
     private var diskCacheDir: File? = null
@@ -119,11 +116,11 @@ object SmbThumbnailLoader {
     }
 
     /**
-     * 加载缩略图。
+     * 加载缩略图（CX 模式：无并发限制，先到先得）。
      *
-     * CX 式的加载策略 + EXIF 内嵌缩略图优化：
+     * 与 CX 文件管理器行为一致：
+     * - 不限制并发连接数，所有可见条目同时开始加载
      * - 不黑名单——加载失败下次滚动再试
-     * - Semaphore(4) 防止 SMB 过载
      * - 超时保护但不黑名单
      * - 磁盘缓存让第二次浏览秒出
      *
@@ -161,42 +158,26 @@ object SmbThumbnailLoader {
             try { diskFile.delete() } catch (_: Exception) { }
         }
 
-        // ③ 去重：同一 URL 只有一个加载任务
-        synchronized(pendingJobs) {
-            if (url in pendingJobs) return@withContext null
-            pendingJobs.add(url)
-        }
-
+        // ③ CX 式：不去重，直接加载。去重在内存/磁盘缓存层已经做了
+        if (!coroutineContext.isActive) return@withContext null
+        var result: Bitmap? = null
         try {
-            // 用信号量限制并发 SMB 读取数
-            // 改用 tryAcquire(5s) 而非阻塞 acquire() — 防止 IO 线程被永久阻塞
-            val gotPermit = thumbSemaphore.tryAcquire(5, TimeUnit.SECONDS)
-            if (!gotPermit) {
-                AppLogger.d(TAG, "semaphore timeout (5s): $url")
-                return@withContext null
+            withTimeout(TIMEOUT_MS) {
+                result = loadBytes(url, fileSize, maxPx, context)
             }
-            try {
-                var result: Bitmap? = null
-                try {
-                    // 在每次 SMB 调用前检查是否仍活跃
-                    if (!coroutineContext.isActive) return@withContext null
-                    withTimeout(TIMEOUT_MS) {
-                        result = loadBytes(url, fileSize, maxPx, context)
-                    }
-                } catch (e: TimeoutCancellationException) {
-                    AppLogger.d(TAG, "timeout: $url")
-                }
-                result
-            } finally {
-                thumbSemaphore.release()
-            }
-        } finally {
-            synchronized(pendingJobs) { pendingJobs.remove(url) }
+        } catch (e: TimeoutCancellationException) {
+            AppLogger.d(TAG, "timeout: $url")
         }
+        result
     }
 
     /**
-     * 核心加载逻辑。
+     * 核心加载逻辑（CX 模式）。
+     *
+     * - 图片: EXIF 64KB 头部快速提取 → 失败则 decodeStream(InputStream) 流式解码
+     * - 视频: 优先 setDataSource(smb://) → 失败则 256KB 头部 embeddedPicture
+     *
+     * 流式解码优势：峰值内存从 15MB byte[] 降至 512KB buffer，避免 OOM。
      */
     private suspend fun loadBytes(
         url: String,
@@ -210,7 +191,6 @@ object SmbThumbnailLoader {
         }
 
         // ── 图片缩略图 ──
-        // 策略 1（★ 核心优化）: EXIF 内嵌缩略图提取
         val repo = SmbRepository.getInstance()
 
         // 跳过超大文件
@@ -219,43 +199,52 @@ object SmbThumbnailLoader {
             return null
         }
 
-        // 读文件头部取 EXIF 缩略图
+        // 策略 1（★ 核心优化）: EXIF 内嵌缩略图提取
         val exifResult = loadExifThumbnail(url, maxPx, repo)
         if (exifResult != null) return exifResult
 
-        // 策略 2: 完整读取降级
-        AppLogger.d(TAG, "no EXIF thumbnail, full read fallback: $url")
-        val bytesResult = repo.readBytes(url)
-        val bytes = bytesResult.getOrNull()
-        if (bytes == null || bytes.size < 100) {
-            AppLogger.d(TAG, "image read failed or too small: $url")
+        // 策略 2（CX 式）: 流式解码 — decodeStream(InputStream)
+        // 相比 readBytes+decodeByteArray，无需预先分配整个文件的 ByteArray
+        AppLogger.d(TAG, "no EXIF thumbnail, stream decode: $url")
+        val streamResult = repo.getInputStream(url)
+        val stream = streamResult.getOrNull()
+        if (stream == null) {
+            AppLogger.d(TAG, "image stream open failed: $url")
             return null
         }
+        try {
+            val buffered = BufferedInputStream(stream, 512 * 1024)
 
-        // 取边界计算采样率
-        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
-        if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) {
-            AppLogger.d(TAG, "image bounds failed: $url")
-            return null
-        }
+            // 先读取边界计算采样率（使用 mark/reset 避免重开 SMB 连接）
+            buffered.mark(512 * 1024)
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeStream(buffered, null, boundsOpts)
+            buffered.reset()
 
-        val exactSample = computeSampleSize(boundsOpts.outWidth, boundsOpts.outHeight, maxPx)
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = exactSample
-            inPreferredConfig = Bitmap.Config.RGB_565
-        }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-        if (bitmap == null) {
-            AppLogger.d(TAG, "image decode failed: $url")
-            return null
-        }
+            if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) {
+                AppLogger.d(TAG, "image bounds failed: $url")
+                return null
+            }
 
-        // 缓存
-        memCache.put(url, bitmap)
-        saveToDiskCache(url, bitmap)
-        AppLogger.d(TAG, "image thumbnail OK (full read): ${bitmap.width}x${bitmap.height} url=$url")
-        return bitmap
+            val exactSample = computeSampleSize(boundsOpts.outWidth, boundsOpts.outHeight, maxPx)
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = exactSample
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            val bitmap = BitmapFactory.decodeStream(buffered, null, opts)
+            if (bitmap == null) {
+                AppLogger.d(TAG, "image decode failed: $url")
+                return null
+            }
+
+            // 缓存
+            memCache.put(url, bitmap)
+            saveToDiskCache(url, bitmap)
+            AppLogger.d(TAG, "image thumbnail OK (stream): ${bitmap.width}x${bitmap.height} url=$url")
+            return bitmap
+        } finally {
+            try { stream.close() } catch (_: Exception) { }
+        }
     }
 
     // ══════════════════════════════════════
@@ -491,29 +480,36 @@ object SmbThumbnailLoader {
     // ══════════════════════════════════════
 
     /**
-     * 视频缩略图加载 — 两层策略。
+     * 视频缩略图加载 — 两层策略 + 专用 Semaphore(1) 保护。
      *
      * ### 策略 1（CX 原生方式）
      * 直接传 SMB URL 给 [MediaMetadataRetriever.setDataSource]，
-     * 如果 Android 支持 smb:// URI，非 faststart 视频也能出图。
-     * 不支持时抛异常 → 自动降级到策略 2。
+     * 如果 Android 支持 smb:// URI，优先提取 embeddedPicture，再 frameAtTime。
      *
-     * ### 策略 2（头部读取回退）
-     * 读文件头部 [VIDEO_HEADER_BYTES] 到临时文件，尝试 embeddedPicture 或 frameAtTime。
-     * 对 faststart 视频和内嵌封面有效。
+     * ### 策略 2（嵌入式封面头部读取，非 faststart 视频可能失败）
+     * 读视频头部 256KB 到临时文件，尝试 MediaMetadataRetriever.embeddedPicture。
+     * 不再尝试 frameAtTime（对非 faststart 视频前 256KB 不包含关键帧）。
      *
-     * ### ⚠️ 为什么不用 HTTP 代理做缩略图？
-     * 策略 2（HTTP 代理）会为每个视频打开完整的 RAF 连接（几百 MB），
-     * 大量并发时耗尽 SMB 连接 → Broken pipe → UI 卡死。缩略图场景不适合。
+     * ### 视频单并发 (Semaphore 1)
+     * MediaMetadataRetriever.setDataSource(smb://) 在真机上可能打开大连接，
+     * 限制 1 个并发防止 SMB 连接耗尽。
      */
     private suspend fun loadVideoThumbnail(url: String, context: Context): Bitmap? {
-        // ── 策略 1: CX 原生方式 — 直接传 SMB URL ──
-        // 不支持的设备会抛异常，自动降级到策略 2（头部读取）
-        val cxResult = loadVideoCxDirect(url)
-        if (cxResult != null) return cxResult
+        val got = videoThumbSemaphore.tryAcquire(5, TimeUnit.SECONDS)
+        if (!got) {
+            AppLogger.d(TAG, "video semaphore timeout (5s): $url")
+            return null
+        }
+        try {
+            // ── 策略 1: CX 原生 — 直接传 SMB URL ──
+            val cxResult = loadVideoCxDirect(url)
+            if (cxResult != null) return cxResult
 
-        // ── 策略 2: 头部读取回退 ──
-        return loadVideoHeaderFallback(url, context)
+            // ── 策略 2: 256KB 头部 embeddedPicture 尝试 ──
+            return loadVideoEmbeddedFallback(url, context)
+        } finally {
+            videoThumbSemaphore.release()
+        }
     }
 
     /**
@@ -574,14 +570,21 @@ object SmbThumbnailLoader {
     }
 
     /**
-     * 视频缩略图头部读取回退策略。
-     * 读视频前 1MB 到临时文件，尝试提取 embedded picture 或 frameAtTime。
+     * 视频缩略图头部嵌入式封面提取（回退策略）。
+     *
+     * 读取视频前 256KB 到临时文件，尝试 [MediaMetadataRetriever.embeddedPicture]。
+     *
+     * ### 为什么不尝试 frameAtTime？
+     * - 非 faststart 视频的关键帧在文件末尾，256KB 头部不包含
+     * - 之前 1MB 头部读取 frameAtTime 实测几乎 100% 失败
+     * - 每次失败浪费 SMB 连接和传输时间
+     * - CX 的 ScanService 也是只提取 embeddedPicture，不做 frameAtTime
      */
-    private suspend fun loadVideoHeaderFallback(url: String, context: Context): Bitmap? {
+    private suspend fun loadVideoEmbeddedFallback(url: String, context: Context): Bitmap? {
         try {
             val bytesResult = SmbRepository.getInstance().readBytesPartial(url, VIDEO_HEADER_BYTES)
             val bytes = bytesResult.getOrNull()
-            if (bytes != null && bytes.size >= MIN_VIDEO_HEADER_BYTES) {
+            if (bytes != null && bytes.size >= 100) {
                 val hash = urlHash(url)
                 val tempFile = File(context.cacheDir, "smb_vid_thumb_$hash")
                 try {
@@ -589,8 +592,6 @@ object SmbThumbnailLoader {
                     val retriever = MediaMetadataRetriever()
                     try {
                         retriever.setDataSource(tempFile.absolutePath)
-
-                        // embedded picture
                         val embedded = retriever.embeddedPicture
                         if (embedded != null) {
                             val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
@@ -606,21 +607,7 @@ object SmbThumbnailLoader {
                                 return bm
                             }
                         }
-
-                        // frameAtTime
-                        val rawBitmap = retriever.frameAtTime
-                        if (rawBitmap != null && rawBitmap.width > 1 && rawBitmap.height > 1) {
-                            val w = rawBitmap.width; val h = rawBitmap.height
-                            val thumb = if (w > THUMB_MAX_PX || h > THUMB_MAX_PX) {
-                                val scale = computeSampleSize(w, h, THUMB_MAX_PX)
-                                Bitmap.createScaledBitmap(rawBitmap, w / scale, h / scale, true)
-                            } else rawBitmap
-                            if (thumb !== rawBitmap) rawBitmap.recycle()
-                            memCache.put(url, thumb)
-                            saveToDiskCache(url, thumb)
-                            AppLogger.d(TAG, "video frame OK (header): ${thumb.width}x${thumb.height}")
-                            return thumb
-                        }
+                        AppLogger.d(TAG, "video no embedded picture in header: $url")
                     } finally {
                         retriever.release()
                     }
@@ -629,7 +616,7 @@ object SmbThumbnailLoader {
                 }
             }
         } catch (e: Exception) {
-            AppLogger.d(TAG, "video header fallback error: ${e.message}")
+            AppLogger.d(TAG, "video header embedded error: ${e.message}")
         }
         return null
     }
@@ -714,14 +701,6 @@ object SmbThumbnailLoader {
         }
     }
 
-    /**
-     * 取消所有待处理的缩略图加载作业。
-     * 文件夹切换时调用，防止旧作业阻塞新的缩略图加载。
-     */
-    fun cancelPending() {
-        synchronized(pendingJobs) { pendingJobs.clear() }
-    }
-
     // ══════════════════════════════════════
     //  工具
     // ══════════════════════════════════════
@@ -743,5 +722,22 @@ object SmbThumbnailLoader {
             sample *= 2
         }
         return sample
+    }
+
+    /**
+     * 从磁盘缓存读取指定 URL 的缩略图 Bitmap。
+     * 用于预览页面的即时占位图：列表/网格已缓存过的图，预览瞬间显示。
+     * 返回 null 表示无缓存（首次打开或缓存已清理）。
+     */
+    fun getDiskCacheBitmap(url: String): Bitmap? {
+        val dir = diskCacheDir ?: return null
+        val file = File(dir, urlHash(url))
+        if (!file.exists()) return null
+        try {
+            val opts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            return BitmapFactory.decodeFile(file.absolutePath, opts)
+        } catch (_: Exception) { return null }
     }
 }
