@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,6 +63,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _smbBackStack = mutableListOf<SmbBrowseState>()
     // 当前正在扫描的路径（防竞态：扫描完成时如果用户已按返回，忽略结果）
     private var pendingScanPath: String? = null
+    /** 当前 SMB 扫描协程 Job — 每次开/关文件夹时取消旧的，防止 SMB 连接堆积 */
+    private var scanJob: Job? = null
 
     // ── 回收站状态 ──
     private val _trashEntries = MutableStateFlow<List<TrashEntry>>(emptyList())
@@ -546,13 +549,30 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             else -> return
         }
 
+        // 取消旧的扫描协程（释放其 SMB 连接）
+        scanJob?.cancel()
+        scanJob = null
+
         // 将当前状态推入历史栈
         _smbBackStack.add(state)
         pendingScanPath = path
 
-        viewModelScope.launch {
+        scanJob = viewModelScope.launch {
             // ══ Phase 1: 快速扫描顶层 → 立即显示 ══
-            smbRepository.quickScanFolderContent(path)
+            // 加 30s 超时避免 SMB 连接耗尽时无限等待
+            val quickResult = try {
+                withTimeout(30_000L) {
+                    smbRepository.quickScanFolderContent(path)
+                }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                AppLogger.e("SMB", "quickScanFolder timeout path=$path")
+                if (pendingScanPath == path) {
+                    pendingScanPath = null
+                    _smbBrowseState.value = SmbBrowseState.Error("扫描超时，请稍后重试")
+                }
+                return@launch
+            }
+            quickResult
                 .onSuccess { result ->
                     if (pendingScanPath != path) return@launch
 
@@ -568,12 +588,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         mediaFiles = result.mediaFiles
                     )
 
-                    // ══ Phase 2: 并行扫描所有子文件夹 → 一次更新 ══
-                    // 收集所有结果，避免逐个 emit 导致 UI 闪烁
+                    // ══ Phase 2: 限流并行扫描所有子文件夹 → 一次更新 ══
+                    // 用 Semaphore(4) 限制并发 SMB 连接数，防止淹没 Windows SMB 服务端
+                    val phase2Semaphore = java.util.concurrent.Semaphore(4)
                     val deferreds = mutableFolders.indices.map { i ->
                         async(Dispatchers.IO) {
-                            val updated = smbRepository.scanSingleFolder(mutableFolders[i])
-                            i to updated
+                            phase2Semaphore.acquire()
+                            try {
+                                val updated = smbRepository.scanSingleFolder(mutableFolders[i])
+                                i to updated
+                            } finally {
+                                phase2Semaphore.release()
+                            }
                         }
                     }
                     // 等全部完成再一次性更新
@@ -615,6 +641,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 取消当前正在进行的扫描。
      */
     fun smbGoBack() {
+        // 取消扫描协程，释放 SMB 连接
+        scanJob?.cancel()
+        scanJob = null
         pendingScanPath = null
         val state = _smbBrowseState.value
         when (state) {

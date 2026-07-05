@@ -55,6 +55,7 @@ import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -314,6 +315,11 @@ private fun FolderMixedContent(
         },
         update = { rv ->
             if (adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles) {
+                // 取消旧的缩略图协程 + 清空待处理队列，释放 SMB 连接
+                adapter.thumbJob.cancel()
+                adapter.thumbJob = Job()
+                SmbThumbnailLoader.cancelPending()
+                adapter.generation++
                 adapter.subFolders = subFolders
                 adapter.mediaFiles = mediaFiles
                 adapter.notifyDataSetChanged()
@@ -333,6 +339,11 @@ private class FolderMixedAdapter(
     val scope: CoroutineScope
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
+    /** 代次计数器：每次 data change 递增，ViewHolder 检查代次丢弃旧协程结果 */
+    @Volatile var generation: Int = 0
+    /** 缩略图协程父 Job — 每次 data change 取消旧的、创建新的 */
+    @Volatile var thumbJob: Job = Job()
+
     companion object {
         private const val TYPE_FOLDER = 0
         private const val TYPE_MEDIA = 1
@@ -349,9 +360,9 @@ private class FolderMixedAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return if (viewType == TYPE_FOLDER) {
-            FolderVH.create(parent, onFolderClick, scope)
+            FolderVH.create(parent, onFolderClick, scope, genRef = { generation }, jobRef = { thumbJob })
         } else {
-            MediaVH.create(parent, onFileClick, scope)
+            MediaVH.create(parent, onFileClick, scope, genRef = { generation }, jobRef = { thumbJob })
         }
     }
 
@@ -371,7 +382,9 @@ private class FolderVH private constructor(
     private val nameTv: TextView,
     private val countTv: TextView,
     private val onFolderClick: (SmbSubFolder) -> Unit,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val genRef: () -> Int,
+    private val jobRef: () -> Job
 ) : RecyclerView.ViewHolder(itemView) {
 
     init {
@@ -383,7 +396,7 @@ private class FolderVH private constructor(
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFolderClick: (SmbSubFolder) -> Unit, scope: CoroutineScope): FolderVH {
+        fun create(parent: ViewGroup, onFolderClick: (SmbSubFolder) -> Unit, scope: CoroutineScope, genRef: () -> Int, jobRef: () -> Job): FolderVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val margin = (6 * d).toInt()
@@ -460,7 +473,7 @@ private class FolderVH private constructor(
             root.addView(countTv)
 
             // 点击在 bind 中处理（用 tag 存 SmbSubFolder 对象）
-            return FolderVH(root, iv, nameTv, countTv, onFolderClick, scope)
+            return FolderVH(root, iv, nameTv, countTv, onFolderClick, scope, genRef, jobRef)
         }
     }
 
@@ -477,9 +490,10 @@ private class FolderVH private constructor(
             coverIv.tag = path
 
             if (path.isNotEmpty()) {
-                scope.launch {
+                val bindGen = genRef()
+                scope.launch(jobRef()) {
                     val bm = SmbThumbnailLoader.load(url = path, maxPx = 300)
-                    if (bm != null && coverIv.tag == path) {
+                    if (bm != null && coverIv.tag == path && bindGen == genRef()) {
                         coverIv.setImageBitmap(bm)
                     }
                 }
@@ -495,7 +509,9 @@ private class MediaVH private constructor(
     private val iv: ImageView,
     private val playIcon: TextView,
     private val scope: CoroutineScope,
-    private val onFileClick: (SmbFileInfo) -> Unit
+    private val onFileClick: (SmbFileInfo) -> Unit,
+    private val genRef: () -> Int,
+    private val jobRef: () -> Job
 ) : RecyclerView.ViewHolder(itemView) {
 
     init {
@@ -507,7 +523,7 @@ private class MediaVH private constructor(
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope): MediaVH {
+        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope, genRef: () -> Int, jobRef: () -> Job): MediaVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val gapPx = (SM_GAP_DP * d).toInt()
@@ -553,7 +569,7 @@ private class MediaVH private constructor(
             }
             root.addView(playIcon)
 
-            return MediaVH(root, iv, playIcon, scope, onFileClick)
+            return MediaVH(root, iv, playIcon, scope, onFileClick, genRef, jobRef)
         }
     }
 
@@ -569,7 +585,7 @@ private class MediaVH private constructor(
         // 设置视频播放图标（必须在每次 bind 时设置，RecyclerView 回收会重置）
         playIcon.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
 
-        // 同一路径不重复清除图片（防止通知刷新的闪烁）
+        // 同一路径且之前已成功加载 → 跳过
         if (path == currentPath) return
 
         currentPath = path
@@ -577,14 +593,18 @@ private class MediaVH private constructor(
         iv.setBackgroundColor(if (isVideo) 0xFF333333.toInt() else 0xFF1A1A1A.toInt())
         iv.tag = path
 
+        val bindGen = genRef()
         // 为图片和视频都加载缩略图（视频用 partial read + MediaMetadataRetriever）
-        scope.launch {
+        scope.launch(jobRef()) {
             val context = itemView.context
             AppLogger.d("SMB-THUMB", "load() called: isVideo=$isVideo path=$path")
             val bm = SmbThumbnailLoader.load(url = path, fileSize = file.size, maxPx = 300, context = context)
-            if (bm != null && iv.tag == path) {
+            if (bm != null && iv.tag == path && bindGen == genRef()) {
                 AppLogger.d("SMB-THUMB", "setImageBitmap: isVideo=$isVideo path=$path")
                 iv.setImageBitmap(bm)
+            } else if (bm == null && iv.tag == path && currentPath == path && bindGen == genRef()) {
+                // 加载失败 → 清理 currentPath，下次 bind 可重试
+                currentPath = null
             }
         }
     }
