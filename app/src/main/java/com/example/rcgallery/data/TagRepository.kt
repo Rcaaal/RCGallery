@@ -4,6 +4,8 @@ import android.content.Context
 import com.example.rcgallery.data.db.*
 import com.example.rcgallery.model.MediaItem
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * TAG 数据仓库——封装 Room DAO，提供应用层接口。
@@ -11,6 +13,9 @@ import kotlinx.coroutines.flow.Flow
 class TagRepository(context: Context) {
 
     private val dao = AppDatabase.getInstance(context).tagDao()
+
+    // ── TAG 互斥锁：getOrCreateTag 并发安全 ──
+    private val getOrCreateMutex = Mutex()
 
     // ── TAG 定义 ──
 
@@ -30,10 +35,12 @@ class TagRepository(context: Context) {
     suspend fun getOrCreateTag(name: String): TagEntity {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) throw IllegalArgumentException("Tag name cannot be empty")
-        val existing = dao.getTagByName(trimmed)
-        if (existing != null) return existing
-        val id = dao.insertTag(TagEntity(name = trimmed))
-        return dao.getTagById(id) ?: TagEntity(id = id, name = trimmed)
+        return getOrCreateMutex.withLock {
+            val existing = dao.getTagByName(trimmed)
+            if (existing != null) return@withLock existing
+            val id = dao.insertTag(TagEntity(name = trimmed))
+            dao.getTagById(id) ?: TagEntity(id = id, name = trimmed)
+        }
     }
 
     /** 删除 TAG（级联删除关联） */
