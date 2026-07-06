@@ -35,9 +35,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.rcgallery.PipState
+import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.ui.component.SettingsOverlay
+import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
@@ -140,6 +143,21 @@ fun PreviewScreen(
     }
 
     val currentItem = mediaItems.getOrNull(pagerState.currentPage)
+
+    // ── TAG 相关 ──
+    val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+    var currentMediaTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var showMediaTagDialog by remember { mutableStateOf(false) }
+    var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    LaunchedEffect(currentItem) {
+        val item = currentItem
+        if (item != null) {
+            currentMediaTags = viewModel.getMediaTags(item.filePath)
+            recentTagList = viewModel.getRecentTags()
+        } else {
+            currentMediaTags = emptyList()
+        }
+    }
 
     // ── 直接永久删除 launcher（不经过回收站，物理删除）──
     val permanentDeleteLauncher = rememberLauncherForActivityResult(
@@ -549,7 +567,9 @@ fun PreviewScreen(
                                 }
                                 renameVersion++
                                 if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
-                            }
+                            },
+                            mediaTags = currentMediaTags,
+                            onManageTags = { showMediaTagDialog = true }
                         )
                         }
                     }
@@ -585,7 +605,9 @@ fun PreviewScreen(
                                 }
                                 renameVersion++
                                 if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
-                            }
+                            },
+                            mediaTags = currentMediaTags,
+                            onManageTags = { showMediaTagDialog = true }
                         )
                         }
                     }
@@ -594,6 +616,19 @@ fun PreviewScreen(
             }
         }
         SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
+
+        // ── 媒体 TAG 管理对话框 ──
+        if (showMediaTagDialog && currentItem != null) {
+            TagManageDialog(
+                title = "管理标签 - ${currentItem?.fileName ?: ""}",
+                existingTags = currentMediaTags,
+                allTags = allTags,
+                recentTags = recentTagList,
+                onAddTag = { name -> viewModel.addMediaTag(currentItem!!.filePath, name) },
+                onRemoveTag = { tagId -> viewModel.removeMediaTag(currentItem!!.filePath, tagId) },
+                onDismiss = { showMediaTagDialog = false }
+            )
+        }
     }
 }
 
@@ -614,7 +649,9 @@ private fun InfoCard(
     albumDisplayName: String,
     onAlbumNameClick: () -> Unit,
     onDeleteClick: () -> Unit,
-    onFileRenamed: (String) -> Unit = {}
+    onFileRenamed: (String) -> Unit = {},
+    mediaTags: List<TagEntity> = emptyList(),
+    onManageTags: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -705,6 +742,13 @@ private fun InfoCard(
                     softWrap = true
                 )
             }
+            // TAG 行（首个 + 号，最多两行自动换行）
+            Spacer(Modifier.height(4.dp))
+            MediaTagRow(
+                tags = mediaTags,
+                onAddClick = onManageTags,
+                onTagClick = onManageTags
+            )
             // Row 5: 永久删除按钮（右下角）
             Spacer(Modifier.height(6.dp))
             Row(
@@ -784,3 +828,63 @@ private fun InfoCard(
 
 }
 
+
+// ══════════════════════════════════════
+//  媒体 TAG 行（首个 + 号，最多两行自动换行，溢出后显示展开）
+// ══════════════════════════════════════
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@androidx.compose.runtime.Composable
+private fun MediaTagRow(
+    tags: List<TagEntity>,
+    onAddClick: () -> Unit,
+    onTagClick: () -> Unit
+) {
+    var showExpanded by remember { mutableStateOf(false) }
+
+    androidx.compose.foundation.layout.FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        maxLines = if (showExpanded) Int.MAX_VALUE else 2
+    ) {
+        // + 号按钮
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(androidx.compose.foundation.shape.CircleShape)
+                .background(Color(0xFF33AA33))
+                .clickable { onAddClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text("+", color = Color.White, fontSize = 12.sp)
+        }
+
+        tags.forEach { tag ->
+            Surface(
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+                color = Color(0xFF3366AA),
+                modifier = Modifier.clickable { onTagClick() }
+            ) {
+                Text(
+                    tag.name,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+
+        // 溢出 → 展开按钮
+        if (tags.size >= 6 && !showExpanded) {
+            Surface(
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+                color = Color(0xFF555555),
+                modifier = Modifier.clickable { showExpanded = true }
+            ) {
+                Text("展开", color = Color.White, fontSize = 10.sp,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+            }
+        }
+    }
+}

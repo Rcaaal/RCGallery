@@ -5,10 +5,13 @@ import android.media.MediaScannerConnection
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
+import com.example.rcgallery.data.TagRepository
 import com.example.rcgallery.data.TrashManager
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDevice
 import com.example.rcgallery.data.smb.SmbRepository
+import com.example.rcgallery.data.db.TagEntity
+import com.example.rcgallery.data.db.TargetResult
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
@@ -30,6 +33,7 @@ import java.io.File
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = MediaRepository(application)
+    private val tagRepository = TagRepository(application)
     private val observer = MediaStoreObserver(application)
     private val trashManager = TrashManager(application)
 
@@ -229,6 +233,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     getApplication<Application>(),
                     arrayOf(newDir.absolutePath), null, null
                 )
+                // 迁移 TAG 关联（相册 + 内部所有文件）
+                val oldAlbumKey = tagRepository.albumKey(oldDirStr)
+                val newAlbumKey = tagRepository.albumKey(newDirStr)
+                tagRepository.updateTargetKey(oldAlbumKey, newAlbumKey)
+                _mediaItems.value.forEach { item ->
+                    if (item.filePath.startsWith(newDirStr)) {
+                        val oldMediaKey = tagRepository.mediaKey(
+                            item.filePath.replace(newDirStr, oldDirStr)
+                        )
+                        val newMediaKey = tagRepository.mediaKey(item.filePath)
+                        tagRepository.updateTargetKey(oldMediaKey, newMediaKey)
+                    }
+                }
             }
             onResult(ok)
         }
@@ -377,9 +394,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 调用时机：InfoCard 文件重命名成功后。
      */
     fun renameFile(uri: String, newFileName: String) {
-        _mediaItems.value = _mediaItems.value.map { item ->
+        val oldItems = _mediaItems.value
+        _mediaItems.value = oldItems.map { item ->
             if (item.uri.toString() == uri) {
+                val oldPath = item.filePath
                 val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
+                // 迁移 TAG 关联
+                viewModelScope.launch {
+                    tagRepository.updateTargetKey(
+                        tagRepository.mediaKey(oldPath),
+                        tagRepository.mediaKey(newPath)
+                    )
+                }
                 item.copy(fileName = newFileName, filePath = newPath)
             } else {
                 item
@@ -487,6 +513,110 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             AppLogger.e("VM", "saveMediaStarredIds FAIL", e)
         }
+    }
+
+    // ══════════════════════════════════════
+    //  TAG 标签操作
+    // ══════════════════════════════════════
+
+    /** 所有 TAG 定义 */
+    private val _allTags = MutableStateFlow<List<com.example.rcgallery.data.db.TagEntity>>(emptyList())
+    val allTags: StateFlow<List<com.example.rcgallery.data.db.TagEntity>> = _allTags.asStateFlow()
+
+    /** 相册 TAG 映射：directoryPath → List<TagEntity> */
+    private val _albumTags = MutableStateFlow<Map<String, List<TagEntity>>>(emptyMap())
+    val albumTags: StateFlow<Map<String, List<TagEntity>>> = _albumTags.asStateFlow()
+
+    init { loadTags() }
+
+    private fun loadTags() {
+        viewModelScope.launch {
+            tagRepository.getAllTags().collect { tags ->
+                _allTags.value = tags
+            }
+        }
+        viewModelScope.launch {
+            tagRepository.getAllAlbumTags().collect { results ->
+                val allTags = _allTags.value
+                val map = mutableMapOf<String, MutableList<TagEntity>>()
+                results.forEach { r ->
+                    val ids = r.tagIds.split(",").mapNotNull { it.toLongOrNull() }
+                    val tags = allTags.filter { it.id in ids }
+                    if (tags.isNotEmpty()) {
+                        // albumKey 去前缀
+                        val key = r.targetKey.removePrefix("album:")
+                        map[key] = tags.toMutableList()
+                    }
+                }
+                _albumTags.value = map
+            }
+        }
+    }
+
+    /** 为相册添加 TAG */
+    fun addAlbumTag(directoryPath: String, tagName: String) {
+        viewModelScope.launch {
+            val tag = tagRepository.getOrCreateTag(tagName)
+            tagRepository.addTagToTarget(tag.id, tagRepository.albumKey(directoryPath), TagRepository.TYPE_ALBUM)
+        }
+    }
+
+    /** 从相册移除 TAG */
+    fun removeAlbumTag(directoryPath: String, tagId: Long) {
+        viewModelScope.launch {
+            tagRepository.removeTagFromTarget(tagId, tagRepository.albumKey(directoryPath))
+        }
+    }
+
+    /** 获取媒体文件的所有 TAG（一次性） */
+    suspend fun getMediaTags(filePath: String): List<TagEntity> {
+        return tagRepository.getTagEntitiesForTarget(tagRepository.mediaKey(filePath))
+    }
+
+    /** 为媒体文件添加 TAG */
+    fun addMediaTag(filePath: String, tagName: String) {
+        viewModelScope.launch {
+            val tag = tagRepository.getOrCreateTag(tagName)
+            tagRepository.addTagToTarget(tag.id, tagRepository.mediaKey(filePath), TagRepository.TYPE_MEDIA)
+        }
+    }
+
+    /** 从媒体文件移除 TAG */
+    fun removeMediaTag(filePath: String, tagId: Long) {
+        viewModelScope.launch {
+            tagRepository.removeTagFromTarget(tagId, tagRepository.mediaKey(filePath))
+        }
+    }
+
+    /** 搜索 TAG（自动补全用） */
+    suspend fun searchTags(query: String): List<TagEntity> = tagRepository.searchTags(query)
+
+    /** 最近使用的 TAG */
+    suspend fun getRecentTags(): List<TagEntity> = tagRepository.getRecentTags()
+
+    /** 删除 TAG 定义（级联所有关联） */
+    fun deleteTag(tagId: Long) {
+        viewModelScope.launch { tagRepository.deleteTag(tagId) }
+    }
+
+    /** 多 TAG AND 搜索 */
+    suspend fun findTargetsWithAllTags(tagNames: List<String>): List<TargetResult> =
+        tagRepository.findTargetsWithAllTags(tagNames)
+
+    /** 获取某个 TAG 下的所有相册 */
+    suspend fun getAlbumsForTag(tagId: Long): List<Album> {
+        val targets = tagRepository.getTargetsForTag(tagId).filter { it.targetType == TagRepository.TYPE_ALBUM }
+        if (targets.isEmpty()) return emptyList()
+        val dirPaths = targets.map { it.targetKey.removePrefix("album:") }.toSet()
+        return _albums.value.filter { it.directoryPath in dirPaths }
+    }
+
+    /** 获取某个 TAG 下的所有媒体文件 */
+    suspend fun getMediaForTag(tagId: Long): List<MediaItem> {
+        val targets = tagRepository.getTargetsForTag(tagId).filter { it.targetType == TagRepository.TYPE_MEDIA }
+        if (targets.isEmpty()) return emptyList()
+        val filePaths = targets.map { it.targetKey.removePrefix("media:") }.toSet()
+        return _mediaItems.value.filter { it.filePath in filePaths }
     }
 
     private fun refreshTrashCount() {

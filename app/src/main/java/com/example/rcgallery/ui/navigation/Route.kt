@@ -12,4 +12,5 @@ sealed class Route(val route: String) {
         fun createRoute(mediaId: Long) = "video_player/$mediaId"
     }
     data object Search : Route("search")
+    data object TagList : Route("tag_list")
 }

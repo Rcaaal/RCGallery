@@ -44,6 +44,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
+import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
@@ -51,6 +52,7 @@ import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
+import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
@@ -116,6 +118,7 @@ fun AlbumGridScreen(
     val rawAlbums by viewModel.albums.collectAsStateWithLifecycle()
     val starredIds by viewModel.starredBucketIds.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
 
     // ── 相册显示模式 & 排序模式（持久化，需在 remember(albums) 之前声明）──
     val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -301,9 +304,14 @@ fun AlbumGridScreen(
             } else if (albums.isEmpty()) {
                 LoadingContent()
             } else {
+                // ── TAG 管理对话框状态 ──
+                var tagDialogAlbum by remember { mutableStateOf<Album?>(null) }
+                val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+
                 AlbumGridContent(
                     albums = albums,
                     starredIds = starredIds,
+                    albumTags = albumTags,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
@@ -342,8 +350,29 @@ fun AlbumGridScreen(
                     onOpenTrash = {
                         showTrash = true
                         viewModel.loadTrashEntries()
-                    }
+                    },
+                    onManageAlbumTags = { album -> tagDialogAlbum = album }
                 )
+                // ── TAG 管理对话框 ──
+                val currentTagAlbum = tagDialogAlbum
+                if (currentTagAlbum != null) {
+                    val scope = rememberCoroutineScope()
+                    var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+                    LaunchedEffect(Unit) {
+                        recentTagList = viewModel.getRecentTags()
+                    }
+                    val existingTags: List<TagEntity> = currentTagAlbum.directoryPath.let { albumTags[it] } ?: emptyList()
+                    val allTagsList: List<TagEntity> = allTags
+                    TagManageDialog(
+                        title = "管理相册标签 - ${currentTagAlbum.bucketName}",
+                        existingTags = existingTags,
+                        allTags = allTagsList,
+                        recentTags = recentTagList,
+                        onAddTag = { name -> viewModel.addAlbumTag(currentTagAlbum.directoryPath, name) },
+                        onRemoveTag = { tagId -> viewModel.removeAlbumTag(currentTagAlbum.directoryPath, tagId) },
+                        onDismiss = { tagDialogAlbum = null }
+                    )
+                }
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
@@ -461,7 +490,9 @@ private fun AlbumGridContent(
     onOpenSettings: () -> Unit = {},
     onOpenLog: () -> Unit = {},
     onOpenTrash: () -> Unit = {},
-    albumRvRef: MutableState<RecyclerView?>
+    onManageAlbumTags: (Album) -> Unit = {},
+    albumRvRef: MutableState<RecyclerView?>,
+    albumTags: Map<String, List<TagEntity>> = emptyMap()
 ) {
     Scaffold(
         topBar = {
@@ -526,7 +557,8 @@ private fun AlbumGridContent(
                         items = albums,
                         onClick = onAlbumClick,
                         onLongClick = onAlbumLongClick,
-                        onToggleStar = onToggleStar
+                        onToggleStar = onToggleStar,
+                        onManageTags = onManageAlbumTags
                     )
                     val rv = RecyclerView(ctx).apply {
                         layoutManager = when (displayMode) {
@@ -552,6 +584,7 @@ private fun AlbumGridContent(
                     val prevMode = adapter.currentMode
                     adapter.items = albums
                     adapter.starredIds = starredIds
+                    adapter.albumTagsMap = albumTags
                     if (prevMode != displayMode) {
                         adapter.currentMode = displayMode
                         val spanCount = when (displayMode) {
@@ -605,11 +638,13 @@ private class AlbumGridAdapter(
     var items: List<Album>,
     private val onClick: (Album) -> Unit,
     private val onLongClick: (Album) -> Unit,
-    private val onToggleStar: (String) -> Unit
+    private val onToggleStar: (String) -> Unit,
+    private val onManageTags: (Album) -> Unit = {}
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
     var starredIds: Set<String> = emptySet()
+    var albumTagsMap: Map<String, List<TagEntity>> = emptyMap()
 
     init { setHasStableIds(true) }
 
@@ -623,7 +658,7 @@ private class AlbumGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return if (viewType == VIEW_TYPE_LIST) {
-            ListVH.create(parent, onClick, onLongClick, onToggleStar)
+            ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
         } else {
             GridVH.create(parent, onClick, onLongClick, onToggleStar)
         }
@@ -637,7 +672,7 @@ private class AlbumGridAdapter(
         }
         when (holder) {
             is GridVH -> holder.bind(item, position, starredIds, columns)
-            is ListVH -> holder.bind(item, position, starredIds)
+            is ListVH -> holder.bind(item, position, starredIds, albumTagsMap)
         }
     }
 
@@ -859,11 +894,13 @@ private class GridVH private constructor(
 private class ListVH private constructor(
     itemView: android.view.View,
     private val starContainer: FrameLayout,
-    private val starIv: ImageView
+    private val starIv: ImageView,
+    private val onManageTags: (Album) -> Unit = {}
 ) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit, onToggleStar: (String) -> Unit): ListVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit, onToggleStar: (String) -> Unit,
+                   onManageTags: (Album) -> Unit = {}, albumTagsMap: Map<String, List<TagEntity>> = emptyMap()): ListVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
@@ -941,6 +978,18 @@ private class ListVH private constructor(
             }
             textColumn.addView(pathTv)
 
+            // ── TAG 横向滚动条（只在列表模式显示）──
+            val tagStrip = android.widget.HorizontalScrollView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                isHorizontalScrollBarEnabled = false
+                tag = "album_tag_strip"
+                visibility = android.view.View.GONE
+            }
+            textColumn.addView(tagStrip)
+
             row.addView(textColumn)
 
             // ── 星标：方形大触控区域（48dp，图标 24dp 居中）──
@@ -1000,11 +1049,11 @@ private class ListVH private constructor(
                 }
                 true
             }
-            return ListVH(root, starContainer, starIv)
+            return ListVH(root, starContainer, starIv, onManageTags)
         }
     }
 
-    fun bind(item: Album, pos: Int, starredIds: Set<String>) {
+    fun bind(item: Album, pos: Int, starredIds: Set<String>, albumTagsMap: Map<String, List<TagEntity>> = emptyMap()) {
         itemView.tag = pos
         starContainer.tag = item.bucketId
         val row = (itemView as LinearLayout).getChildAt(0) as LinearLayout
@@ -1029,6 +1078,70 @@ private class ListVH private constructor(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
             android.graphics.PorterDuff.Mode.SRC_IN
         )
+        // ── TAG 横向滚动条 ──
+        val tagStrip = itemView.findViewWithTag<android.widget.HorizontalScrollView>("album_tag_strip")
+        if (tagStrip != null) {
+            val tags = albumTagsMap[item.directoryPath] ?: emptyList()
+            if (tags.isNotEmpty()) {
+                val tagRow = tagStrip.getChildAt(0) as? LinearLayout
+                    ?: LinearLayout(itemView.context).also {
+                        tagStrip.addView(it, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ))
+                    }
+                tagRow.removeAllViews()
+                val ctx = itemView.context
+                val density = ctx.resources.displayMetrics.density
+                tags.forEach { tag ->
+                    val chip = TextView(ctx).apply {
+                        text = tag.name
+                        textSize = 10f
+                        setTextColor(android.graphics.Color.WHITE)
+                        setBackgroundDrawable(
+                            android.graphics.drawable.GradientDrawable().apply {
+                                setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                                setCornerRadius(6 * density)
+                                setColor(android.graphics.Color.argb(180, 100, 140, 255))
+                            }
+                        )
+                        setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
+                        maxLines = 1
+                        isClickable = true
+                        focusable = android.view.View.FOCUSABLE
+                        setOnClickListener { onManageTags(item) }
+                    }
+                    tagRow.addView(chip, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
+                }
+                // + 按钮
+                val addChip = TextView(ctx).apply {
+                    text = "+"
+                    textSize = 12f
+                    setTextColor(android.graphics.Color.WHITE)
+                    setBackgroundDrawable(
+                        android.graphics.drawable.GradientDrawable().apply {
+                            setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                            setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                        }
+                    )
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(
+                        (20 * density).toInt(),
+                        (20 * density).toInt()
+                    ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                    isClickable = true
+                    focusable = android.view.View.FOCUSABLE
+                    setOnClickListener { onManageTags(item) }
+                }
+                tagRow.addView(addChip)
+                tagStrip.visibility = android.view.View.VISIBLE
+            } else {
+                tagStrip.visibility = android.view.View.GONE
+            }
+        }
     }
 }
 

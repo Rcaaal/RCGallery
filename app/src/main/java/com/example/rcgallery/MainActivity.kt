@@ -26,6 +26,7 @@ import com.example.rcgallery.ui.navigation.Route
 import com.example.rcgallery.ui.screen.AlbumGridScreen
 import com.example.rcgallery.ui.screen.NetworkBrowserScreen
 import com.example.rcgallery.ui.screen.SearchScreen
+import com.example.rcgallery.ui.screen.TagListScreen
 import com.example.rcgallery.ui.theme.RCGalleryTheme
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.player.VideoPlayerScreen
@@ -68,6 +69,12 @@ class MainActivity : ComponentActivity() {
                     var isAlbumActive by remember { mutableStateOf(false) }
                     val showBottomBar = currentTab == 1 || !isAlbumActive  // 网络tab永远显示，本地tab进入相册时隐藏
 
+                    fun safeGoBack(navController: androidx.navigation.NavController) {
+                        if (navController.currentBackStackEntry?.destination?.route != Route.AlbumGrid.route) {
+                            navController.popBackStack()
+                        }
+                    }
+
                     Scaffold(
                         bottomBar = {
                             // 条件渲染，不占位。嵌套 Scaffold 的 insets 已通过 windowInsets=0 修复
@@ -84,6 +91,12 @@ class MainActivity : ComponentActivity() {
                                         label = { Text("网络") },
                                         selected = currentTab == 1,
                                         onClick = { viewModel.switchTab(1) }
+                                    )
+                                    NavigationBarItem(
+                                        icon = { Text("🏷") },
+                                        label = { Text("标签") },
+                                        selected = currentTab == 2,
+                                        onClick = { viewModel.switchTab(2) }
                                     )
                                 }
                             }
@@ -136,6 +149,13 @@ class MainActivity : ComponentActivity() {
                                 }
                                 1 -> {
                                     NetworkBrowserScreen(viewModel = viewModel)
+                                }
+                                2 -> {
+                                    TagListScreen(
+                                        viewModel = viewModel,
+                                        onBackClick = { viewModel.switchTab(0) },
+                                        onAlbumClick = { viewModel.switchTab(0) }
+                                    )
                                 }
                             }
                         }
