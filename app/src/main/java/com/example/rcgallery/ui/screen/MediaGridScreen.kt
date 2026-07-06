@@ -271,7 +271,10 @@ fun MediaGridScreen(
                     topBar = {
                         TopAppBar(
                             title = {
-                                Column {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.Center
+                                ) {
                                     Text(
                                         text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
                                                else if (albumName.isNotEmpty()) albumName else "所有文件",
@@ -281,7 +284,7 @@ fun MediaGridScreen(
                                     // ── 相册 TAG 栏（复用列表模式 chip 设计）──
                                     if (!isMediaMultiSelect) {
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 2.dp),
+                                            modifier = Modifier.horizontalScroll(rememberScrollState()),
                                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
@@ -289,24 +292,23 @@ fun MediaGridScreen(
                                             Surface(
                                                 shape = CircleShape,
                                                 color = Color(0xFF64B464).copy(alpha = 0.7f),
-                                                modifier = Modifier.size(18.dp).clickable { showAlbumTagDialog = true }
+                                                modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
                                             ) {
                                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                    Text("+", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                                    Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
                                                 }
                                             }
                                             currentAlbumTags.forEach { tag ->
                                                 Surface(
-                                                    shape = RoundedCornerShape(5.dp),
+                                                    shape = RoundedCornerShape(4.dp),
                                                     color = Color(0xFF6468B4).copy(alpha = 0.7f),
-                                                    modifier = Modifier.height(20.dp)
                                                 ) {
                                                     Text(
                                                         tag.name,
                                                         fontSize = 9.sp,
                                                         color = Color.White,
                                                         maxLines = 1,
-                                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                                                     )
                                                 }
                                             }
