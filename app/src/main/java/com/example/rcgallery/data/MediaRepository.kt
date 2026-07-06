@@ -190,6 +190,75 @@ class MediaRepository(private val context: Context) {
             }
         }
     }
+    /**
+     * 按文件路径列表加载媒体项（跨相册 TAG 搜索用）。
+     * 每批最多 100 个路径，分批查询后合并。
+     */
+    fun loadMediaItemsByPaths(filePaths: List<String>): Result<List<MediaItem>> = runCatching {
+        val items = mutableListOf<MediaItem>()
+        val chunked = filePaths.chunked(100)
+        for (chunk in chunked) {
+            val placeholders = chunk.joinToString(",") { "?" }
+            val selection = "${MediaStore.MediaColumns.DATA} IN ($placeholders)"
+            val selectionArgs = chunk.toTypedArray()
+            queryMediaItemsBySelection(MediaProjection.Images, selection, selectionArgs, items)
+            queryMediaItemsBySelection(MediaProjection.Videos, selection, selectionArgs, items)
+        }
+        items.sortedByDescending { it.dateAdded }
+    }
+
+    private fun queryMediaItemsBySelection(
+        proj: MediaProjection,
+        selection: String,
+        selectionArgs: Array<String>,
+        items: MutableList<MediaItem>
+    ) {
+        val cursor = context.contentResolver.query(
+            proj.uri, proj.projection, selection, selectionArgs, "date_added DESC"
+        )
+        cursor?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(proj.indexId)
+                val displayName = c.getString(proj.indexName) ?: ""
+                val mimeType = c.getString(proj.indexMime) ?: ""
+                val dateAdded = c.getLong(proj.indexDateAdded)
+                val dateModified = c.getLong(proj.indexDateModified)
+                val size = c.getLong(proj.indexSize)
+                val bucketId = c.getString(proj.indexBucketId)
+                val bucketName = c.getString(proj.indexBucketName)
+                val width = c.getInt(proj.indexWidth)
+                val height = c.getInt(proj.indexHeight)
+                val duration = if (proj.isVideo) c.getLong(proj.indexDuration) else 0L
+                val filePath = c.getString(proj.indexData) ?: ""
+                val relativePath = c.getString(proj.indexRelativePath) ?: ""
+
+                if (displayName.startsWith(".")) continue
+                if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) continue
+
+                val mediaUri = ContentUriBuilder.getContentUri(id, proj.isVideo)
+
+                items.add(
+                    MediaItem(
+                        id = id,
+                        uri = mediaUri,
+                        filePath = filePath,
+                        fileName = displayName,
+                        mimeType = mimeType,
+                        dateAdded = dateAdded,
+                        dateModified = dateModified,
+                        size = size,
+                        albumId = bucketId,
+                        albumName = bucketName,
+                        duration = duration,
+                        width = width,
+                        height = height,
+                        relativePath = relativePath
+                    )
+                )
+            }
+        }
+    }
+
     // ── 内部 URI 构建 ──
 
     private object ContentUriBuilder {

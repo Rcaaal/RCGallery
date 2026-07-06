@@ -150,13 +150,16 @@ fun PreviewScreen(
     var showMediaTagDialog by remember { mutableStateOf(false) }
     var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var mediaTagRefreshTrigger by remember { mutableIntStateOf(0) }
+    var inheritedTagIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
     LaunchedEffect(currentItem) {
         val item = currentItem
         if (item != null) {
             currentMediaTags = viewModel.getMediaTags(item.filePath)
             recentTagList = viewModel.getRecentTags()
+            inheritedTagIds = viewModel.getInheritedTagIdsForMedia(item)
         } else {
             currentMediaTags = emptyList()
+            inheritedTagIds = emptySet()
         }
     }
     // 每次标签增删后刷新，对话框内立即看到变化
@@ -165,6 +168,7 @@ fun PreviewScreen(
             val item = currentItem
             if (item != null) {
                 currentMediaTags = viewModel.getMediaTags(item.filePath)
+                inheritedTagIds = viewModel.getInheritedTagIdsForMedia(item)
             }
         }
     }
@@ -634,6 +638,7 @@ fun PreviewScreen(
                 existingTags = currentMediaTags,
                 allTags = allTags,
                 recentTags = recentTagList,
+                readOnlyTagIds = inheritedTagIds,
                 onAddTag = { name ->
                     viewModel.addMediaTag(currentItem!!.filePath, name)
                     mediaTagRefreshTrigger++

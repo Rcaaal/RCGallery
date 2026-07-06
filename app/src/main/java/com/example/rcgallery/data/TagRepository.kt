@@ -88,6 +88,9 @@ class TagRepository(context: Context) {
     /** 获取相册类型的所有 TAG 关联（批量展示用） */
     fun getAllAlbumTags(): Flow<List<AlbumTagsResult>> = dao.getAllAlbumTags()
 
+    /** 获取媒体类型的所有 TAG 关联（批量展示用） */
+    fun getAllMediaTags(): Flow<List<AlbumTagsResult>> = dao.getAllMediaTags()
+
     /** 获取某个 TAG 标记的所有目标 */
     suspend fun getTargetsForTag(tagId: Long): List<TagTargetEntity> =
         dao.getTargetsForTag(tagId)

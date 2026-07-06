@@ -49,8 +49,11 @@ import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
+import com.example.rcgallery.ui.component.TagManageDialog
+import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,6 +69,12 @@ fun MediaGridScreen(
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
+    val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
+
+    // ── 媒体项 TAG 管理 ──
+    var tagDialogMediaItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
+    var mediaTagRefreshTrigger by remember { mutableIntStateOf(0) }
+    val allTags by viewModel.allTags.collectAsStateWithLifecycle()
 
     // ── 相册切换时防止旧数据闪烁：加载完成前不展示 RecyclerView ──
     // 改名后 albumId 变化但 mediaItems 已存在（renameNow 已更新），不显示 loading
@@ -317,6 +326,7 @@ fun MediaGridScreen(
                                         }
                                     },
                                     onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
+                                    onManageTags = { item -> tagDialogMediaItem = item },
                                     context = ctx
                                 ).apply { currentMode = mediaDisplayMode }
                                 rv.adapter = adapter
@@ -335,6 +345,7 @@ fun MediaGridScreen(
                                 val currentMode = mediaDisplayMode
                                 adapter.items = sortedItems
                                 adapter.starredUris = starredMediaUris
+                                adapter.mediaTagsMap = mediaTags
                                 if (prevMode != currentMode) {
                                     adapter.currentMode = currentMode
                                     val spanCount = when (currentMode) {
@@ -464,6 +475,44 @@ fun MediaGridScreen(
                     items = sortedItems
                 )
             }
+
+            // ── TAG 管理对话框 ──
+            val currentMediaItem = tagDialogMediaItem
+            if (currentMediaItem != null && currentMediaItem.filePath.isNotEmpty()) {
+                val scope = rememberCoroutineScope()
+                var existingMediaTags by remember(currentMediaItem, mediaTagRefreshTrigger) {
+                    mutableStateOf<List<TagEntity>>(emptyList())
+                }
+                var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+                var inheritedTagIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+                LaunchedEffect(currentMediaItem, mediaTagRefreshTrigger) {
+                    existingMediaTags = viewModel.getMediaTags(currentMediaItem.filePath)
+                    recentTagList = viewModel.getRecentTags()
+                    inheritedTagIds = viewModel.getInheritedTagIdsForMedia(currentMediaItem)
+                }
+                TagManageDialog(
+                    title = "管理图片标签 - ${currentMediaItem.fileName}",
+                    existingTags = existingMediaTags,
+                    allTags = allTags,
+                    recentTags = recentTagList,
+                    readOnlyTagIds = inheritedTagIds,
+                    onAddTag = { name ->
+                        val job = viewModel.addMediaTag(currentMediaItem.filePath, name)
+                        scope.launch {
+                            job.join()
+                            mediaTagRefreshTrigger++
+                        }
+                    },
+                    onRemoveTag = { tagId ->
+                        val job = viewModel.removeMediaTag(currentMediaItem.filePath, tagId)
+                        scope.launch {
+                            job.join()
+                            mediaTagRefreshTrigger++
+                        }
+                    },
+                    onDismiss = { tagDialogMediaItem = null }
+                )
+            }
         }
     }
 }
@@ -513,12 +562,14 @@ private infix fun MediaDisplayMode.isSameAs(other: MediaDisplayMode): Boolean = 
 private class SimpleGridAdapter(
     private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
     private val onToggleStar: (String) -> Unit,
+    private val onManageTags: (com.example.rcgallery.model.MediaItem) -> Unit,
     private val context: android.content.Context
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var items: List<com.example.rcgallery.model.MediaItem> = emptyList()
     var starredUris: Set<String> = emptySet()
     var currentMode: MediaDisplayMode = MediaDisplayMode.Grid(DEFAULT_MEDIA_GRID_COLUMNS)
+    var mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()
 
     init { setHasStableIds(true) }
 
@@ -532,7 +583,7 @@ private class SimpleGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return if (viewType == VIEW_TYPE_LIST) {
-            ListVH.create(parent, onToggleStar, onClick, context)
+            ListVH.create(parent, onToggleStar, onClick, onManageTags, context)
         } else {
             GridVH.create(parent, onToggleStar, onClick, context)
         }
@@ -546,7 +597,7 @@ private class SimpleGridAdapter(
         }
         when (holder) {
             is GridVH -> holder.bind(item, position, starredUris, columns)
-            is ListVH -> holder.bind(item, position, starredUris)
+            is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap)
         }
     }
 
@@ -701,7 +752,8 @@ private class SimpleGridAdapter(
         private val infoTv: TextView,
         val starIv: ImageView,
         val starContainer: android.view.View,
-        private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit
+        private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
+        private val onManageTags: (com.example.rcgallery.model.MediaItem) -> Unit
     ) : RecyclerView.ViewHolder(itemView) {
 
         private var currentItem: com.example.rcgallery.model.MediaItem? = null
@@ -714,7 +766,8 @@ private class SimpleGridAdapter(
         }
 
         companion object {
-            fun create(parent: ViewGroup, onToggleStar: (String) -> Unit, onClick: (com.example.rcgallery.model.MediaItem) -> Unit, context: android.content.Context): ListVH {
+            fun create(parent: ViewGroup, onToggleStar: (String) -> Unit, onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
+                       onManageTags: (com.example.rcgallery.model.MediaItem) -> Unit, context: android.content.Context): ListVH {
                 val density = context.resources.displayMetrics.density
                 val root = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
@@ -761,6 +814,18 @@ private class SimpleGridAdapter(
                     ellipsize = android.text.TextUtils.TruncateAt.END
                 }
                 textColumn.addView(nameTv)
+
+                // ── TAG 新增按钮（+）──
+                val tagStrip = android.widget.HorizontalScrollView(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    isHorizontalScrollBarEnabled = false
+                    tag = "media_tag_strip"
+                    visibility = android.view.View.GONE
+                }
+                textColumn.addView(tagStrip)
 
                 val infoTv = TextView(context).apply {
                     layoutParams = LinearLayout.LayoutParams(
@@ -822,11 +887,11 @@ private class SimpleGridAdapter(
                     onToggleStar(uriStr)
                 }
 
-                return ListVH(root, iv, nameTv, infoTv, starIv, starContainer, onClick)
+                return ListVH(root, iv, nameTv, infoTv, starIv, starContainer, onClick, onManageTags)
             }
         }
 
-        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>) {
+        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()) {
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -849,6 +914,66 @@ private class SimpleGridAdapter(
                     append(" · ")
                     append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.size))
                 }
+            }
+            // ── TAG 横向滚动条（+ 按钮 + 已有标签 chips）──
+            val tagStrip = itemView.findViewWithTag<android.widget.HorizontalScrollView>("media_tag_strip")
+            if (tagStrip != null) {
+                val tags = mediaTagsMap[item.filePath] ?: emptyList()
+                val innerRow = tagStrip.getChildAt(0) as? LinearLayout
+                    ?: LinearLayout(itemView.context).also {
+                        tagStrip.addView(it, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ))
+                    }
+                innerRow.removeAllViews()
+                val ctx = itemView.context
+                val density = ctx.resources.displayMetrics.density
+
+                // + 按钮（放最前面，始终显示）
+                val addChip = TextView(ctx).apply {
+                    text = "+"
+                    textSize = 11f
+                    setTextColor(android.graphics.Color.WHITE)
+                    setBackgroundDrawable(
+                        android.graphics.drawable.GradientDrawable().apply {
+                            setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                            setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                        }
+                    )
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(
+                        (18 * density).toInt(),
+                        (18 * density).toInt()
+                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) }
+                    isClickable = true
+                    focusable = android.view.View.FOCUSABLE
+                    setOnClickListener { onManageTags(item) }
+                }
+                innerRow.addView(addChip)
+
+                // 标签紧随加号之后
+                tags.forEach { tag ->
+                    val chip = TextView(ctx).apply {
+                        text = tag.name
+                        textSize = 9f
+                        setTextColor(android.graphics.Color.WHITE)
+                        setBackgroundDrawable(
+                            android.graphics.drawable.GradientDrawable().apply {
+                                setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                                setCornerRadius(5 * density)
+                                setColor(android.graphics.Color.argb(180, 100, 140, 255))
+                            }
+                        )
+                        setPadding((5 * density).toInt(), (1 * density).toInt(), (5 * density).toInt(), (1 * density).toInt())
+                        maxLines = 1
+                    }
+                    innerRow.addView(chip, LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
+                }
+                tagStrip.visibility = android.view.View.VISIBLE
             }
         }
     }

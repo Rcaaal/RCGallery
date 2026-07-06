@@ -154,7 +154,7 @@ class MainActivity : ComponentActivity() {
                                     TagListScreen(
                                         viewModel = viewModel,
                                         onBackClick = { viewModel.switchTab(0) },
-                                        onAlbumClick = { viewModel.switchTab(0) }
+                                        onOverlayChanged = { active -> isAlbumActive = active }
                                     )
                                 }
                             }

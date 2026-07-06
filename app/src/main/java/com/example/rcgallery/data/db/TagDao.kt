@@ -84,6 +84,15 @@ interface TagDao {
     """)
     fun getAllAlbumTags(): Flow<List<AlbumTagsResult>>
 
+    /** 获取所有媒体文件的 TAG（用于列表批量显示） */
+    @Query("""
+        SELECT t.targetKey, GROUP_CONCAT(t.tagId) as tagIds
+        FROM tag_targets t
+        WHERE t.targetType = 1
+        GROUP BY t.targetKey
+    """)
+    fun getAllMediaTags(): Flow<List<AlbumTagsResult>>
+
     /** 根据 targetType 获取所有关联 */
     @Query("SELECT * FROM tag_targets WHERE targetType = :targetType")
     suspend fun getTargetsByType(targetType: Int): List<TagTargetEntity>

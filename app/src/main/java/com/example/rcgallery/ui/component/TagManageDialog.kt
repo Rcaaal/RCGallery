@@ -20,6 +20,7 @@ import com.example.rcgallery.data.db.TagEntity
  * @param existingTags 当前已选 TAG 列表
  * @param allTags 所有可用的 TAG 列表
  * @param recentTags 最近使用的 TAG（可空）
+ * @param readOnlyTagIds 继承自相册的 TAG ID，不可手动移除（不显示 ✕）
  * @param onAddTag 添加 TAG 回调（传入 TAG 名称）
  * @param onRemoveTag 移除 TAG 回调（传入 TAG ID）
  * @param onDismiss 关闭对话框
@@ -31,6 +32,7 @@ fun TagManageDialog(
     existingTags: List<TagEntity>,
     allTags: List<TagEntity>,
     recentTags: List<TagEntity> = emptyList(),
+    readOnlyTagIds: Set<Long> = emptySet(),
     onAddTag: (String) -> Unit,
     onRemoveTag: (Long) -> Unit,
     onDismiss: () -> Unit
@@ -69,19 +71,34 @@ fun TagManageDialog(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         existingTags.forEach { tag ->
+                            val isReadOnly = tag.id in readOnlyTagIds
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer,
+                                color = if (isReadOnly) MaterialTheme.colorScheme.surfaceVariant
+                                        else MaterialTheme.colorScheme.primaryContainer,
                                 modifier = Modifier.height(28.dp)
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp)
+                                    modifier = Modifier.padding(start = 8.dp, end = if (isReadOnly) 8.dp else 4.dp)
                                 ) {
-                                    Text(tag.name, fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimaryContainer, maxLines = 1)
-                                    Spacer(Modifier.width(4.dp))
-                                    IconButton(onClick = { onRemoveTag(tag.id) }, modifier = Modifier.size(18.dp)) {
-                                        Text("✕", fontSize = 10.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                    Text(
+                                        tag.name,
+                                        fontSize = 12.sp,
+                                        color = if (isReadOnly) MaterialTheme.colorScheme.onSurfaceVariant
+                                                else MaterialTheme.colorScheme.onPrimaryContainer,
+                                        maxLines = 1
+                                    )
+                                    if (!isReadOnly) {
+                                        Spacer(Modifier.width(4.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .clickable { onRemoveTag(tag.id) },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("✕", fontSize = 10.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                        }
                                     }
                                 }
                             }

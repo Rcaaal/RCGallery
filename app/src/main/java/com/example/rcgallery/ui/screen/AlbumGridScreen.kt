@@ -1109,7 +1109,7 @@ private class ListVH private constructor(
                 layoutParams = LinearLayout.LayoutParams(
                     (20 * density).toInt(),
                     (20 * density).toInt()
-                ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) }
                 isClickable = true
                 focusable = android.view.View.FOCUSABLE
                 setOnClickListener { onManageTags(item) }
@@ -1131,9 +1131,6 @@ private class ListVH private constructor(
                     )
                     setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
                     maxLines = 1
-                    isClickable = true
-                    focusable = android.view.View.FOCUSABLE
-                    setOnClickListener { onManageTags(item) }
                 }
                 tagRow.addView(chip, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
