@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -32,10 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -385,6 +389,76 @@ fun MediaGridScreen(
                                 rv.layoutManager = GridLayoutManager(ctx, spanCount)
                                 rv.clipToPadding = false
                                 rv.setPadding(0, (40 * ctx.resources.displayMetrics.density).toInt(), 0, 0)
+
+                                // ── 滑动手势多选（替代 adapter 的 onLongClick）──
+                                val dragState = object {
+                                    var dragStartIdx = -1
+                                    var isDragging = false
+                                }
+                                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                                val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+                                var downX = 0f; var downY = 0f
+
+                                rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+                                    override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                                        when (e.actionMasked) {
+                                            MotionEvent.ACTION_DOWN -> {
+                                                dragState.isDragging = false
+                                                dragState.dragStartIdx = -1
+                                                downX = e.x; downY = e.y
+                                                handler.removeCallbacksAndMessages(null)
+                                                handler.postDelayed({
+                                                    val child = rv.findChildViewUnder(downX, downY) ?: return@postDelayed
+                                                    val pos = rv.getChildAdapterPosition(child)
+                                                    if (pos < 0) return@postDelayed
+                                                    dragState.dragStartIdx = pos
+                                                    dragState.isDragging = true
+                                                    val item = sortedItems.getOrNull(pos) ?: return@postDelayed
+                                                    if (!isMediaMultiSelect) isMediaMultiSelect = true
+                                                    toggleMediaSelection(item)
+                                                }, longPressMs)
+                                                return false
+                                            }
+                                            MotionEvent.ACTION_MOVE -> {
+                                                val slop = android.view.ViewConfiguration.get(rv.context).scaledTouchSlop
+                                                if (kotlin.math.abs(e.x - downX) > slop || kotlin.math.abs(e.y - downY) > slop) {
+                                                    handler.removeCallbacksAndMessages(null)
+                                                }
+                                                // 拖拽中 → 拦截，让 RecyclerView 进入触摸处理流程
+                                                if (dragState.isDragging) return true
+                                                return false
+                                            }
+                                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                handler.removeCallbacksAndMessages(null)
+                                                dragState.isDragging = false
+                                                dragState.dragStartIdx = -1
+                                                return false
+                                            }
+                                        }
+                                        return false
+                                    }
+
+                                    override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
+                                        if (!dragState.isDragging) return
+                                        when (e.actionMasked) {
+                                            MotionEvent.ACTION_MOVE -> {
+                                                val child = rv.findChildViewUnder(e.x, e.y)
+                                                val pos = child?.let { rv.getChildAdapterPosition(it) } ?: return
+                                                val minIdx = minOf(dragState.dragStartIdx, pos)
+                                                val maxIdx = maxOf(dragState.dragStartIdx, pos)
+                                                val rangeUris = (minIdx..maxIdx).mapNotNull { i ->
+                                                    sortedItems.getOrNull(i)?.uri?.toString()
+                                                }.toSet()
+                                                selectedMediaUris = rangeUris
+                                            }
+                                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                dragState.isDragging = false
+                                                dragState.dragStartIdx = -1
+                                            }
+                                        }
+                                    }
+                                })
+
                                 val adapter = SimpleGridAdapter(
                                     onClick = { item ->
                                         if (isMediaMultiSelect) {
@@ -405,10 +479,7 @@ fun MediaGridScreen(
                                     onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
                                     onManageTags = { item -> tagDialogMediaItem = item },
                                     context = ctx,
-                                    onLongClick = { item ->
-                                        if (!isMediaMultiSelect) isMediaMultiSelect = true
-                                        toggleMediaSelection(item)
-                                    }
+                                    onLongClick = null  // 由触摸监听器接管长按
                                 ).apply { currentMode = mediaDisplayMode }
                                 rv.adapter = adapter
                                 mediaRvRef.value = rv
@@ -450,71 +521,39 @@ fun MediaGridScreen(
                             },
                             modifier = Modifier.fillMaxSize().padding(padding)
                         )
-                        // ── 悬浮工具栏（两行：列数/排序 + TAG 栏）──
-                        Column(
+                        // ── 悬浮工具栏（列数/排序）──
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding())
-                                .align(Alignment.TopStart)
+                                .align(Alignment.TopStart),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            // 第一行：列数选择 + 排序
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                MediaDisplayModeSelector(
-                                    currentMode = mediaDisplayMode,
-                                    onSelectMode = { mode ->
-                                        mediaDisplayMode = mode
-                                        mediaPrefs.edit().putString("media_display_mode", when (mode) {
-                                            is MediaDisplayMode.List -> "list"
-                                            is MediaDisplayMode.Grid -> "grid_${mode.columns}"
-                                        }).apply()
-                                    }
-                                )
-                                Spacer(Modifier.weight(1f))
-                                MediaSortSelector(
-                                    currentSort = mediaSortMode,
-                                    onSelectSort = { mode ->
-                                        mediaSortMode = mode
-                                        mediaPrefs.edit().putString("media_sort_mode", when (mode) {
-                                            MediaSortMode.DATE -> "date"
-                                            MediaSortMode.NAME -> "name"
-                                            MediaSortMode.SIZE -> "size"
-                                            MediaSortMode.IMAGE_SIZE -> "image_size"
-                                            MediaSortMode.VIDEO_SIZE -> "video_size"
-                                        }).apply()
-                                    }
-                                )
-                            }
-                            // 第二行：TAG 栏（+ 按钮 + chips）
-                            if (!isMediaMultiSelect && albumDirectoryPath.isNotEmpty()) {
-                                Row(
-                                    modifier = Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = Color(0xFF64B464).copy(alpha = 0.7f),
-                                        modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
-                                    ) {
-                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                            Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                    currentAlbumTags.forEach { tag ->
-                                        Surface(
-                                            shape = RoundedCornerShape(3.dp),
-                                            color = Color(0xFF6468B4).copy(alpha = 0.7f),
-                                        ) {
-                                            Text(tag.name, fontSize = 9.sp, color = Color.White, maxLines = 1,
-                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
-                                        }
-                                    }
+                            MediaDisplayModeSelector(
+                                currentMode = mediaDisplayMode,
+                                onSelectMode = { mode ->
+                                    mediaDisplayMode = mode
+                                    mediaPrefs.edit().putString("media_display_mode", when (mode) {
+                                        is MediaDisplayMode.List -> "list"
+                                        is MediaDisplayMode.Grid -> "grid_${mode.columns}"
+                                    }).apply()
                                 }
-                            }
+                            )
+                            Spacer(Modifier.weight(1f))
+                            MediaSortSelector(
+                                currentSort = mediaSortMode,
+                                onSelectSort = { mode ->
+                                    mediaSortMode = mode
+                                    mediaPrefs.edit().putString("media_sort_mode", when (mode) {
+                                        MediaSortMode.DATE -> "date"
+                                        MediaSortMode.NAME -> "name"
+                                        MediaSortMode.SIZE -> "size"
+                                        MediaSortMode.IMAGE_SIZE -> "image_size"
+                                        MediaSortMode.VIDEO_SIZE -> "video_size"
+                                    }).apply()
+                                }
+                            )
                         }
                         // ── 多选 BackHandler ──
                         if (isMediaMultiSelect) {
@@ -550,16 +589,27 @@ fun MediaGridScreen(
                 onOpenLog = { showInertiaSettings = false; showLogDialog = true }
             )
 
-            // ── 媒体类型过滤按钮（底部居中，略抬上）──
-            if (availableTypes.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 12.dp)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
+            // ── 底部 TAG 栏 + 媒体类型过滤按钮 ──
+            Column(
+                modifier = Modifier.align(Alignment.BottomCenter),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // TAG 栏（自下向上排列，在过滤按钮正上方）
+                if (!isMediaMultiSelect && albumDirectoryPath.isNotEmpty()) {
+                    AlbumTagBarBottom(
+                        tags = currentAlbumTags,
+                        onAddTag = { showAlbumTagDialog = true }
+                    )
+                }
+                // 媒体类型过滤按钮（多选模式隐藏）
+                if (availableTypes.isNotEmpty() && !isMediaMultiSelect) {
+                    Row(
+                        modifier = Modifier
+                            .padding(bottom = 12.dp)
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                     availableTypes.forEach { type ->
                         val selected = type in activeFilters
                         Surface(
@@ -599,7 +649,8 @@ fun MediaGridScreen(
                         }
                     }
                 }
-            }
+            }   // end if (availableTypes)
+            }   // end Column (TAG bar + filter buttons)
 
             FloatingJumpButton(recyclerView = mediaRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
@@ -1350,6 +1401,122 @@ private fun MediaSortSelector(
                         expanded = false
                     }
                 )
+            }
+        }
+    }
+}
+
+// ── 底部 TAG 栏（自下向上排列，每行最多 50% 屏幕宽度，居中）──
+@Composable
+private fun AlbumTagBarBottom(
+    tags: List<TagEntity>,
+    onAddTag: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val textPaint = remember { android.text.TextPaint() }
+    val fontSizeSp = 12.sp
+    val chipHozPaddingDp = 8.dp
+    val plusSizeDp = 22.dp
+    val chipGapDp = 4.dp
+    val rowGapDp = 2.dp
+    val plusSizePx = with(density) { plusSizeDp.toPx() }
+    val gapPx = with(density) { chipGapDp.toPx() }
+    val hozPaddingPx = with(density) { chipHozPaddingDp.toPx() }
+    val textSizePx = with(density) { fontSizeSp.toPx() }
+
+    BoxWithConstraints(modifier = modifier) {
+        val halfWidthPx = with(density) { (maxWidth / 2).toPx() }
+
+        // 将 TAG 从底部开始向上排布成行
+        val rows = remember(tags, halfWidthPx) {
+            textPaint.textSize = textSizePx
+
+            val result = mutableListOf<MutableList<TagEntity>>()
+            var currentRow = mutableListOf<TagEntity>()
+            var currentWidth = plusSizePx + gapPx  // + 按钮始终在底部行首
+
+            for (tag in tags) {
+                val textWidth = textPaint.measureText(tag.name)
+                val chipWidth = textWidth + hozPaddingPx * 2
+                val needed = if (currentRow.isEmpty()) currentWidth + chipWidth
+                             else currentWidth + gapPx + chipWidth
+
+                if (needed > halfWidthPx) {
+                    if (currentRow.isNotEmpty()) {
+                        result.add(currentRow)
+                    }
+                    currentRow = mutableListOf(tag)
+                    currentWidth = chipWidth
+                } else {
+                    currentWidth = needed
+                    currentRow.add(tag)
+                }
+            }
+            if (currentRow.isNotEmpty()) result.add(currentRow)
+            // result[0] = 最底行, result[last] = 最顶行
+            result
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (rows.isNotEmpty()) {
+                // 从上到下渲染：先渲染顶行，最后渲染底行
+                for (i in rows.lastIndex downTo 0) {
+                    if (i < rows.lastIndex) {
+                        Spacer(Modifier.height(rowGapDp))
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                    ) {
+                        // 最底行（靠近过滤按钮）显示 + 按钮在最前面
+                        if (i == 0) {
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFF64B464),
+                                modifier = Modifier
+                                    .size(plusSizeDp)
+                                    .clickable { onAddTag() }
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        "+",
+                                        fontSize = 13.sp,
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                        // TAG chips
+                        rows[i].forEach { tag ->
+                            Spacer(Modifier.width(chipGapDp))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Color(0xFF6468B4)
+                            ) {
+                                Text(
+                                    tag.name,
+                                    fontSize = fontSizeSp,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(
+                                        horizontal = chipHozPaddingDp,
+                                        vertical = 3.dp
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }
