@@ -534,12 +534,25 @@ private fun AlbumGridContent(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("RCGallery") },
+                title = {
+                    Text(
+                        if (isAlbumMultiSelect) "已选 ${selectedAlbumIds.size} 项"
+                        else "RCGallery"
+                    )
+                },
+                navigationIcon = {
+                    if (isAlbumMultiSelect) {
+                        TextButton(onClick = { exitAlbumMultiSelect() }) {
+                            Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                },
                 windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold 已处理状态栏 insets
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
                 actions = {
+                    if (!isAlbumMultiSelect) {
                     // ── 齿轮菜单按钮 ──
                     var showGearMenu by remember { mutableStateOf(false) }
                     Box(modifier = Modifier.padding(end = 4.dp)) {
@@ -582,6 +595,7 @@ private fun AlbumGridContent(
                             .size(22.dp)
                             .clickable { onOpenTrash() }
                     )
+                    }   // ← if (!isAlbumMultiSelect)
                 }
             )
         },
@@ -652,6 +666,9 @@ private fun AlbumGridContent(
                     adapter.items = albums
                     adapter.starredIds = starredIds
                     adapter.albumTagsMap = albumTags
+                    adapter.selectedIds = selectedAlbumIds
+                    adapter.notifyDataSetChanged()
+                    // 之后不再重复调用 notifyDataSetChanged — 上面的调用已是全量刷新
                     if (prevMode != displayMode) {
                         adapter.currentMode = displayMode
                         val spanCount = when (displayMode) {
@@ -665,9 +682,6 @@ private fun AlbumGridContent(
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
                     } else {
-                        // items 或星标变化：星标变化会触发排序重排（星标项跳到顶部），
-                        // payload bind 在 position i 读的是新 item、ViewHolder 却是旧 item 封面 → 错误中间态
-                        // 直接用 DataSetChanged，不浪费 payload
                         adapter.notifyDataSetChanged()
                     }
                 },
@@ -748,6 +762,7 @@ private class AlbumGridAdapter(
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
     var starredIds: Set<String> = emptySet()
     var albumTagsMap: Map<String, List<TagEntity>> = emptyMap()
+    var selectedIds: Set<String> = emptySet()  // 多选模式选中项 bucketId 集合
 
     init { setHasStableIds(true) }
 
@@ -774,7 +789,7 @@ private class AlbumGridAdapter(
             is AlbumDisplayMode.List -> 1
         }
         when (holder) {
-            is GridVH -> holder.bind(item, position, starredIds, columns)
+            is GridVH -> holder.bind(item, position, starredIds, selectedIds, columns)
             is ListVH -> holder.bind(item, position, starredIds, albumTagsMap)
         }
     }
@@ -896,6 +911,34 @@ private class GridVH private constructor(
             starContainer.addView(starWrapper)
             coverFrame.addView(starContainer)
 
+            // ── 多选对号：居中半透明绿色圆形 + 白色 ✓ ──
+            val checkmarkContainer = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (36 * density).toInt(),
+                    (36 * density).toInt(),
+                    android.view.Gravity.CENTER
+                )
+                visibility = android.view.View.GONE
+                id = android.R.id.checkbox
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                    setColor(android.graphics.Color.argb(200, 76, 175, 80))
+                }
+            }
+            val checkmarkTv = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.CENTER
+                )
+                text = "✓"
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 20f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            checkmarkContainer.addView(checkmarkTv)
+            coverFrame.addView(checkmarkContainer)
+
             root.addView(coverFrame)
 
             // ── 星标点击：使用 starContainer 自身的 tag（bucketId），
@@ -947,7 +990,7 @@ private class GridVH private constructor(
         }
     }
 
-    fun bind(item: Album, pos: Int, starredIds: Set<String>, columns: Int = 3) {
+    fun bind(item: Album, pos: Int, starredIds: Set<String>, selectedIds: Set<String> = emptySet(), columns: Int = 3) {
         itemView.tag = pos
         starContainer.tag = item.bucketId
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
@@ -960,7 +1003,14 @@ private class GridVH private constructor(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
             android.graphics.PorterDuff.Mode.SRC_IN
         )
-        // 根据列数缩放星标大小
+        // 多选模式：隐藏星标，显示对号
+        val inMultiSelect = selectedIds.isNotEmpty()
+        val isSelected = item.bucketId in selectedIds
+        starContainer.visibility = if (inMultiSelect) android.view.View.GONE else android.view.View.VISIBLE
+        val checkmark = itemView.findViewById<FrameLayout>(android.R.id.checkbox)
+        if (checkmark != null) {
+            checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+        }
         updateStarSize(columns)
     }
 

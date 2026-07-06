@@ -262,15 +262,25 @@ fun MediaGridScreen(
                         TopAppBar(
                             title = {
                                 Text(
-                                    text = if (albumName.isNotEmpty()) albumName else "所有文件",
+                                    text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
+                                           else if (albumName.isNotEmpty()) albumName else "所有文件",
                                     maxLines = 1,
-                                    modifier = Modifier.clickable { showAlbumRenameDialog = true }
+                                    modifier = if (!isMediaMultiSelect) Modifier.clickable { showAlbumRenameDialog = true } else Modifier
                                 )
                             },
-                            navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回") } },
+                            navigationIcon = {
+                                if (isMediaMultiSelect) {
+                                    TextButton(onClick = { exitMediaMultiSelect() }) {
+                                        Text("取消")
+                                    }
+                                } else {
+                                    TextButton(onClick = onBackClick) { Text("← 返回") }
+                                }
+                            },
                             windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold 已处理状态栏 insets
                             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                             actions = {
+                                if (!isMediaMultiSelect) {
                                 var showGearMenu by remember { mutableStateOf(false) }
                                 Box(modifier = Modifier.padding(end = 4.dp)) {
                                     Box(
@@ -302,8 +312,9 @@ fun MediaGridScreen(
                                         )
                                     }
                                 }
-                            }
-                        )
+                                }   // ← if (!isMediaMultiSelect)
+                            }   // ← actions
+                        )   // ← TopAppBar(
                     },
                     bottomBar = {
                         if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
@@ -406,6 +417,10 @@ fun MediaGridScreen(
                                 adapter.items = sortedItems
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
+                                adapter.selectedUris = selectedMediaUris
+                                adapter.notifyDataSetChanged()
+                                scroller.refresh()
+                                // 之后不再重复 notify — 上面的调用已是全量刷新
                                 if (prevMode != currentMode) {
                                     adapter.currentMode = currentMode
                                     val spanCount = when (currentMode) {
@@ -655,6 +670,7 @@ private class SimpleGridAdapter(
     var starredUris: Set<String> = emptySet()
     var currentMode: MediaDisplayMode = MediaDisplayMode.Grid(DEFAULT_MEDIA_GRID_COLUMNS)
     var mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()
+    var selectedUris: Set<String> = emptySet()
 
     init { setHasStableIds(true) }
 
@@ -681,7 +697,7 @@ private class SimpleGridAdapter(
             is MediaDisplayMode.List -> 1
         }
         when (holder) {
-            is GridVH -> holder.bind(item, position, starredUris, columns)
+            is GridVH -> holder.bind(item, position, starredUris, selectedUris, columns)
             is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap)
         }
     }
@@ -789,11 +805,39 @@ private class SimpleGridAdapter(
                     onToggleStar(uriStr)
                 }
 
+                // ── 多选对号：居中半透明绿色圆形 + 白色 ✓ ──
+                val checkmarkContainer = FrameLayout(context).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        (36 * density).toInt(),
+                        (36 * density).toInt(),
+                        android.view.Gravity.CENTER
+                    )
+                    visibility = android.view.View.GONE
+                    id = android.R.id.checkbox
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(200, 76, 175, 80))
+                    }
+                }
+                val checkmarkTv = TextView(context).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.Gravity.CENTER
+                    )
+                    text = "✓"
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 20f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                }
+                checkmarkContainer.addView(checkmarkTv)
+                frame.addView(checkmarkContainer)
+
                 return GridVH(frame, iv, tv, starIv, starContainer, starWrapper, onClick, onLongClick)
             }
         }
 
-        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, columns: Int = DEFAULT_MEDIA_GRID_COLUMNS) {
+        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, selectedUris: Set<String> = emptySet(), columns: Int = DEFAULT_MEDIA_GRID_COLUMNS) {
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -816,6 +860,14 @@ private class SimpleGridAdapter(
                 tv.visibility = android.view.View.VISIBLE
             } else { tv.visibility = android.view.View.GONE }
             updateStarSize(columns)
+            // 多选模式：隐藏星标，显示对号
+            val inMultiSelect = selectedUris.isNotEmpty()
+            val isSelected = item.uri.toString() in selectedUris
+            starContainer.visibility = if (inMultiSelect) android.view.View.GONE else android.view.View.VISIBLE
+            val checkmark = itemView.findViewById<FrameLayout>(android.R.id.checkbox)
+            if (checkmark != null) {
+                checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+            }
         }
 
         private fun updateStarSize(columns: Int) {
