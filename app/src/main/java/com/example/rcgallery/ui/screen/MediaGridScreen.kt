@@ -450,60 +450,71 @@ fun MediaGridScreen(
                             },
                             modifier = Modifier.fillMaxSize().padding(padding)
                         )
-                        // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
-                        Row(
+                        // ── 悬浮工具栏（两行：列数/排序 + TAG 栏）──
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding())
-                                .align(Alignment.TopStart),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                .align(Alignment.TopStart)
                         ) {
-                            // ── 相册 TAG 栏（+ 按钮 + chips，自然排布）──
-                            if (!isMediaMultiSelect && albumDirectoryPath.isNotEmpty()) {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = Color(0xFF64B464).copy(alpha = 0.7f),
-                                    modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
-                                ) {
-                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                        Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            // 第一行：列数选择 + 排序
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                MediaDisplayModeSelector(
+                                    currentMode = mediaDisplayMode,
+                                    onSelectMode = { mode ->
+                                        mediaDisplayMode = mode
+                                        mediaPrefs.edit().putString("media_display_mode", when (mode) {
+                                            is MediaDisplayMode.List -> "list"
+                                            is MediaDisplayMode.Grid -> "grid_${mode.columns}"
+                                        }).apply()
                                     }
-                                }
-                                currentAlbumTags.forEach { tag ->
+                                )
+                                Spacer(Modifier.weight(1f))
+                                MediaSortSelector(
+                                    currentSort = mediaSortMode,
+                                    onSelectSort = { mode ->
+                                        mediaSortMode = mode
+                                        mediaPrefs.edit().putString("media_sort_mode", when (mode) {
+                                            MediaSortMode.DATE -> "date"
+                                            MediaSortMode.NAME -> "name"
+                                            MediaSortMode.SIZE -> "size"
+                                            MediaSortMode.IMAGE_SIZE -> "image_size"
+                                            MediaSortMode.VIDEO_SIZE -> "video_size"
+                                        }).apply()
+                                    }
+                                )
+                            }
+                            // 第二行：TAG 栏（+ 按钮 + chips）
+                            if (!isMediaMultiSelect && albumDirectoryPath.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Surface(
-                                        shape = RoundedCornerShape(3.dp),
-                                        color = Color(0xFF6468B4).copy(alpha = 0.7f),
+                                        shape = CircleShape,
+                                        color = Color(0xFF64B464).copy(alpha = 0.7f),
+                                        modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
                                     ) {
-                                        Text(tag.name, fontSize = 9.sp, color = Color.White, maxLines = 1,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                    currentAlbumTags.forEach { tag ->
+                                        Surface(
+                                            shape = RoundedCornerShape(3.dp),
+                                            color = Color(0xFF6468B4).copy(alpha = 0.7f),
+                                        ) {
+                                            Text(tag.name, fontSize = 9.sp, color = Color.White, maxLines = 1,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                        }
                                     }
                                 }
                             }
-                            MediaDisplayModeSelector(
-                                currentMode = mediaDisplayMode,
-                                onSelectMode = { mode ->
-                                    mediaDisplayMode = mode
-                                    mediaPrefs.edit().putString("media_display_mode", when (mode) {
-                                        is MediaDisplayMode.List -> "list"
-                                        is MediaDisplayMode.Grid -> "grid_${mode.columns}"
-                                    }).apply()
-                                }
-                            )
-                            Spacer(Modifier.weight(1f))
-                            MediaSortSelector(
-                                currentSort = mediaSortMode,
-                                onSelectSort = { mode ->
-                                    mediaSortMode = mode
-                                    mediaPrefs.edit().putString("media_sort_mode", when (mode) {
-                                        MediaSortMode.DATE -> "date"
-                                        MediaSortMode.NAME -> "name"
-                                        MediaSortMode.SIZE -> "size"
-                                        MediaSortMode.IMAGE_SIZE -> "image_size"
-                                        MediaSortMode.VIDEO_SIZE -> "video_size"
-                                    }).apply()
-                                }
-                            )
                         }
                         // ── 多选 BackHandler ──
                         if (isMediaMultiSelect) {
