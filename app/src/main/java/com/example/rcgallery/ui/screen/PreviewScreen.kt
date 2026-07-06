@@ -149,6 +149,7 @@ fun PreviewScreen(
     var currentMediaTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var showMediaTagDialog by remember { mutableStateOf(false) }
     var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+    var mediaTagRefreshTrigger by remember { mutableIntStateOf(0) }
     LaunchedEffect(currentItem) {
         val item = currentItem
         if (item != null) {
@@ -158,9 +159,9 @@ fun PreviewScreen(
             currentMediaTags = emptyList()
         }
     }
-    // 打开 TAG 对话框时刷新一次（对话框内增删后关闭再打开，看到最新状态）
-    LaunchedEffect(showMediaTagDialog) {
-        if (showMediaTagDialog) {
+    // 每次标签增删后刷新，对话框内立即看到变化
+    LaunchedEffect(mediaTagRefreshTrigger) {
+        if (mediaTagRefreshTrigger > 0) {
             val item = currentItem
             if (item != null) {
                 currentMediaTags = viewModel.getMediaTags(item.filePath)
@@ -633,8 +634,14 @@ fun PreviewScreen(
                 existingTags = currentMediaTags,
                 allTags = allTags,
                 recentTags = recentTagList,
-                onAddTag = { name -> viewModel.addMediaTag(currentItem!!.filePath, name) },
-                onRemoveTag = { tagId -> viewModel.removeMediaTag(currentItem!!.filePath, tagId) },
+                onAddTag = { name ->
+                    viewModel.addMediaTag(currentItem!!.filePath, name)
+                    mediaTagRefreshTrigger++
+                },
+                onRemoveTag = { tagId ->
+                    viewModel.removeMediaTag(currentItem!!.filePath, tagId)
+                    mediaTagRefreshTrigger++
+                },
                 onDismiss = { showMediaTagDialog = false }
             )
         }

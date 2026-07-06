@@ -952,6 +952,18 @@ private class ListVH private constructor(
             }
             textColumn.addView(nameTv)
 
+            // ── TAG 横向滚动条（紧跟在相册名后）──
+            val tagStrip = android.widget.HorizontalScrollView(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                isHorizontalScrollBarEnabled = false
+                tag = "album_tag_strip"
+                visibility = android.view.View.GONE
+            }
+            textColumn.addView(tagStrip)
+
             val infoTv = TextView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -977,18 +989,6 @@ private class ListVH private constructor(
                 id = android.R.id.text2
             }
             textColumn.addView(pathTv)
-
-            // ── TAG 横向滚动条（只在列表模式显示）──
-            val tagStrip = android.widget.HorizontalScrollView(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-                isHorizontalScrollBarEnabled = false
-                tag = "album_tag_strip"
-                visibility = android.view.View.GONE
-            }
-            textColumn.addView(tagStrip)
 
             row.addView(textColumn)
 
@@ -1092,6 +1092,30 @@ private class ListVH private constructor(
             tagRow.removeAllViews()
             val ctx = itemView.context
             val density = ctx.resources.displayMetrics.density
+
+            // + 按钮（放最前面，始终显示）
+            val addChip = TextView(ctx).apply {
+                text = "+"
+                textSize = 12f
+                setTextColor(android.graphics.Color.WHITE)
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                    }
+                )
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    (20 * density).toInt(),
+                    (20 * density).toInt()
+                ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                isClickable = true
+                focusable = android.view.View.FOCUSABLE
+                setOnClickListener { onManageTags(item) }
+            }
+            tagRow.addView(addChip)
+
+            // 标签紧随加号之后
             tags.forEach { tag ->
                 val chip = TextView(ctx).apply {
                     text = tag.name
@@ -1115,27 +1139,6 @@ private class ListVH private constructor(
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
             }
-            // + 按钮（始终显示，无标签时也作为入口）
-            val addChip = TextView(ctx).apply {
-                text = "+"
-                textSize = 12f
-                setTextColor(android.graphics.Color.WHITE)
-                setBackgroundDrawable(
-                    android.graphics.drawable.GradientDrawable().apply {
-                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
-                        setColor(android.graphics.Color.argb(180, 100, 180, 100))
-                    }
-                )
-                gravity = android.view.Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(
-                    (20 * density).toInt(),
-                    (20 * density).toInt()
-                ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
-                isClickable = true
-                focusable = android.view.View.FOCUSABLE
-                setOnClickListener { onManageTags(item) }
-            }
-            tagRow.addView(addChip)
             tagStrip.visibility = android.view.View.VISIBLE
         }
     }
