@@ -1060,8 +1060,9 @@ private class ListVH private constructor(
         val iv = row.getChildAt(0) as ImageView
         val textColumn = row.getChildAt(1) as LinearLayout
         val nameTv = textColumn.getChildAt(0) as TextView
-        val infoTv = textColumn.getChildAt(1) as TextView
-        val pathTv = textColumn.getChildAt(2) as TextView
+        // index 1 = tagStrip (HorizontalScrollView, 跳过)
+        val infoTv = textColumn.getChildAt(2) as TextView
+        val pathTv = textColumn.getChildAt(3) as TextView
 
         iv.load(item.coverUri) { size(160); crossfade(false) }
         nameTv.text = item.bucketName
