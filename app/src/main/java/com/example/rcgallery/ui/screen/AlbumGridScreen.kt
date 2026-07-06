@@ -161,6 +161,7 @@ fun AlbumGridScreen(
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
     var selectedAlbumName by remember { mutableStateOf("") }
+    var selectedAlbumDirectoryPath by remember { mutableStateOf("") }
     // albums（来自 ViewModel）变化时联动更新相册名
     // 优先按 bucketId 匹配；如果 bucketId 变了（如改名后 MediaStore 重新扫描），按相册名回退
     LaunchedEffect(albums, selectedAlbumId) {
@@ -169,12 +170,14 @@ fun AlbumGridScreen(
             val found = albums.find { it.bucketId == id }
             if (found != null) {
                 selectedAlbumName = found.bucketName
+                selectedAlbumDirectoryPath = found.directoryPath
             } else {
                 // bucketId 变了：尝试用当前名字匹配（改名后 MediaStore 分配新 bucketId）
                 val byName = albums.find { it.bucketName == selectedAlbumName }
                 if (byName != null) {
                     selectedAlbumName = byName.bucketName
                     selectedAlbumId = byName.bucketId
+                    selectedAlbumDirectoryPath = byName.directoryPath
                 }
                 // 都找不到则保持现状
             }
@@ -316,6 +319,7 @@ fun AlbumGridScreen(
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
+                        selectedAlbumDirectoryPath = album.directoryPath
                         // 同步通知上层隐藏底部栏（不用 LaunchedEffect，防延迟一帧）
                         onAlbumActiveChanged(true)
                     },
@@ -384,6 +388,7 @@ fun AlbumGridScreen(
                 MediaGridScreen(
                     albumId = selectedAlbumId!!,
                     albumName = selectedAlbumName,
+                    albumDirectoryPath = selectedAlbumDirectoryPath,
                     onBackClick = {
                         selectedAlbumId = null
                         onAlbumActiveChanged(false)  // 同步通知上层恢复底部栏

@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,6 +61,7 @@ import kotlinx.coroutines.launch
 fun MediaGridScreen(
     albumId: String = "",
     albumName: String = "",
+    albumDirectoryPath: String = "",  // 相册目录路径（用于读取相册 TAG）
     onMediaClick: (Int) -> Unit = {},
     onBackClick: () -> Unit = {},
     onGoHome: () -> Unit = {}    // 直接回到 AlbumGrid 主页
@@ -70,6 +72,14 @@ fun MediaGridScreen(
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
+    val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
+
+    // ── 相册 TAG 管理 ──
+    val currentAlbumTags = remember(albumDirectoryPath, albumTags) {
+        if (albumDirectoryPath.isNotEmpty()) albumTags[albumDirectoryPath] ?: emptyList()
+        else emptyList()
+    }
+    var showAlbumTagDialog by remember { mutableStateOf(false) }
 
     // ── 媒体项 TAG 管理 ──
     var tagDialogMediaItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
@@ -261,12 +271,48 @@ fun MediaGridScreen(
                     topBar = {
                         TopAppBar(
                             title = {
-                                Text(
-                                    text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
-                                           else if (albumName.isNotEmpty()) albumName else "所有文件",
-                                    maxLines = 1,
-                                    modifier = if (!isMediaMultiSelect) Modifier.clickable { showAlbumRenameDialog = true } else Modifier
-                                )
+                                Column {
+                                    Text(
+                                        text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
+                                               else if (albumName.isNotEmpty()) albumName else "所有文件",
+                                        maxLines = 1,
+                                        modifier = if (!isMediaMultiSelect) Modifier.clickable { showAlbumRenameDialog = true } else Modifier
+                                    )
+                                    // ── 相册 TAG 栏（复用列表模式 chip 设计）──
+                                    if (!isMediaMultiSelect) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 2.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // + 按钮
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = Color(0xFF64B464).copy(alpha = 0.7f),
+                                                modifier = Modifier.size(18.dp).clickable { showAlbumTagDialog = true }
+                                            ) {
+                                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                    Text("+", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                            currentAlbumTags.forEach { tag ->
+                                                Surface(
+                                                    shape = RoundedCornerShape(5.dp),
+                                                    color = Color(0xFF6468B4).copy(alpha = 0.7f),
+                                                    modifier = Modifier.height(20.dp)
+                                                ) {
+                                                    Text(
+                                                        tag.name,
+                                                        fontSize = 9.sp,
+                                                        color = Color.White,
+                                                        maxLines = 1,
+                                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             navigationIcon = {
                                 if (isMediaMultiSelect) {
@@ -576,6 +622,26 @@ fun MediaGridScreen(
             }
 
             // ── TAG 管理对话框 ──
+
+            // 相册 TAG 对话框
+            if (showAlbumTagDialog && albumDirectoryPath.isNotEmpty()) {
+                val scope = rememberCoroutineScope()
+                var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
+                LaunchedEffect(Unit) {
+                    recentTagList = viewModel.getRecentTags()
+                }
+                TagManageDialog(
+                    title = "管理相册标签 - $albumName",
+                    existingTags = currentAlbumTags,
+                    allTags = allTags,
+                    recentTags = recentTagList,
+                    onAddTag = { name -> viewModel.addAlbumTag(albumDirectoryPath, name) },
+                    onRemoveTag = { tagId -> viewModel.removeAlbumTag(albumDirectoryPath, tagId) },
+                    onDismiss = { showAlbumTagDialog = false }
+                )
+            }
+
+            // 媒体项 TAG 对话框
             val currentMediaItem = tagDialogMediaItem
             if (currentMediaItem != null && currentMediaItem.filePath.isNotEmpty()) {
                 val scope = rememberCoroutineScope()
