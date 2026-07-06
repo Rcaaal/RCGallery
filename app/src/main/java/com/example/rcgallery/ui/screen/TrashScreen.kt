@@ -469,6 +469,7 @@ fun TrashScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
+                    windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold/overlay 已处理状态栏 insets
                     title = {
                         Text(
                             if (isMultiSelectMode) "已选 ${selectedUris.size} 项"

@@ -351,7 +351,9 @@ fun AlbumGridScreen(
                         showTrash = true
                         viewModel.loadTrashEntries()
                     },
-                    onManageAlbumTags = { album -> tagDialogAlbum = album }
+                    onManageAlbumTags = { album -> tagDialogAlbum = album },
+                    allTags = allTags,
+                    onBatchAddTagsToAlbums = { dirPath, tagName -> viewModel.addAlbumTag(dirPath, tagName) }
                 )
                 // ── TAG 管理对话框 ──
                 val currentTagAlbum = tagDialogAlbum
@@ -492,8 +494,43 @@ private fun AlbumGridContent(
     onOpenTrash: () -> Unit = {},
     onManageAlbumTags: (Album) -> Unit = {},
     albumRvRef: MutableState<RecyclerView?>,
-    albumTags: Map<String, List<TagEntity>> = emptyMap()
+    albumTags: Map<String, List<TagEntity>> = emptyMap(),
+    allTags: List<TagEntity> = emptyList(),
+    onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> }
 ) {
+    // ── Grid 模式多选状态 ──
+    var isAlbumMultiSelect by remember { mutableStateOf(false) }
+    var selectedAlbumIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    fun exitAlbumMultiSelect() {
+        isAlbumMultiSelect = false
+        selectedAlbumIds = emptySet()
+    }
+
+    fun toggleAlbumSelection(album: Album) {
+        selectedAlbumIds = if (album.bucketId in selectedAlbumIds) selectedAlbumIds - album.bucketId
+                           else selectedAlbumIds + album.bucketId
+        if (selectedAlbumIds.isEmpty()) isAlbumMultiSelect = false
+    }
+
+    val onGridLongClick: (Album) -> Unit = remember {{
+        album ->
+        if (!isAlbumMultiSelect) isAlbumMultiSelect = true
+        toggleAlbumSelection(album)
+    }}
+
+    // ── 批量 TAG 对话框 ──
+    var showBatchTagDialog by remember { mutableStateOf(false) }
+
+    // 多选模式：短按切换选中而非打开相册
+    fun wrappedAlbumClick(album: Album) {
+        if (isAlbumMultiSelect) {
+            toggleAlbumSelection(album)
+        } else {
+            onAlbumClick(album)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -547,18 +584,48 @@ private fun AlbumGridContent(
                     )
                 }
             )
+        },
+        bottomBar = {
+            if (isAlbumMultiSelect && selectedAlbumIds.isNotEmpty()) {
+                BottomAppBar(
+                    containerColor = Color(0xFF1A1A1A),
+                    tonalElevation = 8.dp
+                ) {
+                    Text(
+                        "已选 ${selectedAlbumIds.size} 项",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 16.dp)
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Button(
+                        onClick = { showBatchTagDialog = true },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("批量加标签 (${selectedAlbumIds.size})", fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
+            }
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
+            // ── 多选 BackHandler ──
+            if (isAlbumMultiSelect) {
+                BackHandler {
+                    exitAlbumMultiSelect()
+                }
+            }
             // ── RecyclerView 内容区域（填满全屏）──
             AndroidView(
                 factory = { ctx ->
                     val adapter = AlbumGridAdapter(
                         items = albums,
-                        onClick = onAlbumClick,
+                        onClick = { album -> wrappedAlbumClick(album) },
                         onLongClick = onAlbumLongClick,
                         onToggleStar = onToggleStar,
-                        onManageTags = onManageAlbumTags
+                        onManageTags = onManageAlbumTags,
+                        onGridLongClick = onGridLongClick
                     )
                     val rv = RecyclerView(ctx).apply {
                         layoutManager = when (displayMode) {
@@ -626,7 +693,42 @@ private fun AlbumGridContent(
                 )
             }
         }
+
+        // ── 批量 TAG 对话框 ──
+        if (showBatchTagDialog) {
+            val batchAlbumIds = albums.filter { it.bucketId in selectedAlbumIds }
+            BatchTagDialog(
+                title = "批量加标签 - 已选 ${batchAlbumIds.size} 个相册",
+                allTags = allTags,
+                onAddTag = { tagName ->
+                    batchAlbumIds.forEach { album ->
+                        onBatchAddTagsToAlbums(album.directoryPath, tagName)
+                    }
+                    showBatchTagDialog = false
+                    exitAlbumMultiSelect()
+                },
+                onDismiss = { showBatchTagDialog = false }
+            )
+        }
     }
+}
+
+// ── 批量 TAG 对话框（复用 TagManageDialog，隐藏现有标签和移除功能）──
+@Composable
+private fun BatchTagDialog(
+    title: String,
+    allTags: List<TagEntity>,
+    onAddTag: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    TagManageDialog(
+        title = title,
+        existingTags = emptyList(),
+        allTags = allTags,
+        onAddTag = onAddTag,
+        onRemoveTag = { _ -> },
+        onDismiss = onDismiss
+    )
 }
 
 // ══════════════════════════════════════
@@ -639,7 +741,8 @@ private class AlbumGridAdapter(
     private val onClick: (Album) -> Unit,
     private val onLongClick: (Album) -> Unit,
     private val onToggleStar: (String) -> Unit,
-    private val onManageTags: (Album) -> Unit = {}
+    private val onManageTags: (Album) -> Unit = {},
+    private val onGridLongClick: ((Album) -> Unit)? = null  // Grid 模式长按（多选），不传则回退到 onLongClick
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
@@ -660,7 +763,7 @@ private class AlbumGridAdapter(
         return if (viewType == VIEW_TYPE_LIST) {
             ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
         } else {
-            GridVH.create(parent, onClick, onLongClick, onToggleStar)
+            GridVH.create(parent, onClick, onGridLongClick ?: onLongClick, onToggleStar)
         }
     }
 

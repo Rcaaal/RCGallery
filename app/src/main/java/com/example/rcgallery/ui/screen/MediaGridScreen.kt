@@ -76,6 +76,21 @@ fun MediaGridScreen(
     var mediaTagRefreshTrigger by remember { mutableIntStateOf(0) }
     val allTags by viewModel.allTags.collectAsStateWithLifecycle()
 
+    // ── Grid 模式多选状态 ──
+    var isMediaMultiSelect by remember { mutableStateOf(false) }
+    var selectedMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showMediaBatchTagDialog by remember { mutableStateOf(false) }
+    fun exitMediaMultiSelect() {
+        isMediaMultiSelect = false
+        selectedMediaUris = emptySet()
+    }
+    fun toggleMediaSelection(item: com.example.rcgallery.model.MediaItem) {
+        val uri = item.uri.toString()
+        selectedMediaUris = if (uri in selectedMediaUris) selectedMediaUris - uri
+                           else selectedMediaUris + uri
+        if (selectedMediaUris.isEmpty()) isMediaMultiSelect = false
+    }
+
     // ── 相册切换时防止旧数据闪烁：加载完成前不展示 RecyclerView ──
     // 改名后 albumId 变化但 mediaItems 已存在（renameNow 已更新），不显示 loading
     var isLoadingAlbum by remember { mutableStateOf(true) }
@@ -289,6 +304,43 @@ fun MediaGridScreen(
                                 }
                             }
                         )
+                    },
+                    bottomBar = {
+                        if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
+                            BottomAppBar(
+                                containerColor = Color(0xFF1A1A1A),
+                                tonalElevation = 8.dp
+                            ) {
+                                Text(
+                                    "已选 ${selectedMediaUris.size} 项",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(start = 16.dp)
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Button(
+                                    onClick = { showMediaBatchTagDialog = true },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("批量加标签 (${selectedMediaUris.size})", fontSize = 13.sp)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                Button(
+                                    onClick = {
+                                        val toDelete = sortedItems.filter { it.uri.toString() in selectedMediaUris }
+                                        toDelete.forEach { item -> viewModel.moveToTrash(item) }
+                                        exitMediaMultiSelect()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.error
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("删除到回收站 (${selectedMediaUris.size})", fontSize = 13.sp)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                            }
+                        }
                     }
                 ) { padding ->
                     if (mediaItems.isEmpty()) {
@@ -314,6 +366,10 @@ fun MediaGridScreen(
                                 rv.setPadding(0, (40 * ctx.resources.displayMetrics.density).toInt(), 0, 0)
                                 val adapter = SimpleGridAdapter(
                                     onClick = { item ->
+                                        if (isMediaMultiSelect) {
+                                            toggleMediaSelection(item)
+                                            return@SimpleGridAdapter
+                                        }
                                         val items = (rv.adapter as SimpleGridAdapter).items
                                         var index = items.indexOf(item)
                                         if (index < 0) {
@@ -327,7 +383,11 @@ fun MediaGridScreen(
                                     },
                                     onToggleStar = { uriStr -> viewModel.toggleMediaStar(uriStr) },
                                     onManageTags = { item -> tagDialogMediaItem = item },
-                                    context = ctx
+                                    context = ctx,
+                                    onLongClick = { item ->
+                                        if (!isMediaMultiSelect) isMediaMultiSelect = true
+                                        toggleMediaSelection(item)
+                                    }
                                 ).apply { currentMode = mediaDisplayMode }
                                 rv.adapter = adapter
                                 mediaRvRef.value = rv
@@ -399,6 +459,30 @@ fun MediaGridScreen(
                                 }
                             )
                         }
+                        }
+                        // ── 多选 BackHandler ──
+                        if (isMediaMultiSelect) {
+                            BackHandler { exitMediaMultiSelect() }
+                        }
+                        // ── 批量 TAG 对话框 ──
+                        if (showMediaBatchTagDialog) {
+                            val batchMediaPaths = sortedItems
+                                .filter { it.uri.toString() in selectedMediaUris }
+                                .map { it.filePath }
+                            TagManageDialog(
+                                title = "批量加标签 - 已选 ${batchMediaPaths.size} 个文件",
+                                existingTags = emptyList(),
+                                allTags = allTags,
+                                onAddTag = { tagName ->
+                                    batchMediaPaths.forEach { filePath ->
+                                        viewModel.addMediaTag(filePath, tagName)
+                                    }
+                                    showMediaBatchTagDialog = false
+                                    exitMediaMultiSelect()
+                                },
+                                onRemoveTag = { _ -> },
+                                onDismiss = { showMediaBatchTagDialog = false }
+                            )
                         }
                         }
                     }
@@ -563,7 +647,8 @@ private class SimpleGridAdapter(
     private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
     private val onToggleStar: (String) -> Unit,
     private val onManageTags: (com.example.rcgallery.model.MediaItem) -> Unit,
-    private val context: android.content.Context
+    private val context: android.content.Context,
+    private val onLongClick: ((com.example.rcgallery.model.MediaItem) -> Unit)? = null
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var items: List<com.example.rcgallery.model.MediaItem> = emptyList()
@@ -585,7 +670,7 @@ private class SimpleGridAdapter(
         return if (viewType == VIEW_TYPE_LIST) {
             ListVH.create(parent, onToggleStar, onClick, onManageTags, context)
         } else {
-            GridVH.create(parent, onToggleStar, onClick, context)
+            GridVH.create(parent, onToggleStar, onClick, context, onLongClick)
         }
     }
 
@@ -610,7 +695,8 @@ private class SimpleGridAdapter(
         val starIv: ImageView,
         val starContainer: android.view.View,
         private val starWrapper: FrameLayout,
-        private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit
+        private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
+        private val onLongClick: ((com.example.rcgallery.model.MediaItem) -> Unit)? = null
     ) : RecyclerView.ViewHolder(itemView) {
 
         private var currentItem: com.example.rcgallery.model.MediaItem? = null
@@ -620,10 +706,18 @@ private class SimpleGridAdapter(
                 val item = currentItem ?: return@setOnClickListener
                 onClick(item)
             }
+            if (onLongClick != null) {
+                itemView.setOnLongClickListener {
+                    val item = currentItem ?: return@setOnLongClickListener true
+                    onLongClick(item)
+                    true
+                }
+            }
         }
 
         companion object {
-            fun create(parent: ViewGroup, onToggleStar: (String) -> Unit, onClick: (com.example.rcgallery.model.MediaItem) -> Unit, context: android.content.Context): GridVH {
+            fun create(parent: ViewGroup, onToggleStar: (String) -> Unit, onClick: (com.example.rcgallery.model.MediaItem) -> Unit, context: android.content.Context,
+                       onLongClick: ((com.example.rcgallery.model.MediaItem) -> Unit)? = null): GridVH {
                 val density = context.resources.displayMetrics.density
                 val gapPx = (MEDIA_GAP_DP * density).toInt()
                 val frame = object : FrameLayout(context) {
@@ -695,7 +789,7 @@ private class SimpleGridAdapter(
                     onToggleStar(uriStr)
                 }
 
-                return GridVH(frame, iv, tv, starIv, starContainer, starWrapper, onClick)
+                return GridVH(frame, iv, tv, starIv, starContainer, starWrapper, onClick, onLongClick)
             }
         }
 
