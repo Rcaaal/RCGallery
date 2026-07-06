@@ -383,7 +383,7 @@ fun PreviewScreen(
                     HorizontalPager(
                         state = pagerState,
                         userScrollEnabled = pagerScrollEnabled,
-                        beyondViewportPageCount = 1,
+                        beyondViewportPageCount = 0,
                         modifier = Modifier.fillMaxSize(),
                         pageSpacing = 0.dp
                     ) { page ->

@@ -7,12 +7,16 @@ import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -62,22 +66,28 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val viewModel: GalleryViewModel = viewModel()
                     val currentTab by viewModel.currentTab.collectAsState()
+                    var isAlbumActive by remember { mutableStateOf(false) }
+                    val showBottomBar = currentTab == 1 || !isAlbumActive  // 网络tab永远显示，本地tab进入相册时隐藏
 
                     Scaffold(
                         bottomBar = {
-                            NavigationBar {
-                                NavigationBarItem(
-                                    icon = { Text("📁") },
-                                    label = { Text("本地") },
-                                    selected = currentTab == 0,
-                                    onClick = { viewModel.switchTab(0) }
-                                )
-                                NavigationBarItem(
-                                    icon = { Text("🌐") },
-                                    label = { Text("网络") },
-                                    selected = currentTab == 1,
-                                    onClick = { viewModel.switchTab(1) }
-                                )
+                            // 固定高度占位，始终存在（防 Scaffold 重测 padding 导致布局偏移）
+                            // 用 alpha 直接切可见性（0ms），不带动画——进相册时 bar 瞬间消失
+                            Box(modifier = Modifier.height(80.dp).alpha(if (showBottomBar) 1f else 0f)) {
+                                NavigationBar(modifier = Modifier.fillMaxSize()) {
+                                    NavigationBarItem(
+                                        icon = { Text("📁") },
+                                        label = { Text("本地") },
+                                        selected = currentTab == 0,
+                                        onClick = { viewModel.switchTab(0) }
+                                    )
+                                    NavigationBarItem(
+                                        icon = { Text("🌐") },
+                                        label = { Text("网络") },
+                                        selected = currentTab == 1,
+                                        onClick = { viewModel.switchTab(1) }
+                                    )
+                                }
                             }
                         }
                     ) { innerPadding ->
@@ -94,6 +104,9 @@ class MainActivity : ComponentActivity() {
                                                 onSearchClick = {
                                                     AppLogger.d("Nav", "navigate → Search")
                                                     navController.navigate(Route.Search.route)
+                                                },
+                                                onAlbumActiveChanged = { active ->
+                                                    isAlbumActive = active
                                                 }
                                             )
                                         }

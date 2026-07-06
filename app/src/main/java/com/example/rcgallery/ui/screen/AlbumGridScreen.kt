@@ -99,7 +99,8 @@ private infix fun AlbumDisplayMode.isSameAs(other: AlbumDisplayMode): Boolean = 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumGridScreen(
-    onSearchClick: () -> Unit = {}
+    onSearchClick: () -> Unit = {},
+    onAlbumActiveChanged: (Boolean) -> Unit = {}  // true=相册打开, false=退出相册
 ) {
     val context = LocalContext.current
     val viewModel: GalleryViewModel = viewModel(context as ComponentActivity)
@@ -272,6 +273,8 @@ fun AlbumGridScreen(
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
+                        // 同步通知上层隐藏底部栏（不用 LaunchedEffect，防延迟一帧）
+                        onAlbumActiveChanged(true)
                     },
                     onAlbumLongClick = { album ->
                         renameTargetAlbum = album
@@ -359,8 +362,14 @@ fun AlbumGridScreen(
                 MediaGridScreen(
                     albumId = selectedAlbumId!!,
                     albumName = selectedAlbumName,
-                    onBackClick = { selectedAlbumId = null },
-                    onGoHome = { selectedAlbumId = null }
+                    onBackClick = {
+                        selectedAlbumId = null
+                        onAlbumActiveChanged(false)  // 同步通知上层恢复底部栏
+                    },
+                    onGoHome = {
+                        selectedAlbumId = null
+                        onAlbumActiveChanged(false)
+                    }
                 )
             }
             // ── 回收站全屏覆盖层 ──

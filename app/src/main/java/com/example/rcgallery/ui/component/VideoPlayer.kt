@@ -101,8 +101,9 @@ fun VideoPlayer(
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(uri.toString()))
-            prepare()
-            playWhenReady = isActive
+            // ❌ 不在 remember 中 prepare() — 等 TextureView surface 就绪后再 prepare
+            //    防止 codec 在无 surface 时初始化导致死机
+            playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
             volume = if (isActive && volumeEnabled) 1f else 0f
             addListener(object : Player.Listener {

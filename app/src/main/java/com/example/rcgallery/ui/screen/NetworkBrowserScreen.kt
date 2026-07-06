@@ -59,6 +59,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.layout.ContentScale
 import androidx.activity.compose.BackHandler
 
@@ -78,7 +80,8 @@ fun NetworkBrowserScreen(
     val context = LocalContext.current
 
     var showConnectDialog by remember { mutableStateOf(false) }
-    var previewFileInfo by remember { mutableStateOf<SmbFileInfo?>(null) }
+    // 预览状态：(当前索引, 全部媒体文件列表)
+    var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
     // 初始化 SMB 缩略图磁盘缓存
     LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
@@ -167,9 +170,9 @@ fun NetworkBrowserScreen(
                             subFolders = s.subFolders,
                             mediaFiles = s.mediaFiles,
                             onFolderClick = { folder -> viewModel.smbOpenFolder(folder.path, folder.name) },
-                            onFileClick = { file ->
-                                AppLogger.d("SMB", "preview file: ${file.name} isVideo=${file.isVideo} size=${file.size}")
-                                previewFileInfo = file
+                            onFileClick = { idx, file ->
+                                AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
+                                previewState = idx to s.mediaFiles
                             }
                         )
                     }
@@ -186,11 +189,19 @@ fun NetworkBrowserScreen(
             )
         }
 
-        previewFileInfo?.let { file ->
-            SmbPreviewOverlay(
-                fileInfo = file,
-                onDismiss = { previewFileInfo = null }
-            )
+        previewState?.let { (idx, files) ->
+            if (idx in files.indices) {
+                AppLogger.d("SMB-PREVIEW", "RENDERING overlay: idx=$idx total=${files.size} name=${files[idx].name}")
+                SmbPreviewOverlay(
+                    fileInfo = files[idx],
+                    mediaFiles = files,
+                    currentIndex = idx,
+                    onDismiss = { previewState = null },
+                    onNavigate = { newIdx -> previewState = newIdx to files }
+                )
+            } else {
+                previewState = null
+            }
         }
     }
 }
@@ -284,7 +295,7 @@ private fun FolderMixedContent(
     subFolders: List<SmbSubFolder>,
     mediaFiles: List<SmbFileInfo>,
     onFolderClick: (SmbSubFolder) -> Unit,
-    onFileClick: (SmbFileInfo) -> Unit
+    onFileClick: (Int, SmbFileInfo) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var isListMode by remember { mutableStateOf(true) } // 默认列表模式
@@ -373,7 +384,7 @@ private class FolderMixedAdapter(
     var subFolders: List<SmbSubFolder>,
     var mediaFiles: List<SmbFileInfo>,
     private val onFolderClick: (SmbSubFolder) -> Unit,
-    private val onFileClick: (SmbFileInfo) -> Unit,
+    private val onFileClick: (Int, SmbFileInfo) -> Unit,
     val scope: CoroutineScope,
     @Volatile var isListMode: Boolean = true
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
@@ -414,7 +425,7 @@ private class FolderMixedAdapter(
             is FolderVH -> holder.bind(subFolders[position], position)
             is MediaVH -> holder.bind(mediaFiles[position - folderCount], position)
             is FolderListVH -> holder.bind(subFolders[position])
-            is MediaListVH -> holder.bind(mediaFiles[position - folderCount])
+            is MediaListVH -> holder.bind(mediaFiles[position - folderCount], position - folderCount)
         }
     }
 }
@@ -516,6 +527,9 @@ private class FolderVH private constructor(
         }
     }
 
+    private var currentCoverPath: String? = null
+    private var coverLoadJob: kotlinx.coroutines.Job? = null
+
     fun bind(folder: SmbSubFolder, pos: Int) {
         itemView.tag = folder
         nameTv.text = folder.name
@@ -523,12 +537,14 @@ private class FolderVH private constructor(
 
         val path = folder.coverPath
         if (coverIv.tag != path) {
+            // 取消上次协程
+            coverLoadJob?.cancel()
             coverIv.setImageDrawable(null)
             coverIv.setBackgroundColor(0xFF2A2A2A.toInt())
             coverIv.tag = path
 
             if (path.isNotEmpty()) {
-                scope.launch {
+                coverLoadJob = scope.launch {
                     val bm = SmbThumbnailLoader.load(url = path, maxPx = 300)
                     if (bm != null && coverIv.tag == path) {
                         coverIv.setImageBitmap(bm)
@@ -546,19 +562,21 @@ private class MediaVH private constructor(
     private val iv: ImageView,
     private val playIcon: TextView,
     private val scope: CoroutineScope,
-    private val onFileClick: (SmbFileInfo) -> Unit
+    private val onFileClick: (Int, SmbFileInfo) -> Unit
 ) : RecyclerView.ViewHolder(itemView) {
+
+    private var bindPos: Int = 0
 
     init {
         itemView.setOnClickListener {
             val file = it.tag as? SmbFileInfo ?: return@setOnClickListener
             AppLogger.d("SMB", "click media: ${file.name} path=${file.path}")
-            onFileClick(file)
+            onFileClick(bindPos, file)
         }
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope): MediaVH {
+        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope): MediaVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val gapPx = (SM_GAP_DP * d).toInt()
@@ -608,8 +626,10 @@ private class MediaVH private constructor(
     }
 
     private var currentPath: String? = null
+    private var loadJob: kotlinx.coroutines.Job? = null
 
     fun bind(file: SmbFileInfo, pos: Int) {
+        bindPos = pos
         itemView.tag = file
         val path = file.path
         val isVideo = file.isVideo
@@ -619,12 +639,14 @@ private class MediaVH private constructor(
 
         if (path == currentPath) return
 
+        // 取消上次协程，防止快速滚动时大量协程堆积
+        loadJob?.cancel()
         currentPath = path
         iv.setImageDrawable(null)
         iv.setBackgroundColor(if (isVideo) 0xFF333333.toInt() else 0xFF1A1A1A.toInt())
         iv.tag = path
 
-        scope.launch {
+        loadJob = scope.launch {
             val context = itemView.context
             val bm = SmbThumbnailLoader.load(url = path, fileSize = file.size, maxPx = 300, context = context)
             if (bm != null && iv.tag == path) {
@@ -719,19 +741,21 @@ private class MediaListVH private constructor(
     private val sizeTv: TextView,
     private val playLabel: TextView,
     private val scope: CoroutineScope,
-    private val onFileClick: (SmbFileInfo) -> Unit
+    private val onFileClick: (Int, SmbFileInfo) -> Unit
 ) : RecyclerView.ViewHolder(itemView) {
+
+    private var bindPos: Int = 0
 
     init {
         itemView.setOnClickListener {
             val file = it.tag as? SmbFileInfo ?: return@setOnClickListener
             AppLogger.d("SMB", "click media: ${file.name} path=${file.path}")
-            onFileClick(file)
+            onFileClick(bindPos, file)
         }
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (SmbFileInfo) -> Unit, scope: CoroutineScope): MediaListVH {
+        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope): MediaListVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val thumbPx = (56 * d).toInt()
@@ -807,8 +831,10 @@ private class MediaListVH private constructor(
     }
 
     private var currentPath: String? = null
+    private var loadJob: kotlinx.coroutines.Job? = null
 
-    fun bind(file: SmbFileInfo) {
+    fun bind(file: SmbFileInfo, pos: Int = 0) {
+        bindPos = pos
         itemView.tag = file
         val path = file.path
         val isVideo = file.isVideo
@@ -818,13 +844,15 @@ private class MediaListVH private constructor(
         playLabel.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
 
         if (path == currentPath) return
+        // 取消上次协程，防止快速滚动时大量协程堆积
+        loadJob?.cancel()
         currentPath = path
         iv.setImageDrawable(null)
         iv.setBackgroundColor(0xFF1A1A1A.toInt())
         iv.tag = path
 
         // 列表模式用小缩略图（64dp → maxPx=120），加载更快
-        scope.launch {
+        loadJob = scope.launch {
             val context = itemView.context
             val bm = SmbThumbnailLoader.load(url = path, fileSize = file.size, maxPx = 120, context = context)
             if (bm != null && iv.tag == path) {
@@ -851,11 +879,17 @@ private class MediaListVH private constructor(
 @Composable
 private fun SmbPreviewOverlay(
     fileInfo: SmbFileInfo,
-    onDismiss: () -> Unit
+    mediaFiles: List<SmbFileInfo>,
+    currentIndex: Int,
+    onDismiss: () -> Unit,
+    onNavigate: (Int) -> Unit
 ) {
     var cacheModeEnabled by remember { mutableStateOf(true) }
     val svcContext = LocalContext.current
-    LaunchedEffect(Unit) { svcContext.startService(Intent(svcContext, SmbProxyService::class.java)) }
+    // 仅视频需要启动代理服务
+    if (fileInfo.isVideo) {
+        LaunchedEffect(Unit) { svcContext.startService(Intent(svcContext, SmbProxyService::class.java)) }
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -864,7 +898,9 @@ private fun SmbPreviewOverlay(
         if (fileInfo.isVideo) {
             if (cacheModeEnabled) SmbCachedVideoPlayer(fileInfo, onDismiss) else SmbVideoPlayer(fileInfo, onDismiss)
         } else {
-            SmbImageViewer(fileInfo)
+            androidx.compose.runtime.key(fileInfo.path) {
+                SmbImageViewer(fileInfo)
+            }
         }
 
         // 顶部关闭按钮
@@ -876,18 +912,55 @@ private fun SmbPreviewOverlay(
         ) {
             Text("← 返回", color = Color.White)
         }
-        // -- 缓存模式切换 --
-        TextButton(
-            onClick = { cacheModeEnabled = !cacheModeEnabled },
+
+        // ── 位置计数 + 前后翻页 ──
+        Row(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            // 上一张
+            if (currentIndex > 0) {
+                TextButton(onClick = { onNavigate(currentIndex - 1) }) {
+                    Text("◀", color = Color.White, fontSize = 18.sp)
+                }
+            } else {
+                Spacer(Modifier.width(48.dp))
+            }
+
+            Spacer(Modifier.width(8.dp))
             Text(
-                if (cacheModeEnabled) "♦ CX缓存" else "◆ RAF流式",
-                color = if (cacheModeEnabled) Color(0xFF4CAF50) else Color(0xFF9E9E9E),
-                fontSize = 12.sp
+                "${currentIndex + 1}/${mediaFiles.size}",
+                color = Color.White,
+                fontSize = 14.sp
             )
+            Spacer(Modifier.width(8.dp))
+
+            // 下一张
+            if (currentIndex < mediaFiles.size - 1) {
+                TextButton(onClick = { onNavigate(currentIndex + 1) }) {
+                    Text("▶", color = Color.White, fontSize = 18.sp)
+                }
+            } else {
+                Spacer(Modifier.width(48.dp))
+            }
+        }
+
+        // -- 缓存模式切换（仅视频显示） --
+        if (fileInfo.isVideo) {
+            TextButton(
+                onClick = { cacheModeEnabled = !cacheModeEnabled },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+            ) {
+                Text(
+                    if (cacheModeEnabled) "♦ CX缓存" else "◆ RAF流式",
+                    color = if (cacheModeEnabled) Color(0xFF4CAF50) else Color(0xFF9E9E9E),
+                    fontSize = 12.sp
+                )
+            }
         }
     }
 }
@@ -898,54 +971,68 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
     var isError by remember { mutableStateOf(false) }
 
     LaunchedEffect(fileInfo.path) {
-        AppLogger.d("SMB", "preview start: ${fileInfo.name} size=${fileInfo.size}")
-        val repo = SmbRepository.getInstance()
-
-        // ① 先尝试从磁盘缓存加载缩略图（即时显示，后续后台加载全分辨率）
-        val thumbCache = SmbThumbnailLoader.getDiskCacheBitmap(fileInfo.path)
-        if (thumbCache != null) {
-            AppLogger.d("SMB", "preview show cached thumbnail first: ${fileInfo.name}")
-            bitmap = thumbCache
-        }
-
-        // ② 后台加载全分辨率采样图（用 decodeStream 流式解码，无需全文件 ByteArray）
-        val streamResult = repo.getInputStream(fileInfo.path)
-        val stream = streamResult.getOrNull()
-        if (stream == null) {
-            AppLogger.d("SMB-WARN", "preview stream open failed: ${fileInfo.name}")
-            if (thumbCache == null) isError = true
-            return@LaunchedEffect
-        }
         try {
-            val buffered = java.io.BufferedInputStream(stream, 512 * 1024)
-            buffered.mark(512 * 1024)
-            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeStream(buffered, null, boundsOpts)
-            buffered.reset()
+            withTimeout(15_000L) {
+                AppLogger.d("SMB", "preview start: ${fileInfo.name} size=${fileInfo.size}")
+                val repo = SmbRepository.getInstance()
 
-            val sample = if (boundsOpts.outWidth > 0 && boundsOpts.outHeight > 0) {
-                var s = 1
-                while (boundsOpts.outWidth / s > 1080 || boundsOpts.outHeight / s > 1080) { s *= 2 }
-                s
-            } else { 1 }
+                // ① 先尝试从预览缓存加载（CX 模式：0ms，本地文件）
+                val previewCache = SmbThumbnailLoader.getPreviewCacheBitmap(fileInfo.path)
+                if (previewCache != null) {
+                    AppLogger.d("SMB", "preview cache hit (0ms): ${fileInfo.name}")
+                    bitmap = previewCache
+                    return@withTimeout
+                }
 
-            val opts = BitmapFactory.Options().apply {
-                inSampleSize = sample
-                inPreferredConfig = Bitmap.Config.ARGB_8888
+                // ② 尝试缩略图磁盘缓存作为即时占位
+                val thumbCache = SmbThumbnailLoader.getDiskCacheBitmap(fileInfo.path)
+                if (thumbCache != null) {
+                    bitmap = thumbCache
+                }
+
+                // ③ 后台流式解码 + 写入预览缓存
+                val streamResult = repo.getInputStream(fileInfo.path)
+                val stream = streamResult.getOrNull()
+                if (stream == null) {
+                    if (thumbCache == null) isError = true
+                    return@withTimeout
+                }
+                try {
+                    val buffered = java.io.BufferedInputStream(stream, 512 * 1024)
+                    buffered.mark(512 * 1024)
+                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeStream(buffered, null, boundsOpts)
+                    buffered.reset()
+
+                    val sample = if (boundsOpts.outWidth > 0 && boundsOpts.outHeight > 0) {
+                        var s = 1
+                        while (boundsOpts.outWidth / s > 1080 || boundsOpts.outHeight / s > 1080) { s *= 2 }
+                        s
+                    } else { 1 }
+
+                    val opts = BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    val bm = BitmapFactory.decodeStream(buffered, null, opts)
+                    if (bm != null) {
+                        AppLogger.d("SMB", "preview done: ${fileInfo.name} ${bm.width}x${bm.height} sample=$sample")
+                        // 存入预览缓存（下次秒开）
+                        SmbThumbnailLoader.savePreviewCache(fileInfo.path, bm)
+                        bitmap = bm
+                    } else if (thumbCache == null) {
+                        isError = true
+                    }
+                } catch (e: Exception) {
+                    AppLogger.d("SMB-WARN", "preview error: ${e.message}")
+                    if (thumbCache == null) isError = true
+                } finally {
+                    try { stream.close() } catch (_: Exception) { }
+                }
             }
-            val bm = BitmapFactory.decodeStream(buffered, null, opts)
-            if (bm != null) {
-                AppLogger.d("SMB", "preview done: ${fileInfo.name} ${bm.width}x${bm.height} sample=$sample")
-                bitmap = bm
-            } else if (thumbCache == null) {
-                AppLogger.d("SMB-WARN", "preview decode failed: ${fileInfo.name}")
-                isError = true
-            }
-        } catch (e: Exception) {
-            AppLogger.d("SMB-WARN", "preview error: ${e.message}")
-            if (thumbCache == null) isError = true
-        } finally {
-            try { stream.close() } catch (_: Exception) { }
+        } catch (_: CancellationException) {
+            AppLogger.d("SMB", "preview timeout/cancelled: ${fileInfo.name}")
+            if (bitmap == null) isError = true
         }
     }
 

@@ -295,7 +295,21 @@ fun ZoomableImage3(
                         try {
                             val drawable = withContext(Dispatchers.IO) {
                                 val source = ImageDecoder.createSource(iv.context.contentResolver, uri)
-                                ImageDecoder.decodeDrawable(source)
+                                // ★ 降采样到 1920px 最大边，防止大图 OOM
+                                val maxDim = 1920
+                                ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+                                    val ratio = min(
+                                        maxDim.toFloat() / maxOf(info.size.width, info.size.height),
+                                        1f
+                                    )
+                                    if (ratio < 1f) {
+                                        decoder.setTargetSize(
+                                            (info.size.width * ratio).toInt(),
+                                            (info.size.height * ratio).toInt()
+                                        )
+                                        AppLogger.d("Zoom", "downsample: ${info.size.width}x${info.size.height} → ${(info.size.width*ratio).toInt()}x${(info.size.height*ratio).toInt()}")
+                                    }
+                                }
                             }
                             // 已回主线程 — 检查 URI 是否已变（防异步竞争）
                             if (iv.tag != loadUri) return@launch

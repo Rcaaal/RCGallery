@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -89,6 +90,9 @@ object SmbThumbnailLoader {
     // ── 磁盘缓存目录 ──
     private var diskCacheDir: File? = null
 
+    // ── 预览缓存（屏幕分辨率采样图，CX 式 temp/SMB/ 本地缓存）──
+    private var previewCacheDir: File? = null
+
     /**
      * 初始化磁盘缓存目录。
      * 同时清理所有 SMB 相关缓存（播放缓存等），防止膨胀。
@@ -99,6 +103,11 @@ object SmbThumbnailLoader {
         val dir = File(appCtx.cacheDir, "smb_thumb_cache")
         if (!dir.exists()) dir.mkdirs()
         diskCacheDir = dir
+
+        // 初始化预览缓存目录（CX 式：本地缓存屏幕分辨率采样图，秒开预览）
+        val previewDir = File(appCtx.cacheDir, "smb_preview_cache")
+        if (!previewDir.exists()) previewDir.mkdirs()
+        previewCacheDir = previewDir
 
         // 清理 smb_play_cache（完整视频缓存，没有大小限制，易膨胀）
         val playCacheDir = File(appCtx.cacheDir, "smb_play_cache")
@@ -739,5 +748,85 @@ object SmbThumbnailLoader {
             }
             return BitmapFactory.decodeFile(file.absolutePath, opts)
         } catch (_: Exception) { return null }
+    }
+
+    // ══════════════════════════════════════
+    //  预览缓存（CX 式本地缓存屏幕分辨率采样图）
+    // ══════════════════════════════════════
+
+    /**
+     * 从预览缓存读取屏幕分辨率采样图。
+     * CX 的 cache/temp/SMB/ 等价物。
+     */
+    fun getPreviewCacheBitmap(url: String): Bitmap? {
+        val dir = previewCacheDir ?: return null
+        val file = File(dir, urlHash(url))
+        if (!file.exists()) return null
+        try {
+            val opts = BitmapFactory.Options().apply {
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            return BitmapFactory.decodeFile(file.absolutePath, opts)
+        } catch (_: Exception) {
+            file.delete()
+            return null
+        }
+    }
+
+    /**
+     * 将屏幕分辨率采样图存入预览缓存。
+     * 与 CX 的 cache/temp/SMB/ 行为一致——存 JPEG quality=90。
+     */
+    fun savePreviewCache(url: String, bitmap: Bitmap) {
+        val dir = previewCacheDir ?: return
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, urlHash(url))
+        if (file.exists()) return
+        try {
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                out.flush()
+            }
+        } catch (_: Exception) { }
+    }
+
+    /**
+     * 备份预缓存一张图片：流式解码到屏幕分辨率后写入预览缓存。
+     * 在 Phase 2 或文件夹加载完成后后台调用。
+     */
+    suspend fun precachePreview(url: String, fileSize: Long = 0) = withContext(Dispatchers.IO) {
+        val dir = previewCacheDir ?: return@withContext
+        val cacheFile = File(dir, urlHash(url))
+        if (cacheFile.exists()) return@withContext // 已缓存
+
+        val repo = SmbRepository.getInstance()
+        val streamResult = repo.getInputStream(url)
+        val stream = streamResult.getOrNull() ?: return@withContext
+        try {
+            val buffered = BufferedInputStream(stream, 256 * 1024)
+            buffered.mark(256 * 1024)
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeStream(buffered, null, boundsOpts)
+            buffered.reset()
+            if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return@withContext
+
+            var sample = 1
+            while (boundsOpts.outWidth / sample > 1080 || boundsOpts.outHeight / sample > 1080) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val bm = BitmapFactory.decodeStream(buffered, null, opts)
+            if (bm != null) {
+                FileOutputStream(cacheFile).use { out ->
+                    bm.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                }
+                bm.recycle()
+            }
+        } finally {
+            try { stream.close() } catch (_: Exception) { }
+        }
     }
 }
