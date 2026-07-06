@@ -158,6 +158,15 @@ fun PreviewScreen(
             currentMediaTags = emptyList()
         }
     }
+    // 打开 TAG 对话框时刷新一次（对话框内增删后关闭再打开，看到最新状态）
+    LaunchedEffect(showMediaTagDialog) {
+        if (showMediaTagDialog) {
+            val item = currentItem
+            if (item != null) {
+                currentMediaTags = viewModel.getMediaTags(item.filePath)
+            }
+        }
+    }
 
     // ── 直接永久删除 launcher（不经过回收站，物理删除）──
     val permanentDeleteLauncher = rememberLauncherForActivityResult(

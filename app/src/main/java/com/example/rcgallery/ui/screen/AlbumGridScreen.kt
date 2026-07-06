@@ -1082,65 +1082,61 @@ private class ListVH private constructor(
         val tagStrip = itemView.findViewWithTag<android.widget.HorizontalScrollView>("album_tag_strip")
         if (tagStrip != null) {
             val tags = albumTagsMap[item.directoryPath] ?: emptyList()
-            if (tags.isNotEmpty()) {
-                val tagRow = tagStrip.getChildAt(0) as? LinearLayout
-                    ?: LinearLayout(itemView.context).also {
-                        tagStrip.addView(it, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ))
-                    }
-                tagRow.removeAllViews()
-                val ctx = itemView.context
-                val density = ctx.resources.displayMetrics.density
-                tags.forEach { tag ->
-                    val chip = TextView(ctx).apply {
-                        text = tag.name
-                        textSize = 10f
-                        setTextColor(android.graphics.Color.WHITE)
-                        setBackgroundDrawable(
-                            android.graphics.drawable.GradientDrawable().apply {
-                                setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                                setCornerRadius(6 * density)
-                                setColor(android.graphics.Color.argb(180, 100, 140, 255))
-                            }
-                        )
-                        setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
-                        maxLines = 1
-                        isClickable = true
-                        focusable = android.view.View.FOCUSABLE
-                        setOnClickListener { onManageTags(item) }
-                    }
-                    tagRow.addView(chip, LinearLayout.LayoutParams(
+            val tagRow = tagStrip.getChildAt(0) as? LinearLayout
+                ?: LinearLayout(itemView.context).also {
+                    tagStrip.addView(it, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
+                    ))
                 }
-                // + 按钮
-                val addChip = TextView(ctx).apply {
-                    text = "+"
-                    textSize = 12f
+            tagRow.removeAllViews()
+            val ctx = itemView.context
+            val density = ctx.resources.displayMetrics.density
+            tags.forEach { tag ->
+                val chip = TextView(ctx).apply {
+                    text = tag.name
+                    textSize = 10f
                     setTextColor(android.graphics.Color.WHITE)
                     setBackgroundDrawable(
                         android.graphics.drawable.GradientDrawable().apply {
-                            setShape(android.graphics.drawable.GradientDrawable.OVAL)
-                            setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                            setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                            setCornerRadius(6 * density)
+                            setColor(android.graphics.Color.argb(180, 100, 140, 255))
                         }
                     )
-                    gravity = android.view.Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(
-                        (20 * density).toInt(),
-                        (20 * density).toInt()
-                    ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                    setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
+                    maxLines = 1
                     isClickable = true
                     focusable = android.view.View.FOCUSABLE
                     setOnClickListener { onManageTags(item) }
                 }
-                tagRow.addView(addChip)
-                tagStrip.visibility = android.view.View.VISIBLE
-            } else {
-                tagStrip.visibility = android.view.View.GONE
+                tagRow.addView(chip, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
             }
+            // + 按钮（始终显示，无标签时也作为入口）
+            val addChip = TextView(ctx).apply {
+                text = "+"
+                textSize = 12f
+                setTextColor(android.graphics.Color.WHITE)
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                    }
+                )
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    (20 * density).toInt(),
+                    (20 * density).toInt()
+                ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                isClickable = true
+                focusable = android.view.View.FOCUSABLE
+                setOnClickListener { onManageTags(item) }
+            }
+            tagRow.addView(addChip)
+            tagStrip.visibility = android.view.View.VISIBLE
         }
     }
 }
