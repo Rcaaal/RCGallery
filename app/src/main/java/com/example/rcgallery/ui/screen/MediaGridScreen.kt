@@ -271,50 +271,12 @@ fun MediaGridScreen(
                     topBar = {
                         TopAppBar(
                             title = {
-                                Column(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalArrangement = Arrangement.Center
-                                ) {
-                                    Text(
-                                        text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
-                                               else if (albumName.isNotEmpty()) albumName else "所有文件",
-                                        maxLines = 1,
-                                        modifier = if (!isMediaMultiSelect) Modifier.clickable { showAlbumRenameDialog = true } else Modifier
-                                    )
-                                    // ── 相册 TAG 栏（复用列表模式 chip 设计）──
-                                    if (!isMediaMultiSelect) {
-                                        Row(
-                                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            // + 按钮
-                                            Surface(
-                                                shape = CircleShape,
-                                                color = Color(0xFF64B464).copy(alpha = 0.7f),
-                                                modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
-                                            ) {
-                                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                    Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                                                }
-                                            }
-                                            currentAlbumTags.forEach { tag ->
-                                                Surface(
-                                                    shape = RoundedCornerShape(4.dp),
-                                                    color = Color(0xFF6468B4).copy(alpha = 0.7f),
-                                                ) {
-                                                    Text(
-                                                        tag.name,
-                                                        fontSize = 9.sp,
-                                                        color = Color.White,
-                                                        maxLines = 1,
-                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                Text(
+                                    text = if (isMediaMultiSelect) "已选 ${selectedMediaUris.size} 项"
+                                           else if (albumName.isNotEmpty()) albumName else "所有文件",
+                                    maxLines = 1,
+                                    modifier = if (!isMediaMultiSelect) Modifier.clickable { showAlbumRenameDialog = true } else Modifier
+                                )
                             },
                             navigationIcon = {
                                 if (isMediaMultiSelect) {
@@ -497,6 +459,27 @@ fun MediaGridScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            // ── 相册 TAG 栏（+ 按钮 + chips，自然排布）──
+                            if (!isMediaMultiSelect && albumDirectoryPath.isNotEmpty()) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = Color(0xFF64B464).copy(alpha = 0.7f),
+                                    modifier = Modifier.size(16.dp).clickable { showAlbumTagDialog = true }
+                                ) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text("+", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                currentAlbumTags.forEach { tag ->
+                                    Surface(
+                                        shape = RoundedCornerShape(3.dp),
+                                        color = Color(0xFF6468B4).copy(alpha = 0.7f),
+                                    ) {
+                                        Text(tag.name, fontSize = 9.sp, color = Color.White, maxLines = 1,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                                    }
+                                }
+                            }
                             MediaDisplayModeSelector(
                                 currentMode = mediaDisplayMode,
                                 onSelectMode = { mode ->
@@ -521,7 +504,6 @@ fun MediaGridScreen(
                                     }).apply()
                                 }
                             )
-                        }
                         }
                         // ── 多选 BackHandler ──
                         if (isMediaMultiSelect) {
@@ -550,6 +532,7 @@ fun MediaGridScreen(
                         }
                     }
                 }
+            }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             if (showInertiaSettings) InertiaSettingsPanel(
                 onDismiss = { showInertiaSettings = false },
