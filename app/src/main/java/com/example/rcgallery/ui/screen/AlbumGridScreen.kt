@@ -96,6 +96,15 @@ private infix fun AlbumDisplayMode.isSameAs(other: AlbumDisplayMode): Boolean = 
     else -> false
 }
 
+/** 相册排序模式 */
+private enum class AlbumSortMode(val label: String) {
+    DATE("创建时间"),
+    NAME("相册名"),
+    SIZE("相册大小"),
+    IMAGE_COUNT("图片数量"),
+    VIDEO_COUNT("视频数量")
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlbumGridScreen(
@@ -106,11 +115,45 @@ fun AlbumGridScreen(
     val viewModel: GalleryViewModel = viewModel(context as ComponentActivity)
     val rawAlbums by viewModel.albums.collectAsStateWithLifecycle()
     val starredIds by viewModel.starredBucketIds.collectAsStateWithLifecycle()
-    // 本地排序：星标相册在前
-    val albums = remember(rawAlbums, starredIds) {
-        rawAlbums.sortedByDescending { it.bucketId in starredIds }
-    }
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+
+    // ── 相册显示模式 & 排序模式（持久化，需在 remember(albums) 之前声明）──
+    val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+    var displayMode by remember {
+        val saved = prefs.getString("album_display_mode", "") ?: ""
+        mutableStateOf(when {
+            saved == "list" -> AlbumDisplayMode.List
+            saved.startsWith("grid_") -> {
+                val cols = saved.removePrefix("grid_").toIntOrNull() ?: DEFAULT_GRID_COLUMNS
+                AlbumDisplayMode.Grid(cols)
+            }
+            else -> AlbumDisplayMode.Grid(DEFAULT_GRID_COLUMNS)
+        })
+    }
+    var albumSortMode by remember {
+        val saved = prefs.getString("album_sort_mode", "") ?: ""
+        mutableStateOf(when (saved) {
+            "name" -> AlbumSortMode.NAME
+            "size" -> AlbumSortMode.SIZE
+            "image_count" -> AlbumSortMode.IMAGE_COUNT
+            "video_count" -> AlbumSortMode.VIDEO_COUNT
+            else -> AlbumSortMode.DATE
+        })
+    }
+
+    // 本地排序：星标相册永久置顶，再按当前排序模式排列
+    val albums = remember(rawAlbums, starredIds, albumSortMode) {
+        rawAlbums.sortedWith(
+            compareByDescending<Album> { it.bucketId in starredIds }
+                .then(when (albumSortMode) {
+                    AlbumSortMode.DATE -> compareByDescending { it.dateAdded }
+                    AlbumSortMode.NAME -> compareBy { it.bucketName }
+                    AlbumSortMode.SIZE -> compareByDescending { it.totalSize }
+                    AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
+                    AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
+                })
+        )
+    }
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
@@ -152,6 +195,12 @@ fun AlbumGridScreen(
             DevOverlay(initialShow = true)
         }
     }
+    // ── 设置面板 ──
+    var showInertiaSettings by remember { mutableStateOf(false) }
+    if (showInertiaSettings) InertiaSettingsPanel(
+        onDismiss = { showInertiaSettings = false },
+        onOpenLog = { showInertiaSettings = false; showLogDialog = true }
+    )
 
     // ── 相册重命名状态 ──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
@@ -219,20 +268,6 @@ fun AlbumGridScreen(
         mutableStateOf(checkPermission(context))
     }
 
-    // ── 相册显示模式（持久化：退出重进保留）──
-    val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
-    var displayMode by remember {
-        val saved = prefs.getString("album_display_mode", "") ?: ""
-        mutableStateOf(when {
-            saved == "list" -> AlbumDisplayMode.List
-            saved.startsWith("grid_") -> {
-                val cols = saved.removePrefix("grid_").toIntOrNull() ?: DEFAULT_GRID_COLUMNS
-                AlbumDisplayMode.Grid(cols)
-            }
-            else -> AlbumDisplayMode.Grid(DEFAULT_GRID_COLUMNS)
-        })
-    }
-
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val albumRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
@@ -290,72 +325,28 @@ fun AlbumGridScreen(
                             is AlbumDisplayMode.Grid -> "grid_${mode.columns}"
                         }).apply()
                     },
-                    albumRvRef = albumRvRef
-                )
-            }
-            FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            // ── 齿轮图标 + 下拉菜单（设置 / 日志）──
-            var showGearMenu by remember { mutableStateOf(false) }
-            var showInertiaSettings by remember { mutableStateOf(false) }
-            if (showInertiaSettings) InertiaSettingsPanel(
-                onDismiss = { showInertiaSettings = false },
-                onOpenLog = { showInertiaSettings = false; showLogDialog = true }
-            )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 60.dp, start = 8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xCCFF9800))
-                        .clickable { showGearMenu = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                        contentDescription = "设置",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = showGearMenu,
-                    onDismissRequest = { showGearMenu = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("设置") },
-                        onClick = {
-                            showGearMenu = false
-                            showInertiaSettings = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("日志") },
-                        onClick = {
-                            showGearMenu = false
-                            showLogDialog = true
-                        }
-                    )
-                }
-            }
-            FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
-            // ── 回收站入口按钮（右上角，纯 SVG 图标）──
-            Icon(
-                painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                contentDescription = "回收站",
-                tint = Color.White,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 62.dp, end = 8.dp)
-                    .size(22.dp)
-                    .clickable {
+                    albumRvRef = albumRvRef,
+                    albumSortMode = albumSortMode,
+                    onSelectSort = { mode ->
+                        albumSortMode = mode
+                        prefs.edit().putString("album_sort_mode", when (mode) {
+                            AlbumSortMode.NAME -> "name"
+                            AlbumSortMode.DATE -> "date"
+                            AlbumSortMode.SIZE -> "size"
+                            AlbumSortMode.IMAGE_COUNT -> "image_count"
+                            AlbumSortMode.VIDEO_COUNT -> "video_count"
+                        }).apply()
+                    },
+                    onOpenSettings = { showInertiaSettings = true },
+                    onOpenLog = { showLogDialog = true },
+                    onOpenTrash = {
                         showTrash = true
                         viewModel.loadTrashEntries()
                     }
-            )
+                )
+            }
+            FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
+            FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
             if (selectedAlbumId != null) {
@@ -465,15 +456,65 @@ private fun AlbumGridContent(
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
+    albumSortMode: AlbumSortMode,
+    onSelectSort: (AlbumSortMode) -> Unit,
+    onOpenSettings: () -> Unit = {},
+    onOpenLog: () -> Unit = {},
+    onOpenTrash: () -> Unit = {},
     albumRvRef: MutableState<RecyclerView?>
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("RCGallery") },
+                windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold 已处理状态栏 insets
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
-                )
+                ),
+                actions = {
+                    // ── 齿轮菜单按钮 ──
+                    var showGearMenu by remember { mutableStateOf(false) }
+                    Box(modifier = Modifier.padding(end = 4.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xCCFF9800))
+                                .clickable { showGearMenu = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                                contentDescription = "设置",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showGearMenu,
+                            onDismissRequest = { showGearMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("设置") },
+                                onClick = { showGearMenu = false; onOpenSettings() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("日志") },
+                                onClick = { showGearMenu = false; onOpenLog() }
+                            )
+                        }
+                    }
+
+                    // ── 回收站按钮 ──
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                        contentDescription = "回收站",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clickable { onOpenTrash() }
+                    )
+                }
             )
         }
     ) { padding ->
@@ -536,12 +577,25 @@ private fun AlbumGridContent(
                 },
                 modifier = Modifier.fillMaxSize()
             )
-            // ── 显示模式选择器（悬浮覆盖在 RecyclerView 上方）──
-            DisplayModeSelector(
-                currentMode = displayMode,
-                onSelectMode = onSelectMode,
-                modifier = Modifier.align(Alignment.TopStart)
-            )
+            // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp)
+                    .align(Alignment.TopStart),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                DisplayModeSelector(
+                    currentMode = displayMode,
+                    onSelectMode = onSelectMode
+                )
+                Spacer(Modifier.weight(1f))
+                AlbumSortSelector(
+                    currentSort = albumSortMode,
+                    onSelectSort = onSelectSort
+                )
+            }
         }
     }
 }
@@ -1032,7 +1086,7 @@ private fun DisplayModeSelector(
     val isSelected = { mode: AlbumDisplayMode -> mode isSameAs currentMode }
     var expanded by remember { mutableStateOf(false) }
 
-    Row(modifier = modifier.padding(start = 12.dp, top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         // 列数选择 — 同款 Surface chip 风格
         Box {
             Surface(
@@ -1109,6 +1163,76 @@ private fun DisplayModeSelector(
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
+        }
+    }
+}
+
+// ── 排序方式选择器（同款风格下拉框）──
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AlbumSortSelector(
+    currentSort: AlbumSortMode,
+    onSelectSort: (AlbumSortMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val options = AlbumSortMode.entries.toList()
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            shadowElevation = 4.dp,
+            onClick = { expanded = true }
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+            ) {
+                Text(
+                    text = "排序: ${currentSort.label}",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = "排序方式",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            options.forEach { sortMode ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = sortMode.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (sortMode == currentSort) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelectSort(sortMode)
+                        expanded = false
+                    }
+                )
+            }
         }
     }
 }

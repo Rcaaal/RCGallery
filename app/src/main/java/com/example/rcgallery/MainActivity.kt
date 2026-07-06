@@ -8,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -71,10 +70,9 @@ class MainActivity : ComponentActivity() {
 
                     Scaffold(
                         bottomBar = {
-                            // 固定高度占位，始终存在（防 Scaffold 重测 padding 导致布局偏移）
-                            // 用 alpha 直接切可见性（0ms），不带动画——进相册时 bar 瞬间消失
-                            Box(modifier = Modifier.height(80.dp).alpha(if (showBottomBar) 1f else 0f)) {
-                                NavigationBar(modifier = Modifier.fillMaxSize()) {
+                            // 条件渲染，不占位。嵌套 Scaffold 的 insets 已通过 windowInsets=0 修复
+                            if (showBottomBar) {
+                                NavigationBar(modifier = Modifier.fillMaxWidth().height(80.dp)) {
                                     NavigationBarItem(
                                         icon = { Text("📁") },
                                         label = { Text("本地") },

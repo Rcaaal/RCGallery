@@ -34,7 +34,8 @@ class MediaRepository(private val context: Context) {
                 imageCount = b.imageCount,
                 videoCount = b.videoCount,
                 gifCount = b.gifCount,
-                directoryPath = b.directoryPath
+                directoryPath = b.directoryPath,
+                dateAdded = b.latestDate
             )
         }.sortedByDescending { it.count }
     }

@@ -107,6 +107,18 @@ fun MediaGridScreen(
         })
     }
 
+    // ── 媒体排序模式（持久化）──
+    var mediaSortMode by remember {
+        val saved = mediaPrefs.getString("media_sort_mode", "") ?: ""
+        mutableStateOf(when (saved) {
+            "name" -> MediaSortMode.NAME
+            "size" -> MediaSortMode.SIZE
+            "image_size" -> MediaSortMode.IMAGE_SIZE
+            "video_size" -> MediaSortMode.VIDEO_SIZE
+            else -> MediaSortMode.DATE
+        })
+    }
+
     // ── 相册重命名 ──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
     val renameContext = LocalContext.current
@@ -187,9 +199,20 @@ fun MediaGridScreen(
             }
         }
     }
-    // 星标排序：星标项排在前面
-    val sortedItems = remember(filteredItems, starredMediaUris) {
-        filteredItems.sortedByDescending { it.uri.toString() in starredMediaUris }
+    // 星标排序：星标永久置顶 + 按当前排序模式排列
+    val sortedItems = remember(filteredItems, starredMediaUris, mediaSortMode) {
+        filteredItems.sortedWith(
+            compareByDescending<com.example.rcgallery.model.MediaItem> { it.uri.toString() in starredMediaUris }
+                .then(when (mediaSortMode) {
+                    MediaSortMode.DATE -> compareByDescending { it.dateAdded }
+                    MediaSortMode.NAME -> compareBy { it.fileName }
+                    MediaSortMode.SIZE -> compareByDescending { it.size }
+                    MediaSortMode.IMAGE_SIZE -> compareByDescending<com.example.rcgallery.model.MediaItem> { it.isImage }
+                        .thenByDescending { it.size }
+                    MediaSortMode.VIDEO_SIZE -> compareByDescending<com.example.rcgallery.model.MediaItem> { it.isVideo }
+                        .thenByDescending { it.size }
+                })
+        )
     }
 
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
@@ -220,6 +243,7 @@ fun MediaGridScreen(
                                 )
                             },
                             navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回") } },
+                            windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold 已处理状态栏 insets
                             colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                         )
                     }
@@ -302,19 +326,40 @@ fun MediaGridScreen(
                             },
                             modifier = Modifier.fillMaxSize().padding(padding)
                         )
-                        MediaDisplayModeSelector(
-                            currentMode = mediaDisplayMode,
-                            onSelectMode = { mode ->
-                                mediaDisplayMode = mode
-                                mediaPrefs.edit().putString("media_display_mode", when (mode) {
-                                    is MediaDisplayMode.List -> "list"
-                                    is MediaDisplayMode.Grid -> "grid_${mode.columns}"
-                                }).apply()
-                            },
+                        // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
+                        Row(
                             modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(top = padding.calculateTopPadding())
-                        )
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding())
+                                .align(Alignment.TopStart),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            MediaDisplayModeSelector(
+                                currentMode = mediaDisplayMode,
+                                onSelectMode = { mode ->
+                                    mediaDisplayMode = mode
+                                    mediaPrefs.edit().putString("media_display_mode", when (mode) {
+                                        is MediaDisplayMode.List -> "list"
+                                        is MediaDisplayMode.Grid -> "grid_${mode.columns}"
+                                    }).apply()
+                                }
+                            )
+                            Spacer(Modifier.weight(1f))
+                            MediaSortSelector(
+                                currentSort = mediaSortMode,
+                                onSelectSort = { mode ->
+                                    mediaSortMode = mode
+                                    mediaPrefs.edit().putString("media_sort_mode", when (mode) {
+                                        MediaSortMode.DATE -> "date"
+                                        MediaSortMode.NAME -> "name"
+                                        MediaSortMode.SIZE -> "size"
+                                        MediaSortMode.IMAGE_SIZE -> "image_size"
+                                        MediaSortMode.VIDEO_SIZE -> "video_size"
+                                    }).apply()
+                                }
+                            )
+                        }
                         }
                         }
                     }
@@ -447,6 +492,15 @@ private enum class MediaFilterType(val label: String) {
 private sealed class MediaDisplayMode {
     data class Grid(val columns: Int) : MediaDisplayMode()
     data object List : MediaDisplayMode()
+}
+
+/** 媒体排序模式 */
+private enum class MediaSortMode(val label: String) {
+    DATE("时间"),
+    NAME("文件名"),
+    SIZE("文件大小"),
+    IMAGE_SIZE("图片大小"),
+    VIDEO_SIZE("视频大小")
 }
 
 private const val DEFAULT_MEDIA_GRID_COLUMNS = 4
@@ -863,7 +917,7 @@ private fun MediaDisplayModeSelector(
     val isSelected = { mode: MediaDisplayMode -> mode isSameAs currentMode }
     var expanded by remember { mutableStateOf(false) }
 
-    Row(modifier = modifier.padding(start = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box {
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -938,6 +992,76 @@ private fun MediaDisplayModeSelector(
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
+        }
+    }
+}
+
+// ── 媒体排序方式选择器（同款风格下拉框）──
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MediaSortSelector(
+    currentSort: MediaSortMode,
+    onSelectSort: (MediaSortMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val options = MediaSortMode.entries.toList()
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            shadowElevation = 4.dp,
+            onClick = { expanded = true }
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+            ) {
+                Text(
+                    text = "排序: ${currentSort.label}",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = "排序方式",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            options.forEach { sortMode ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = sortMode.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (sortMode == currentSort) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        onSelectSort(sortMode)
+                        expanded = false
+                    }
+                )
+            }
         }
     }
 }

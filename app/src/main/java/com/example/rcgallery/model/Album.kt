@@ -14,5 +14,6 @@ data class Album(
     val imageCount: Int = 0,
     val videoCount: Int = 0,
     val gifCount: Int = 0,
-    val directoryPath: String = ""
+    val directoryPath: String = "",
+    val dateAdded: Long = 0L   // 相册中最新的文件创建时间（排序用）
 )
