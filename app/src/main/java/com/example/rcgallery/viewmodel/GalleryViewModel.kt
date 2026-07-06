@@ -20,6 +20,7 @@ import com.example.rcgallery.model.TrashEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,7 +28,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.launch
 import java.io.File
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -582,7 +582,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** 为相册添加 TAG，同时赋予相册内所有媒体文件 */
     fun addAlbumTag(directoryPath: String, tagName: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val tag = tagRepository.getOrCreateTag(tagName)
             tagRepository.addTagToTarget(tag.id, tagRepository.albumKey(directoryPath), TagRepository.TYPE_ALBUM)
             // 同时赋予相册内所有文件
@@ -598,7 +598,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** 从相册移除 TAG，同时清理相册内所有文件的此 TAG */
     fun removeAlbumTag(directoryPath: String, tagId: Long) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             tagRepository.removeTagFromTarget(tagId, tagRepository.albumKey(directoryPath))
             // 同时清理相册内所有文件的此TAG
             val album = _albums.value.find { it.directoryPath == directoryPath } ?: return@launch
@@ -626,7 +626,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** 为媒体文件添加 TAG */
     fun addMediaTag(filePath: String, tagName: String): kotlinx.coroutines.Job {
-        return viewModelScope.launch {
+        return viewModelScope.launch(Dispatchers.IO) {
             val tag = tagRepository.getOrCreateTag(tagName)
             tagRepository.addTagToTarget(tag.id, tagRepository.mediaKey(filePath), TagRepository.TYPE_MEDIA)
         }
@@ -634,7 +634,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** 从媒体文件移除 TAG */
     fun removeMediaTag(filePath: String, tagId: Long): kotlinx.coroutines.Job {
-        return viewModelScope.launch {
+        return viewModelScope.launch(Dispatchers.IO) {
             tagRepository.removeTagFromTarget(tagId, tagRepository.mediaKey(filePath))
         }
     }
