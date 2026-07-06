@@ -611,7 +611,11 @@ private class AlbumGridAdapter(
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
     var starredIds: Set<String> = emptySet()
 
+    init { setHasStableIds(true) }
+
     override fun getItemCount() = items.size
+
+    override fun getItemId(position: Int): Long = items.getOrNull(position)?.bucketId?.hashCode()?.toLong() ?: 0L
 
     override fun getItemViewType(position: Int): Int {
         return if (currentMode is AlbumDisplayMode.List) VIEW_TYPE_LIST else VIEW_TYPE_GRID

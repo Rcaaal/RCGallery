@@ -520,7 +520,11 @@ private class SimpleGridAdapter(
     var starredUris: Set<String> = emptySet()
     var currentMode: MediaDisplayMode = MediaDisplayMode.Grid(DEFAULT_MEDIA_GRID_COLUMNS)
 
+    init { setHasStableIds(true) }
+
     override fun getItemCount() = items.size
+
+    override fun getItemId(position: Int): Long = items.getOrNull(position)?.id ?: 0L
 
     override fun getItemViewType(position: Int): Int {
         return if (currentMode is MediaDisplayMode.List) VIEW_TYPE_LIST else VIEW_TYPE_GRID
