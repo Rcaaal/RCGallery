@@ -228,6 +228,7 @@ fun MediaGridScreen(
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
+            var showInertiaSettings by remember { mutableStateOf(false) }
             if (isLoadingAlbum) {
                 // 相册切换/首次加载→显示 loading，防止旧数据闪烁
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -244,7 +245,40 @@ fun MediaGridScreen(
                             },
                             navigationIcon = { TextButton(onClick = onBackClick) { Text("← 返回") } },
                             windowInsets = WindowInsets(0, 0, 0, 0),  // 外层 Scaffold 已处理状态栏 insets
-                            colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                            actions = {
+                                var showGearMenu by remember { mutableStateOf(false) }
+                                Box(modifier = Modifier.padding(end = 4.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xCCFF9800))
+                                            .clickable { showGearMenu = true },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                                            contentDescription = "设置",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = showGearMenu,
+                                        onDismissRequest = { showGearMenu = false }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("设置") },
+                                            onClick = { showGearMenu = false; showInertiaSettings = true }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("日志") },
+                                            onClick = { showGearMenu = false; showLogDialog = true }
+                                        )
+                                    }
+                                }
+                            }
                         )
                     }
                 ) { padding ->
@@ -365,60 +399,17 @@ fun MediaGridScreen(
                     }
                 }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
-            // ── 齿轮图标 + 下拉菜单（设置 / 日志）──
-            var showGearMenu by remember { mutableStateOf(false) }
-            var showInertiaSettings by remember { mutableStateOf(false) }
             if (showInertiaSettings) InertiaSettingsPanel(
                 onDismiss = { showInertiaSettings = false },
                 onOpenLog = { showInertiaSettings = false; showLogDialog = true }
             )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(top = 60.dp, start = 8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xCCFF9800))
-                        .clickable { showGearMenu = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                        contentDescription = "设置",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = showGearMenu,
-                    onDismissRequest = { showGearMenu = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("设置") },
-                        onClick = {
-                            showGearMenu = false
-                            showInertiaSettings = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("日志") },
-                        onClick = {
-                            showGearMenu = false
-                            showLogDialog = true
-                        }
-                    )
-                }
-            }
 
             // ── 媒体类型过滤按钮（底部居中，略抬上）──
             if (availableTypes.isNotEmpty()) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 80.dp)
+                        .padding(bottom = 12.dp)
                         .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
