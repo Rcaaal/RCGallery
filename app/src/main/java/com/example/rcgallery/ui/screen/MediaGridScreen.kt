@@ -333,14 +333,8 @@ fun MediaGridScreen(
                                 val adapter = rv.adapter as SimpleGridAdapter
                                 val prevMode = adapter.currentMode
                                 val currentMode = mediaDisplayMode
-                                val prevStarred = adapter.starredUris
                                 adapter.items = sortedItems
                                 adapter.starredUris = starredMediaUris
-                                if (prevStarred != starredMediaUris) {
-                                    for (i in 0 until adapter.itemCount) {
-                                        adapter.notifyItemChanged(i, MEDIA_STAR_PAYLOAD)
-                                    }
-                                }
                                 if (prevMode != currentMode) {
                                     adapter.currentMode = currentMode
                                     val spanCount = when (currentMode) {
@@ -501,9 +495,6 @@ private const val LIST_THUMB_SIZE_DP = 48
 private const val VIEW_TYPE_GRID = 0
 private const val VIEW_TYPE_LIST = 1
 
-/** Payload for media star-only partial bind */
-private val MEDIA_STAR_PAYLOAD = Any()
-
 /** 星标缩放因子：根据 Grid 列数调整，列数越多星标越小 */
 private fun getMediaStarScale(columns: Int): Float = when (columns) {
     2 -> 1.15f
@@ -553,18 +544,6 @@ private class SimpleGridAdapter(
             is GridVH -> holder.bind(item, position, starredUris, columns)
             is ListVH -> holder.bind(item, position, starredUris)
         }
-    }
-
-    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
-        if (payloads.isNotEmpty()) {
-            val item = items.getOrNull(position) ?: return
-            when (holder) {
-                is GridVH -> holder.bindStarOnly(item.uri.toString(), starredUris)
-                is ListVH -> holder.bindStarOnly(item.uri.toString(), starredUris)
-            }
-            return
-        }
-        onBindViewHolder(holder, position)
     }
 
     // ── Grid ViewHolder ──
@@ -706,15 +685,6 @@ private class SimpleGridAdapter(
                 width = (18 * density * scale).toInt()
                 height = (18 * density * scale).toInt()
             }
-        }
-
-        fun bindStarOnly(uriStr: String, starredUris: Set<String>) {
-            val isStarred = uriStr in starredUris
-            starContainer.isSelected = isStarred
-            starIv.colorFilter = android.graphics.PorterDuffColorFilter(
-                if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
-                android.graphics.PorterDuff.Mode.SRC_IN
-            )
         }
     }
 
@@ -876,15 +846,6 @@ private class SimpleGridAdapter(
                     append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.size))
                 }
             }
-        }
-
-        fun bindStarOnly(uriStr: String, starredUris: Set<String>) {
-            val isStarred = uriStr in starredUris
-            starContainer.isSelected = isStarred
-            starIv.colorFilter = android.graphics.PorterDuffColorFilter(
-                if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
-                android.graphics.PorterDuff.Mode.SRC_IN
-            )
         }
     }
 }

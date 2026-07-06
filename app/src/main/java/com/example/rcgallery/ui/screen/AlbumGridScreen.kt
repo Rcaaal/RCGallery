@@ -550,7 +550,6 @@ private fun AlbumGridContent(
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
                     val prevMode = adapter.currentMode
-                    val prevStarred = adapter.starredIds
                     adapter.items = albums
                     adapter.starredIds = starredIds
                     if (prevMode != displayMode) {
@@ -566,12 +565,9 @@ private fun AlbumGridContent(
                         adapter.notifyDataSetChanged()
                         scroller.refresh()
                     } else {
-                        // 仅星标变化时先用 payload 局部更新颜色（即时反馈），再全量 rebind 排序
-                        if (prevStarred != starredIds) {
-                            for (i in 0 until adapter.itemCount) {
-                                adapter.notifyItemChanged(i, STAR_PAYLOAD)
-                            }
-                        }
+                        // items 或星标变化：星标变化会触发排序重排（星标项跳到顶部），
+                        // payload bind 在 position i 读的是新 item、ViewHolder 却是旧 item 封面 → 错误中间态
+                        // 直接用 DataSetChanged，不浪费 payload
                         adapter.notifyDataSetChanged()
                     }
                 },
@@ -604,8 +600,6 @@ private fun AlbumGridContent(
 //  RecyclerView Adapter — Grid / List 模式
 // ══════════════════════════════════════
 
-/** Payload for star-only partial bind — skips image/text reload */
-private val STAR_PAYLOAD = Any()
 
 private class AlbumGridAdapter(
     var items: List<Album>,
@@ -641,19 +635,6 @@ private class AlbumGridAdapter(
             is GridVH -> holder.bind(item, position, starredIds, columns)
             is ListVH -> holder.bind(item, position, starredIds)
         }
-    }
-
-    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
-        if (payloads.isNotEmpty()) {
-            // Star-only partial bind: 不从 items[position] 读数据，
-            // 而是从 holder 已有 tag 读 bucketId，避免 dispatchUpdatesTo 期间 position 漂移
-            when (holder) {
-                is GridVH -> holder.bindStarOnly(starredIds)
-                is ListVH -> holder.bindStarOnly(starredIds)
-            }
-            return
-        }
-        onBindViewHolder(holder, position)
     }
 
 }
@@ -859,16 +840,6 @@ private class GridVH private constructor(
             height = (18 * density * scale).toInt()
         }
     }
-
-    /** 星标局部绑定：不从参数读 item，而从 starContainer 已有 tag 读 bucketId */
-    fun bindStarOnly(starredIds: Set<String>) {
-        val bucketId = starContainer.tag as? String ?: return
-        val isStarred = bucketId in starredIds
-        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
-            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
-            android.graphics.PorterDuff.Mode.SRC_IN
-        )
-    }
 }
 
 // ── List ViewHolder ──
@@ -1055,19 +1026,9 @@ private class ListVH private constructor(
             android.graphics.PorterDuff.Mode.SRC_IN
         )
     }
-
-    /** 星标局部绑定：不从参数读 item，而从 starContainer 已有 tag 读 bucketId */
-    fun bindStarOnly(starredIds: Set<String>) {
-        val bucketId = starContainer.tag as? String ?: return
-        val isStarred = bucketId in starredIds
-        starIv.colorFilter = android.graphics.PorterDuffColorFilter(
-            if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
-            android.graphics.PorterDuff.Mode.SRC_IN
-        )
-    }
 }
 
-// ── 显示模式选择器（下拉框，代替之前的横向按钮）──
+// ── 显示模式选择器
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
