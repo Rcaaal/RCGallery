@@ -105,6 +105,7 @@ dependencies {
 
     // Media3 — 视频播放 + PiP MediaSession + SMB 缓存
     implementation(libs.media3.exoplayer)
+    implementation(libs.media3.ffmpeg.decoder)  // AV1 + WMV (Jellyfin FFmpeg 软解)
     implementation(libs.media3.ui)
     implementation(libs.media3.session)
     // media3-datasource 包含 SimpleCache/CacheDataSource 等缓存类
