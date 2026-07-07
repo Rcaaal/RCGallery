@@ -1016,6 +1016,29 @@ private class SimpleGridAdapter(
     ) : RecyclerView.ViewHolder(itemView) {
 
         private var currentItem: com.example.rcgallery.model.MediaItem? = null
+        private val tagRow: LinearLayout = itemView.findViewWithTag("media_tag_row")
+        private val tagChips: Array<TextView> = Array(8) { idx ->
+            val ctx = itemView.context
+            val density = ctx.resources.displayMetrics.density
+            TextView(ctx).apply {
+                textSize = 10f
+                setTextColor(android.graphics.Color.WHITE)
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius(6 * density)
+                        setColor(android.graphics.Color.argb(180, 100, 140, 255))
+                    }
+                )
+                setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
+                maxLines = 1
+                visibility = android.view.View.GONE
+                tagRow.addView(this, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 0, (4 * density).toInt(), 0) })
+            }
+        }
 
         init {
             itemView.setOnClickListener {
@@ -1195,41 +1218,22 @@ private class SimpleGridAdapter(
                 }
             }
             // ── TAG 行 ──
-            val tagRow = itemView.findViewWithTag<LinearLayout>("media_tag_row")
-            if (tagRow != null) {
-                val tags = mediaTagsMap[item.filePath] ?: emptyList()
-                // 保留 index 0（+ 按钮），移除后面的旧 chip
-                while (tagRow.childCount > 1) tagRow.removeViewAt(tagRow.childCount - 1)
-                val ctx = itemView.context
-                val density = ctx.resources.displayMetrics.density
+            val tags = mediaTagsMap[item.filePath] ?: emptyList()
 
-                // + 按钮点击
-                (tagRow.getChildAt(0) as? TextView)?.setOnClickListener { onManageTags(item) }
+            // + 按钮点击
+            (tagRow.getChildAt(0) as? TextView)?.setOnClickListener { onManageTags(item) }
 
-                // 标签 chips（纯显示，不拦截点击）
-                tags.forEach { tag ->
-                    val chip = TextView(ctx).apply {
-                        text = tag.name
-                        textSize = 10f
-                        setTextColor(android.graphics.Color.WHITE)
-                        setBackgroundDrawable(
-                            android.graphics.drawable.GradientDrawable().apply {
-                                setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                                setCornerRadius(6 * density)
-                                setColor(android.graphics.Color.argb(180, 100, 140, 255))
-                            }
-                        )
-                        setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
-                        maxLines = 1
-                        // 不加 click listener → 不拦截点击，事件传到 root → 打开媒体项
-                    }
-                    tagRow.addView(chip, LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, 0, (4 * density).toInt(), 0) })
-                }
-                tagRow.visibility = android.view.View.VISIBLE
+            // 预建 chip：只改 text 和 visibility，不新建 View
+            tags.forEachIndexed { i, tag ->
+                val chip = tagChips.getOrNull(i) ?: return@forEachIndexed
+                chip.text = tag.name
+                chip.visibility = android.view.View.VISIBLE
             }
+            // 隐藏多余的 chip
+            for (i in tags.size until tagChips.size) {
+                tagChips[i].visibility = android.view.View.GONE
+            }
+            tagRow.visibility = android.view.View.VISIBLE
         }
     }
 }
