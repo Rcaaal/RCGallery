@@ -42,6 +42,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
@@ -160,13 +161,18 @@ fun AlbumGridScreen(
         )
     }
 
-    // ── 日期分组视图状态 ──
-    var isDateView by remember { mutableStateOf(false) }
+    // ── 日期分组视图状态（持久化）──
+    var isDateView by remember {
+        mutableStateOf(prefs.getBoolean("date_view", false))
+    }
     val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
     var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
-    // 排序/切换标签退出日期视图时，如果 Preview 开着，恢复底部导航栏
+    // 持久化恢复或切换标签回来时，日期视图要加载全量数据
     LaunchedEffect(isDateView) {
-        if (!isDateView && selectedDatePhotoIndex >= 0) {
+        if (isDateView) {
+            viewModel.loadAllMedia()
+        } else if (selectedDatePhotoIndex >= 0) {
+            // 退出日期视图时若有 Preview 开着，恢复底部导航栏
             selectedDatePhotoIndex = -1
             onAlbumActiveChanged(false)
         }
@@ -370,6 +376,7 @@ fun AlbumGridScreen(
                     isDateView = isDateView,
                     onToggleDateView = {
                         isDateView = !isDateView
+                        prefs.edit().putBoolean("date_view", isDateView).apply()
                         if (isDateView) viewModel.loadAllMedia()
                     },
                     allDateMediaItems = allMediaItems,
@@ -818,12 +825,11 @@ private fun AlbumGridContent(
                 DateGroupRecyclerView(
                     items = dateViewItems,
                     columns = columns,
-                    onClick = { mediaItem ->
+                    onClick = { mediaItem, allMediaIdx ->
                         if (isDateMultiSelect) {
                             toggleDateMediaSelection(mediaItem.filePath)
                         } else {
-                            val idx = allDateMediaItems.indexOf(mediaItem)
-                            if (idx >= 0) onDatePhotoClick(idx)
+                            onDatePhotoClick(allMediaIdx)
                         }
                     },
                     onLongClick = { mediaItem ->
@@ -1705,14 +1711,14 @@ private fun DateButton(
 /** 日期分组视图的单个条目 */
 private sealed class DateViewItem {
     data class Header(val label: String) : DateViewItem()
-    data class Media(val item: MediaItem) : DateViewItem()
+    data class Media(val item: MediaItem, val allMediaIndex: Int = -1) : DateViewItem()
 }
 
 /** 将全部媒体项按 dateAdded 日期分组，生成 [DateViewItem] 扁平列表 */
 private fun buildDateViewItems(allItems: List<MediaItem>): List<DateViewItem> {
     if (allItems.isEmpty()) return emptyList()
     val cal = java.util.Calendar.getInstance()
-    val grouped = allItems.groupBy { item ->
+    val grouped = allItems.withIndex().groupBy { (_, item) ->
         cal.timeInMillis = item.dateAdded * 1000L
         val y = cal.get(java.util.Calendar.YEAR)
         val m = cal.get(java.util.Calendar.MONTH)
@@ -1721,8 +1727,10 @@ private fun buildDateViewItems(allItems: List<MediaItem>): List<DateViewItem> {
     }
     return grouped.entries
         .sortedByDescending { it.key }
-        .flatMap { (dateKey, items) ->
-            listOf(DateViewItem.Header(formatDateLabel(dateKey))) + items.map { DateViewItem.Media(it) }
+        .flatMap { (dateKey, entries) ->
+            listOf(DateViewItem.Header(formatDateLabel(dateKey))) + entries.map { (idx, item) ->
+                DateViewItem.Media(item, allMediaIndex = idx)
+            }
         }
 }
 
@@ -1756,7 +1764,7 @@ private fun formatDateLabel(dateKey: String): String {
 private fun DateGroupRecyclerView(
     items: List<DateViewItem>,
     columns: Int,
-    onClick: (MediaItem) -> Unit,
+    onClick: (MediaItem, allMediaIndex: Int) -> Unit,
     onLongClick: (MediaItem) -> Unit = {},
     selectedPaths: Set<String> = emptySet(),
     onDragSelectRange: (startPos: Int, endPos: Int) -> Unit = { _, _ -> },
@@ -1849,11 +1857,27 @@ private fun DateGroupRecyclerView(
         },
         update = { rv ->
             val adapter = rv.adapter as DateGroupAdapter
+            val oldSelectedPaths = adapter.selectedPaths
+            val oldColumns = adapter.columns
             adapter.columns = columns
-            adapter.items = items
             adapter.onLongClick = onLongClick
             adapter.selectedPaths = selectedPaths
-            adapter.notifyDataSetChanged()
+
+            val oldItems = adapter.items
+            val columnsChanged = oldColumns != columns
+            if (oldItems !== items || columnsChanged) {
+                adapter.items = items
+                if (columnsChanged) {
+                    // 列数变化：全量重建 VH，确保 onCreateViewHolder 用正确列数计算 side
+                    adapter.notifyDataSetChanged()
+                } else {
+                    val diff = DiffUtil.calculateDiff(DateGroupDiffCallback(oldItems, items))
+                    diff.dispatchUpdatesTo(adapter)
+                }
+            } else if (oldSelectedPaths != selectedPaths) {
+                adapter.notifyItemRangeChanged(0, adapter.itemCount)
+            }
+
             (rv.layoutManager as GridLayoutManager).spanCount = columns
             (rv.layoutManager as GridLayoutManager).spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
                 override fun getSpanSize(position: Int): Int {
@@ -1869,7 +1893,7 @@ private fun DateGroupRecyclerView(
 private class DateGroupAdapter(
     var items: List<DateViewItem>,
     var columns: Int,
-    private val onClick: (MediaItem) -> Unit
+    private val onClick: (MediaItem, allMediaIndex: Int) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
@@ -2005,7 +2029,7 @@ private class DateGroupAdapter(
                     val pos = rv.getChildAdapterPosition(row)
                     if (pos < 0) return@setOnClickListener
                     val item = items.getOrNull(pos) as? DateViewItem.Media
-                    if (item != null) onClick(item.item)
+                    if (item != null) onClick(item.item, item.allMediaIndex)
                 }
                 row.setOnLongClickListener {
                     val pos = rv.getChildAdapterPosition(row)
@@ -2062,7 +2086,7 @@ private class DateGroupAdapter(
                     val pos = rv.getChildAdapterPosition(frame)
                     if (pos < 0) return@setOnClickListener
                     val item = items.getOrNull(pos) as? DateViewItem.Media
-                    if (item != null) onClick(item.item)
+                    if (item != null) onClick(item.item, item.allMediaIndex)
                 }
                 frame.setOnLongClickListener {
                     val pos = rv.getChildAdapterPosition(frame)
@@ -2104,7 +2128,22 @@ private class DateGroupAdapter(
                     }
                 } else {
                     val frame = holder.itemView as FrameLayout
+                    // 运行时按当前列数修正 VH 尺寸，防任何 VH 复用场景下图片拉伸
+                    val density = frame.context.resources.displayMetrics.density
+                    val screenWidth = frame.context.resources.displayMetrics.widthPixels
+                    val gapPx = (2 * density).toInt()
+                    val side = (screenWidth / columns) - gapPx * 2
+                    val flp = frame.layoutParams
+                    if (flp.width != side || flp.height != side) {
+                        flp.width = side; flp.height = side
+                        frame.layoutParams = flp
+                    }
                     val iv = frame.getChildAt(0) as ImageView
+                    val ilp = iv.layoutParams
+                    if (ilp.width != side || ilp.height != side) {
+                        ilp.width = side; ilp.height = side
+                        iv.layoutParams = ilp
+                    }
                     iv.load(item.item.uri) { crossfade(false) }
                     val checkmark = frame.findViewById<FrameLayout>(android.R.id.checkbox)
                     if (checkmark != null) {
@@ -2121,5 +2160,27 @@ private class DateGroupAdapter(
         val nameView: TextView,
         val infoView: TextView
     ) : RecyclerView.ViewHolder(itemView) {}
+}
+
+private class DateGroupDiffCallback(
+    private val old: List<DateViewItem>,
+    private val new: List<DateViewItem>
+) : DiffUtil.Callback() {
+    override fun getOldListSize() = old.size
+    override fun getNewListSize() = new.size
+
+    override fun areItemsTheSame(oldPos: Int, newPos: Int): Boolean {
+        return when {
+            old[oldPos] is DateViewItem.Header && new[newPos] is DateViewItem.Header ->
+                (old[oldPos] as DateViewItem.Header).label == (new[newPos] as DateViewItem.Header).label
+            old[oldPos] is DateViewItem.Media && new[newPos] is DateViewItem.Media ->
+                (old[oldPos] as DateViewItem.Media).item.id == (new[newPos] as DateViewItem.Media).item.id
+            else -> false
+        }
+    }
+
+    override fun areContentsTheSame(oldPos: Int, newPos: Int): Boolean {
+        return old[oldPos] == new[newPos]
+    }
 }
 

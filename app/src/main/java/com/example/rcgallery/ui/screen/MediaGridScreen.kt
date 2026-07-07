@@ -58,6 +58,7 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,17 +107,14 @@ fun MediaGridScreen(
     }
 
     // ── 相册切换时防止旧数据闪烁：加载完成前不展示 RecyclerView ──
-    // 改名后 albumId 变化但 mediaItems 已存在（renameNow 已更新），不显示 loading
-    var isLoadingAlbum by remember { mutableStateOf(true) }
+    var isLoadingAlbum by remember(albumId) { mutableStateOf(true) }
     LaunchedEffect(albumId) {
-        AppLogger.d("MediaGrid", "LaunchedEffect albumId=[$albumId]  items.size=${mediaItems.size}")
-        if (mediaItems.isEmpty()) {
-            isLoadingAlbum = true
-        }
+        isLoadingAlbum = true
         viewModel.loadMedia(albumId = albumId)
-    }
-    LaunchedEffect(isLoading) {
-        if (!isLoading) isLoadingAlbum = false
+        // 等加载完成（true → false）后显示网格，防竞态
+        viewModel.isLoading.first { it }
+        viewModel.isLoading.first { !it }
+        isLoadingAlbum = false
     }
 
     // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
@@ -268,8 +266,8 @@ fun MediaGridScreen(
         Box(Modifier.fillMaxSize()) {
             var showInertiaSettings by remember { mutableStateOf(false) }
             if (isLoadingAlbum) {
-                // 相册切换/首次加载→显示 loading，防止旧数据闪烁
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                // 加载中：全黑占位，无文字无 loading
+                Box(Modifier.fillMaxSize().background(Color.Black))
             } else {
                 Scaffold(
                     topBar = {

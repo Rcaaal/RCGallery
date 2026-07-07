@@ -155,6 +155,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         AppLogger.d("VM", "loadMedia albumId=[$albumId] cancel prev=$pendingAlbumId")
         loadMediaJob?.cancel()
         pendingAlbumId = albumId
+        _mediaItems.value = emptyList()  // 立即清空旧数据，防止相册切换时残留
         _isLoading.value = true
 
         loadMediaJob = viewModelScope.launch {
