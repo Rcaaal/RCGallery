@@ -57,6 +57,8 @@ import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
+import com.example.rcgallery.model.TempFilter
+import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -78,6 +80,7 @@ fun MediaGridScreen(
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
+    val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
 
     // ── 相册 TAG 管理 ──
     val currentAlbumTags = remember(albumDirectoryPath, albumTags) {
@@ -251,6 +254,24 @@ fun MediaGridScreen(
         )
     }
 
+    // ── 临时筛选（标签）—— 在 sortedItems 之后过滤 ──
+    val tagFilteredItems = remember(sortedItems, tempFilter, mediaTags, albumTags) {
+        if (!tempFilter.isActive) sortedItems
+        else sortedItems.filter { item ->
+            val allTags = (mediaTags[item.filePath]?.map { it.name } ?: emptyList()) +
+                    (albumTags[albumDirectoryPath]?.map { it.name } ?: emptyList())
+            val allSet = allTags.toSet()
+            val tempTags = tempFilter.tagNames.toSet()
+            if (tempTags.isEmpty()) return@filter true
+            val matches = if (tempFilter.logic == com.example.rcgallery.model.FilterLogic.AND) {
+                tempTags.all { it in allTags }
+            } else {
+                tempTags.any { it in allTags }
+            }
+            if (tempFilter.mode == FilterMode.HIDE) !matches else matches
+        }
+    }
+
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
@@ -350,7 +371,7 @@ fun MediaGridScreen(
                                 Spacer(Modifier.width(8.dp))
                                 Button(
                                     onClick = {
-                                        val toDelete = sortedItems.filter { it.uri.toString() in selectedMediaUris }
+                                        val toDelete = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
                                         toDelete.forEach { item -> viewModel.moveToTrash(item) }
                                         exitMediaMultiSelect()
                                     },
@@ -411,7 +432,7 @@ fun MediaGridScreen(
                                                     if (pos < 0) return@postDelayed
                                                     dragState.dragStartIdx = pos
                                                     dragState.isDragging = true
-                                                    val item = sortedItems.getOrNull(pos) ?: return@postDelayed
+                                                    val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
                                                     if (!isMediaMultiSelect) isMediaMultiSelect = true
                                                     toggleMediaSelection(item)
                                                 }, longPressMs)
@@ -445,7 +466,7 @@ fun MediaGridScreen(
                                                 val minIdx = minOf(dragState.dragStartIdx, pos)
                                                 val maxIdx = maxOf(dragState.dragStartIdx, pos)
                                                 val rangeUris = (minIdx..maxIdx).mapNotNull { i ->
-                                                    sortedItems.getOrNull(i)?.uri?.toString()
+                                                    tagFilteredItems.getOrNull(i)?.uri?.toString()
                                                 }.toSet()
                                                 selectedMediaUris = rangeUris
                                             }
@@ -493,7 +514,7 @@ fun MediaGridScreen(
                                 val adapter = rv.adapter as SimpleGridAdapter
                                 val prevMode = adapter.currentMode
                                 val currentMode = mediaDisplayMode
-                                adapter.items = sortedItems
+                                adapter.items = tagFilteredItems
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
                                 adapter.selectedUris = selectedMediaUris
@@ -559,7 +580,7 @@ fun MediaGridScreen(
                         }
                         // ── 批量 TAG 对话框 ──
                         if (showMediaBatchTagDialog) {
-                            val batchMediaPaths = sortedItems
+                            val batchMediaPaths = tagFilteredItems
                                 .filter { it.uri.toString() in selectedMediaUris }
                                 .map { it.filePath }
                             TagManageDialog(
@@ -662,7 +683,7 @@ fun MediaGridScreen(
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
-                    items = sortedItems
+                    items = tagFilteredItems
                 )
             }
 

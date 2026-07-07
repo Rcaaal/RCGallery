@@ -15,8 +15,14 @@ import com.example.rcgallery.data.db.TargetResult
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
+import com.example.rcgallery.model.FilterLogic
+import com.example.rcgallery.model.FilterMode
+import com.example.rcgallery.model.FilterScope
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.TagRule
+import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.TrashEntry
+import com.example.rcgallery.model.findFirstConflict
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -100,6 +106,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         // 恢复已保存的 SMB 设备列表
         _smbDevices.value = loadSmbDevices()
         refreshTrashCount()
+        loadPersistentRules()
         viewModelScope.launch {
             observer.observeMediaChanges()
                 .debounce(500)
@@ -706,6 +713,208 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             .map { it.targetKey.removePrefix("media:") }
         if (filePaths.isEmpty()) return emptyList()
         return repository.loadMediaItemsByPaths(filePaths).getOrDefault(emptyList())
+    }
+
+    // ══════════════════════════════════════
+    //  筛选规则系统
+    // ══════════════════════════════════════
+
+    private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
+    val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
+
+    private val _tempFilter = MutableStateFlow(TempFilter())
+    val tempFilter: StateFlow<TempFilter> = _tempFilter.asStateFlow()
+
+    private fun loadPersistentRules() {
+        val jsonStr = getApplication<Application>()
+            .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            .getString("filter_rules", null) ?: return
+        try {
+            val arr = org.json.JSONArray(jsonStr)
+            val rules = mutableListOf<TagRule>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                rules.add(TagRule(
+                    id = obj.optString("id", ""),
+                    name = obj.optString("name", ""),
+                    tagNames = obj.optJSONArray("tagNames")?.let { ja ->
+                        (0 until ja.length()).map { ja.getString(it) }
+                    } ?: emptyList(),
+                    logic = if (obj.optString("logic") == "AND") FilterLogic.AND else FilterLogic.OR,
+                    mode = if (obj.optString("mode") == "SHOW_ONLY") FilterMode.SHOW_ONLY else FilterMode.HIDE,
+                    scope = when (obj.optString("scope")) {
+                        "MEDIA" -> FilterScope.MEDIA
+                        "BOTH" -> FilterScope.BOTH
+                        else -> FilterScope.ALBUM
+                    },
+                    enabled = obj.optBoolean("enabled", false)
+                ))
+            }
+            _persistentRules.value = rules
+        } catch (e: Exception) {
+            AppLogger.e("VM", "loadPersistentRules FAIL", e)
+        }
+    }
+
+    private fun savePersistentRules() {
+        try {
+            val arr = org.json.JSONArray()
+            _persistentRules.value.forEach { rule ->
+                val tagArr = org.json.JSONArray()
+                rule.tagNames.forEach { tagArr.put(it) }
+                arr.put(org.json.JSONObject().apply {
+                    put("id", rule.id)
+                    put("name", rule.name)
+                    put("tagNames", tagArr)
+                    put("logic", rule.logic.name)
+                    put("mode", rule.mode.name)
+                    put("scope", rule.scope.name)
+                    put("enabled", rule.enabled)
+                })
+            }
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString("filter_rules", arr.toString())
+                .apply()
+        } catch (e: Exception) {
+            AppLogger.e("VM", "savePersistentRules FAIL", e)
+        }
+    }
+
+    /** 获取所有已启用的规则（仅相册相关） */
+    private fun getActiveAlbumRules(): List<TagRule> =
+        _persistentRules.value.filter { it.enabled && (it.scope == FilterScope.ALBUM || it.scope == FilterScope.BOTH) }
+
+    /** 获取所有已启用的规则（仅媒体相关） */
+    private fun getActiveMediaRules(): List<TagRule> =
+        _persistentRules.value.filter { it.enabled && (it.scope == FilterScope.MEDIA || it.scope == FilterScope.BOTH) }
+
+    /**
+     * 判断相册是否应被隐藏（返回 true = 隐藏/删除）。
+     * 多条已启用规则 OR 叠加：任一规则命中 HIDE 且作用域覆盖相册 → 隐藏。
+     * 任一规则命中 SHOW_ONLY → 如果此相册不满足条件也要隐藏。
+     */
+    fun shouldHideAlbum(directoryPath: String, albumTags: List<String>): Boolean {
+        val rules = getActiveAlbumRules()
+        if (rules.isEmpty()) return false
+        val tagSet = albumTags.toSet()
+
+        // 先检查是否有 SHOW_ONLY 规则：如果任一 SHOW_ONLY 规则不命中 → 隐藏
+        val showOnlyRules = rules.filter { it.mode == FilterMode.SHOW_ONLY }
+        if (showOnlyRules.isNotEmpty()) {
+            val hitsAnyShowOnly = showOnlyRules.any { ruleMatches(it, tagSet) }
+            if (!hitsAnyShowOnly) return true
+        }
+
+        // 再检查 HIDE 规则：命中任一 HIDE → 隐藏
+        return rules.filter { it.mode == FilterMode.HIDE }.any { ruleMatches(it, tagSet) }
+    }
+
+    /**
+     * 判断媒体文件是否应被隐藏（基于持久规则 + 临时筛选）。
+     */
+    fun shouldHideMedia(filePath: String, mediaTags: List<String>, albumTags: List<String>): Boolean {
+        val allTagSet = (albumTags + mediaTags).toSet()
+
+        // 先检查持久规则
+        val pRules = getActiveMediaRules()
+        if (pRules.isNotEmpty()) {
+            val showOnlyRules = pRules.filter { it.mode == FilterMode.SHOW_ONLY }
+            if (showOnlyRules.isNotEmpty()) {
+                val hitsAny = showOnlyRules.any { ruleMatches(it, allTagSet) }
+                if (!hitsAny) return true
+            }
+            if (pRules.filter { it.mode == FilterMode.HIDE }.any { ruleMatches(it, allTagSet) }) return true
+        }
+
+        // 再检查临时筛选（图片列表专用）
+        val temp = _tempFilter.value
+        if (temp.isActive) {
+            if (temp.mode == FilterMode.HIDE) {
+                if (ruleMatches(temp, allTagSet)) return true
+            } else {
+                // SHOW_ONLY: 不命中就隐藏
+                if (!ruleMatches(temp, allTagSet)) return true
+            }
+        }
+
+        return false
+    }
+
+    /** 判断标签集合是否满足一条规则的条件 */
+    private fun ruleMatches(rule: TagRule, tagSet: Set<String>): Boolean {
+        if (rule.tagNames.isEmpty()) return false
+        val ruleTags = rule.tagNames.toSet()
+        return if (rule.logic == FilterLogic.AND) {
+            ruleTags.all { it in tagSet }
+        } else {
+            ruleTags.any { it in tagSet }
+        }
+    }
+
+    private fun ruleMatches(temp: TempFilter, tagSet: Set<String>): Boolean {
+        if (temp.tagNames.isEmpty()) return false
+        val tempTags = temp.tagNames.toSet()
+        return if (temp.logic == FilterLogic.AND) {
+            tempTags.all { it in tagSet }
+        } else {
+            tempTags.any { it in tagSet }
+        }
+    }
+
+    // ── 规则 CRUD ──
+
+    /** 添加规则并检测冲突。返回 null=成功，非 null=冲突的规则名 */
+    fun addRule(rule: TagRule): String? {
+        val current = _persistentRules.value.toMutableList()
+        current.add(rule)
+        val conflict = findFirstConflict(current)
+        if (conflict != null) {
+            return current[conflict.second].name
+        }
+        _persistentRules.value = current
+        savePersistentRules()
+        return null
+    }
+
+    /** 更新规则并检测冲突。返回 null=成功，非 null=冲突的规则名 */
+    fun updateRule(rule: TagRule): String? {
+        val current = _persistentRules.value.toMutableList()
+        val idx = current.indexOfFirst { it.id == rule.id }
+        if (idx < 0) return null
+        current[idx] = rule
+        val conflict = findFirstConflict(current)
+        if (conflict != null) {
+            return current[conflict.second].name
+        }
+        _persistentRules.value = current
+        savePersistentRules()
+        return null
+    }
+
+    /** 删除规则 */
+    fun deleteRule(ruleId: String) {
+        _persistentRules.value = _persistentRules.value.filter { it.id != ruleId }
+        savePersistentRules()
+    }
+
+    /** 切换规则启用/禁用状态 */
+    fun toggleRule(ruleId: String) {
+        _persistentRules.value = _persistentRules.value.map {
+            if (it.id == ruleId) it.copy(enabled = !it.enabled) else it
+        }
+        savePersistentRules()
+    }
+
+    /** 设置临时筛选 */
+    fun setTempFilter(filter: TempFilter) {
+        _tempFilter.value = filter
+    }
+
+    /** 重置临时筛选 */
+    fun resetTempFilter() {
+        _tempFilter.value = TempFilter()
     }
 
     private fun refreshTrashCount() {

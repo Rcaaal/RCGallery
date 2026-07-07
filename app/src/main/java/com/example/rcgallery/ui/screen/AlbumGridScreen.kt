@@ -122,6 +122,7 @@ fun AlbumGridScreen(
     val starredIds by viewModel.starredBucketIds.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
+    val persistentRules by viewModel.persistentRules.collectAsStateWithLifecycle()
 
     // ── 相册显示模式 & 排序模式（持久化，需在 remember(albums) 之前声明）──
     val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -158,6 +159,44 @@ fun AlbumGridScreen(
                     AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
                     AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
                 })
+        )
+    }
+
+    // ── 筛选规则过滤后的相册列表 ──
+    val filteredAlbums = remember(albums, persistentRules, albumTags) {
+        val hasActiveAlbumRule = persistentRules.any {
+            it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
+        }
+        if (!hasActiveAlbumRule) albums
+        else albums.filter { album ->
+            val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
+            !viewModel.shouldHideAlbum(album.directoryPath, tagNames)
+        }
+    }
+
+    var showFilterPage by remember { mutableStateOf(false) }
+    if (showFilterPage) {
+        val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+        val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
+        FilterPage(
+            allTags = allTags,
+            persistentRules = persistentRules,
+            tempFilter = tempFilter,
+            onBack = { showFilterPage = false },
+            onToggleRule = { viewModel.toggleRule(it) },
+            onSaveRule = { rule ->
+                if (persistentRules.any { it.id == rule.id }) {
+                    viewModel.updateRule(rule)
+                } else {
+                    viewModel.addRule(rule)
+                }
+            },
+            onDeleteRule = { viewModel.deleteRule(it) },
+            onSetTempFilter = { viewModel.setTempFilter(it) },
+            onReset = {
+                viewModel.resetTempFilter()
+                persistentRules.forEach { if (it.enabled) viewModel.toggleRule(it.id) }
+            }
         )
     }
 
@@ -335,7 +374,7 @@ fun AlbumGridScreen(
                 val allTags by viewModel.allTags.collectAsStateWithLifecycle()
 
                 AlbumGridContent(
-                    albums = albums,
+                    albums = filteredAlbums,
                     starredIds = starredIds,
                     albumTags = albumTags,
                     onAlbumClick = { album ->
@@ -397,7 +436,9 @@ fun AlbumGridScreen(
                     onDeleteDateMedia = { paths ->
                         val toDelete = allMediaItems.filter { it.filePath in paths }
                         toDelete.forEach { viewModel.moveToTrash(it) }
-                    }
+                    },
+                    hasActiveFilter = persistentRules.any { it.enabled },
+                    onOpenFilter = { showFilterPage = true }
                 )
                 // ── TAG 管理对话框 ──
                 val currentTagAlbum = tagDialogAlbum
@@ -559,7 +600,10 @@ private fun AlbumGridContent(
     allDateMediaItems: List<MediaItem> = emptyList(),
     selectedDatePhotoIndex: Int = -1,
     onDatePhotoClick: (Int) -> Unit = {},
-    onDatePhotoBack: () -> Unit = {}
+    onDatePhotoBack: () -> Unit = {},
+    // ── 筛选参数 ──
+    hasActiveFilter: Boolean = false,
+    onOpenFilter: () -> Unit = {}
 ) {
     // ── Grid 模式多选状态 ──
     var isAlbumMultiSelect by remember { mutableStateOf(false) }
@@ -861,6 +905,22 @@ private fun AlbumGridContent(
                     currentMode = displayMode,
                     onSelectMode = onSelectMode
                 )
+                // 筛选按钮（三横线图标）
+                Box {
+                    IconButton(onClick = onOpenFilter) {
+                        Text("☰", fontSize = 16.sp,
+                            color = if (hasActiveFilter) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface)
+                    }
+                    // 有生效规则时在右上角显示小绿点
+                    if (hasActiveFilter) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(8.dp)
+                                .background(Color(0xFF4CAF50), CircleShape)
+                        )
+                    }
+                }
                 Spacer(Modifier.weight(1f))
                 DateButton(
                     isActive = isDateView,
