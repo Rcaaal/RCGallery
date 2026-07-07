@@ -163,6 +163,13 @@ fun AlbumGridScreen(
     var isDateView by remember { mutableStateOf(false) }
     val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
     var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
+    // 排序/切换标签退出日期视图时，如果 Preview 开着，恢复底部导航栏
+    LaunchedEffect(isDateView) {
+        if (!isDateView && selectedDatePhotoIndex >= 0) {
+            selectedDatePhotoIndex = -1
+            onAlbumActiveChanged(false)
+        }
+    }
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
@@ -201,7 +208,7 @@ fun AlbumGridScreen(
     val trashCount by viewModel.trashCount.collectAsStateWithLifecycle()
     var showTrash by remember { mutableStateOf(false) }
     if (showTrash) {
-        BackHandler { showTrash = false }
+        BackHandler { showTrash = false; onAlbumActiveChanged(false) }
     }
     // ── 日志面板 ──
     var showLogDialog by remember { mutableStateOf(false) }
@@ -366,17 +373,19 @@ fun AlbumGridScreen(
                     },
                     allDateMediaItems = allMediaItems,
                     selectedDatePhotoIndex = selectedDatePhotoIndex,
-                    onDatePhotoClick = { idx -> selectedDatePhotoIndex = idx },
+                    onDatePhotoClick = { idx -> selectedDatePhotoIndex = idx; onAlbumActiveChanged(true) },
                     onDatePhotoBack = { selectedDatePhotoIndex = -1 },
                     onOpenSettings = { showInertiaSettings = true },
                     onOpenLog = { showLogDialog = true },
                     onOpenTrash = {
                         showTrash = true
+                        onAlbumActiveChanged(true)
                         viewModel.loadTrashEntries()
                     },
                     onManageAlbumTags = { album -> tagDialogAlbum = album },
                     allTags = allTags,
-                    onBatchAddTagsToAlbums = { dirPath, tagName -> viewModel.addAlbumTag(dirPath, tagName) }
+                    onBatchAddTagsToAlbums = { dirPath, tagName -> viewModel.addAlbumTag(dirPath, tagName) },
+                    onBatchAddTagsToMedia = { filePath, tagName -> viewModel.addMediaTag(filePath, tagName) }
                 )
                 // ── TAG 管理对话框 ──
                 val currentTagAlbum = tagDialogAlbum
@@ -421,15 +430,15 @@ fun AlbumGridScreen(
             // ── 回收站全屏覆盖层 ──
             if (showTrash) {
                 TrashScreen(
-                    onBackClick = { showTrash = false }
+                    onBackClick = { showTrash = false; onAlbumActiveChanged(false) }
                 )
             }
             // ── 日期视图 Preview 覆盖层 ──
             if (isDateView && selectedDatePhotoIndex >= 0 && selectedDatePhotoIndex < allMediaItems.size) {
-                BackHandler { selectedDatePhotoIndex = -1 }
+                BackHandler { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) }
                 PreviewScreen(
                     initialIndex = selectedDatePhotoIndex,
-                    onBackClick = { selectedDatePhotoIndex = -1 },
+                    onBackClick = { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) },
                     items = allMediaItems
                 )
             }
@@ -530,6 +539,7 @@ private fun AlbumGridContent(
     albumTags: Map<String, List<TagEntity>> = emptyMap(),
     allTags: List<TagEntity> = emptyList(),
     onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
+    onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
     // ── 日期分组视图参数 ──
     isDateView: Boolean = false,
     onToggleDateView: () -> Unit = {},
@@ -553,6 +563,23 @@ private fun AlbumGridContent(
         if (selectedAlbumIds.isEmpty()) isAlbumMultiSelect = false
     }
 
+    // ── 日期视图多选状态 ──
+    var isDateMultiSelect by remember { mutableStateOf(false) }
+    var selectedDateMediaPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    fun exitDateMultiSelect() {
+        isDateMultiSelect = false
+        selectedDateMediaPaths = emptySet()
+    }
+
+    fun toggleDateMediaSelection(filePath: String) {
+        selectedDateMediaPaths = if (filePath in selectedDateMediaPaths)
+            selectedDateMediaPaths - filePath
+        else
+            selectedDateMediaPaths + filePath
+        if (selectedDateMediaPaths.isEmpty()) isDateMultiSelect = false
+    }
+
     val onGridLongClick: (Album) -> Unit = remember {{
         album ->
         if (!isAlbumMultiSelect) isAlbumMultiSelect = true
@@ -561,6 +588,7 @@ private fun AlbumGridContent(
 
     // ── 批量 TAG 对话框 ──
     var showBatchTagDialog by remember { mutableStateOf(false) }
+    var showDateBatchTagDialog by remember { mutableStateOf(false) }
 
     // 多选模式：短按切换选中而非打开相册
     fun wrappedAlbumClick(album: Album) {
@@ -660,6 +688,26 @@ private fun AlbumGridContent(
                     }
                     Spacer(Modifier.width(8.dp))
                 }
+            } else if (isDateMultiSelect && selectedDateMediaPaths.isNotEmpty()) {
+                BottomAppBar(
+                    containerColor = Color(0xFF1A1A1A),
+                    tonalElevation = 8.dp
+                ) {
+                    Text(
+                        "已选 ${selectedDateMediaPaths.size} 项",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 16.dp)
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Button(
+                        onClick = { showDateBatchTagDialog = true },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("批量加标签 (${selectedDateMediaPaths.size})", fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
             }
         }
     ) { padding ->
@@ -668,6 +716,11 @@ private fun AlbumGridContent(
             if (isAlbumMultiSelect) {
                 BackHandler {
                     exitAlbumMultiSelect()
+                }
+            }
+            if (isDateMultiSelect) {
+                BackHandler {
+                    exitDateMultiSelect()
                 }
             }
             // ── RecyclerView 内容区域（填满全屏）──
@@ -742,9 +795,18 @@ private fun AlbumGridContent(
                     items = dateViewItems,
                     columns = columns,
                     onClick = { mediaItem ->
-                        val idx = allDateMediaItems.indexOf(mediaItem)
-                        if (idx >= 0) onDatePhotoClick(idx)
-                    }
+                        if (isDateMultiSelect) {
+                            toggleDateMediaSelection(mediaItem.filePath)
+                        } else {
+                            val idx = allDateMediaItems.indexOf(mediaItem)
+                            if (idx >= 0) onDatePhotoClick(idx)
+                        }
+                    },
+                    onLongClick = { mediaItem ->
+                        if (!isDateMultiSelect) isDateMultiSelect = true
+                        toggleDateMediaSelection(mediaItem.filePath)
+                    },
+                    selectedPaths = selectedDateMediaPaths
                 )
             }
             // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
@@ -789,6 +851,21 @@ private fun AlbumGridContent(
                     exitAlbumMultiSelect()
                 },
                 onDismiss = { showBatchTagDialog = false }
+            )
+        }
+        // ── 日期视图批量 TAG 对话框 ──
+        if (showDateBatchTagDialog) {
+            BatchTagDialog(
+                title = "批量加标签 - 已选 ${selectedDateMediaPaths.size} 个媒体文件",
+                allTags = allTags,
+                onAddTag = { tagName ->
+                    selectedDateMediaPaths.forEach { filePath ->
+                        onBatchAddTagsToMedia(filePath, tagName)
+                    }
+                    showDateBatchTagDialog = false
+                    exitDateMultiSelect()
+                },
+                onDismiss = { showDateBatchTagDialog = false }
             )
         }
         }
@@ -1643,13 +1720,18 @@ private fun DateGroupRecyclerView(
     items: List<DateViewItem>,
     columns: Int,
     onClick: (MediaItem) -> Unit,
+    onLongClick: (MediaItem) -> Unit = {},
+    selectedPaths: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     AndroidView(
         factory = { ctx ->
             val density = ctx.resources.displayMetrics.density
             val topPad = (44 * density).toInt()
-            val adapter = DateGroupAdapter(items, columns, onClick)
+            val adapter = DateGroupAdapter(items, columns, onClick).apply {
+                this.onLongClick = onLongClick
+                this.selectedPaths = selectedPaths
+            }
             RecyclerView(ctx).apply {
                 layoutManager = GridLayoutManager(ctx, columns).apply {
                     spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
@@ -1667,6 +1749,8 @@ private fun DateGroupRecyclerView(
             val adapter = rv.adapter as DateGroupAdapter
             adapter.columns = columns
             adapter.items = items
+            adapter.onLongClick = onLongClick
+            adapter.selectedPaths = selectedPaths
             adapter.notifyDataSetChanged()
             (rv.layoutManager as GridLayoutManager).spanCount = columns
             (rv.layoutManager as GridLayoutManager).spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
@@ -1691,6 +1775,9 @@ private class DateGroupAdapter(
         const val VIEW_TYPE_MEDIA = 1
         const val VIEW_TYPE_LIST_MEDIA = 2
     }
+
+    var onLongClick: (MediaItem) -> Unit = {}
+    var selectedPaths: Set<String> = emptySet()
 
     override fun getItemCount() = items.size
 
@@ -1720,7 +1807,7 @@ private class DateGroupAdapter(
                 object : RecyclerView.ViewHolder(tv) {}
             }
             VIEW_TYPE_LIST_MEDIA -> {
-                // 列表模式：缩略图 + 文件名 + 文件信息
+                // 列表模式：缩略图（包对号覆盖层）+ 文件名 + 文件信息
                 val gapPx = (2 * density).toInt()
                 val thumbSize = (56 * density).toInt()
                 val row = LinearLayout(ctx).apply {
@@ -1731,11 +1818,42 @@ private class DateGroupAdapter(
                     )
                     setPadding(gapPx, gapPx, gapPx, gapPx)
                 }
-                val iv = ImageView(ctx).apply {
+                // 缩略图 FrameLayout（包裹对号覆盖层）
+                val thumbFrame = FrameLayout(ctx).apply {
                     layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
+                }
+                val iv = ImageView(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(thumbSize, thumbSize)
                     scaleType = ImageView.ScaleType.CENTER_CROP
                 }
-                row.addView(iv)
+                thumbFrame.addView(iv)
+                // 多选对号覆盖层
+                val checkmark = FrameLayout(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        (36 * density).toInt(),
+                        (36 * density).toInt(),
+                        android.view.Gravity.CENTER
+                    )
+                    visibility = android.view.View.GONE
+                    id = android.R.id.checkbox
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(200, 76, 175, 80))
+                    }
+                    addView(TextView(ctx).apply {
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            android.view.Gravity.CENTER
+                        )
+                        text = "✓"
+                        setTextColor(android.graphics.Color.WHITE)
+                        textSize = 20f
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    })
+                }
+                thumbFrame.addView(checkmark)
+                row.addView(thumbFrame)
 
                 val textColumn = LinearLayout(ctx).apply {
                     orientation = LinearLayout.VERTICAL
@@ -1776,24 +1894,67 @@ private class DateGroupAdapter(
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item)
                 }
+                row.setOnLongClickListener {
+                    val pos = row.tag as? Int ?: return@setOnLongClickListener true
+                    val item = items.getOrNull(pos) as? DateViewItem.Media
+                    if (item != null) onLongClick(item.item)
+                    true
+                }
 
                 ListMediaViewHolder(row, iv, nameTv, infoTv)
             }
             else -> {
-                // Grid 模式：正方形缩略图
+                // Grid 模式：正方形缩略图 + 多选对号覆盖层
                 val gapPx = (2 * density).toInt()
                 val side = (screenWidth / columns) - gapPx * 2
-                val iv = ImageView(ctx).apply {
+                val frame = FrameLayout(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(side, side)
+                }
+                val iv = ImageView(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(side, side)
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     setPadding(gapPx, gapPx, gapPx, gapPx)
                 }
-                iv.setOnClickListener {
-                    val pos = iv.tag as? Int ?: return@setOnClickListener
+                frame.addView(iv)
+                // 多选对号（居中半透明绿色圆形 + 白色 ✓）
+                val checkmark = FrameLayout(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        (36 * density).toInt(),
+                        (36 * density).toInt(),
+                        android.view.Gravity.CENTER
+                    )
+                    visibility = android.view.View.GONE
+                    id = android.R.id.checkbox
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(200, 76, 175, 80))
+                    }
+                    addView(TextView(ctx).apply {
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            android.view.Gravity.CENTER
+                        )
+                        text = "✓"
+                        setTextColor(android.graphics.Color.WHITE)
+                        textSize = 20f
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    })
+                }
+                frame.addView(checkmark)
+
+                frame.setOnClickListener {
+                    val pos = frame.tag as? Int ?: return@setOnClickListener
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item)
                 }
-                object : RecyclerView.ViewHolder(iv) {}
+                frame.setOnLongClickListener {
+                    val pos = frame.tag as? Int ?: return@setOnLongClickListener true
+                    val item = items.getOrNull(pos) as? DateViewItem.Media
+                    if (item != null) onLongClick(item.item)
+                    true
+                }
+                object : RecyclerView.ViewHolder(frame) {}
             }
         }
     }
@@ -1804,6 +1965,7 @@ private class DateGroupAdapter(
                 (holder.itemView as TextView).text = item.label
             }
             is DateViewItem.Media -> {
+                val isSelected = item.item.filePath in selectedPaths
                 if (holder is ListMediaViewHolder) {
                     holder.itemView.tag = position
                     holder.imageView.load(item.item.uri) { crossfade(true) }
@@ -1819,10 +1981,19 @@ private class DateGroupAdapter(
                             append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.item.size))
                         }
                     }
+                    val checkmark = holder.itemView.findViewById<FrameLayout>(android.R.id.checkbox)
+                    if (checkmark != null) {
+                        checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                    }
                 } else {
-                    val iv = holder.itemView as ImageView
-                    iv.tag = position
+                    val frame = holder.itemView as FrameLayout
+                    frame.tag = position
+                    val iv = frame.getChildAt(0) as ImageView
                     iv.load(item.item.uri) { crossfade(true) }
+                    val checkmark = frame.findViewById<FrameLayout>(android.R.id.checkbox)
+                    if (checkmark != null) {
+                        checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                    }
                 }
             }
         }
