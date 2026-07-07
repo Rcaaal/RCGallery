@@ -392,6 +392,7 @@ fun PreviewScreen(
                                 onBackClick()
                             }) { Text("← 返回", color = Color.White) }
                         },
+                        windowInsets = WindowInsets(0, 0, 0, 0),
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black.copy(alpha = 0.3f))
                     )
                 }

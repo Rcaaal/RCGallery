@@ -184,14 +184,17 @@ fun TagListScreen(
                                 ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(start = 10.dp, end = 6.dp)
+                                        modifier = Modifier
+                                            .align(Alignment.CenterVertically)
+                                            .padding(start = 10.dp, end = 6.dp)
                                     ) {
                                         Text(tag.name, fontSize = 12.sp, color = Color.White, maxLines = 1)
                                         Spacer(Modifier.width(4.dp))
-                                        TextButton(
-                                            onClick = { toggleTag(tag) },
-                                            modifier = Modifier.size(18.dp).padding(0.dp),
-                                            contentPadding = PaddingValues(0.dp)
+                                        Box(
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .clickable { toggleTag(tag) },
+                                            contentAlignment = Alignment.Center
                                         ) {
                                             Text("✕", fontSize = 10.sp, color = Color.White)
                                         }
@@ -260,7 +263,9 @@ fun TagListScreen(
                                 ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(start = 10.dp, end = 4.dp)
+                                        modifier = Modifier
+                                            .align(Alignment.CenterVertically)
+                                            .padding(start = 10.dp, end = 4.dp)
                                     ) {
                                         Text(tag.name, fontSize = 12.sp, color = Color.White, maxLines = 1)
                                         Spacer(Modifier.width(4.dp))
@@ -282,7 +287,12 @@ fun TagListScreen(
                                         .height(28.dp)
                                         .clickable { toggleTag(tag) }
                                 ) {
-                                    Box(Modifier.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.CenterVertically)
+                                            .padding(horizontal = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
                                         Text(
                                             tag.name,
                                             fontSize = 12.sp,

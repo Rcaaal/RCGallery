@@ -1074,17 +1074,37 @@ private class SimpleGridAdapter(
                 }
                 textColumn.addView(nameTv)
 
-                // ── TAG 新增按钮（+）──
-                val tagStrip = android.widget.HorizontalScrollView(context).apply {
+                // ── TAG 行（纯 LinearLayout，不拦截点击，点 TAG 区域打开媒体项）──
+                val tagRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
                     layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    )
-                    isHorizontalScrollBarEnabled = false
-                    tag = "media_tag_strip"
+                    ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
+                    tag = "media_tag_row"
                     visibility = android.view.View.GONE
                 }
-                textColumn.addView(tagStrip)
+                // + 按钮（放在 TAG 行内，唯一可点击的交互元素）
+                val tagAddChip = TextView(context).apply {
+                    text = "+"
+                    textSize = 12f
+                    setTextColor(android.graphics.Color.WHITE)
+                    setBackgroundDrawable(
+                        android.graphics.drawable.GradientDrawable().apply {
+                            setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                            setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                        }
+                    )
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(
+                        (20 * density).toInt(),
+                        (20 * density).toInt()
+                    ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
+                    isClickable = true
+                    focusable = android.view.View.FOCUSABLE
+                }
+                tagRow.addView(tagAddChip)
+                textColumn.addView(tagRow)
 
                 val infoTv = TextView(context).apply {
                     layoutParams = LinearLayout.LayoutParams(
@@ -1174,65 +1194,41 @@ private class SimpleGridAdapter(
                     append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.size))
                 }
             }
-            // ── TAG 横向滚动条（+ 按钮 + 已有标签 chips）──
-            val tagStrip = itemView.findViewWithTag<android.widget.HorizontalScrollView>("media_tag_strip")
-            if (tagStrip != null) {
+            // ── TAG 行 ──
+            val tagRow = itemView.findViewWithTag<LinearLayout>("media_tag_row")
+            if (tagRow != null) {
                 val tags = mediaTagsMap[item.filePath] ?: emptyList()
-                val innerRow = tagStrip.getChildAt(0) as? LinearLayout
-                    ?: LinearLayout(itemView.context).also {
-                        tagStrip.addView(it, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ))
-                    }
-                innerRow.removeAllViews()
+                // 保留 index 0（+ 按钮），移除后面的旧 chip
+                while (tagRow.childCount > 1) tagRow.removeViewAt(tagRow.childCount - 1)
                 val ctx = itemView.context
                 val density = ctx.resources.displayMetrics.density
 
-                // + 按钮（放最前面，始终显示）
-                val addChip = TextView(ctx).apply {
-                    text = "+"
-                    textSize = 11f
-                    setTextColor(android.graphics.Color.WHITE)
-                    setBackgroundDrawable(
-                        android.graphics.drawable.GradientDrawable().apply {
-                            setShape(android.graphics.drawable.GradientDrawable.OVAL)
-                            setColor(android.graphics.Color.argb(180, 100, 180, 100))
-                        }
-                    )
-                    gravity = android.view.Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(
-                        (18 * density).toInt(),
-                        (18 * density).toInt()
-                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) }
-                    isClickable = true
-                    focusable = android.view.View.FOCUSABLE
-                    setOnClickListener { onManageTags(item) }
-                }
-                innerRow.addView(addChip)
+                // + 按钮点击
+                (tagRow.getChildAt(0) as? TextView)?.setOnClickListener { onManageTags(item) }
 
-                // 标签紧随加号之后
+                // 标签 chips（纯显示，不拦截点击）
                 tags.forEach { tag ->
                     val chip = TextView(ctx).apply {
                         text = tag.name
-                        textSize = 9f
+                        textSize = 10f
                         setTextColor(android.graphics.Color.WHITE)
                         setBackgroundDrawable(
                             android.graphics.drawable.GradientDrawable().apply {
                                 setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                                setCornerRadius(5 * density)
+                                setCornerRadius(6 * density)
                                 setColor(android.graphics.Color.argb(180, 100, 140, 255))
                             }
                         )
-                        setPadding((5 * density).toInt(), (1 * density).toInt(), (5 * density).toInt(), (1 * density).toInt())
+                        setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
                         maxLines = 1
+                        // 不加 click listener → 不拦截点击，事件传到 root → 打开媒体项
                     }
-                    innerRow.addView(chip, LinearLayout.LayoutParams(
+                    tagRow.addView(chip, LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) })
+                    ).apply { setMargins(0, 0, (4 * density).toInt(), 0) })
                 }
-                tagStrip.visibility = android.view.View.VISIBLE
+                tagRow.visibility = android.view.View.VISIBLE
             }
         }
     }

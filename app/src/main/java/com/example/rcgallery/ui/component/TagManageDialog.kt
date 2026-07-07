@@ -80,7 +80,9 @@ fun TagManageDialog(
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(start = 8.dp, end = if (isReadOnly) 8.dp else 4.dp)
+                                    modifier = Modifier
+                                        .align(Alignment.CenterVertically)
+                                        .padding(start = 8.dp, end = if (isReadOnly) 8.dp else 4.dp)
                                 ) {
                                     Text(
                                         tag.name,

@@ -18,7 +18,7 @@
 ## 模拟器管理
 
 - 📱 **A VD 名**：`test_device`（AVD home: `D:/AndroidStudio/Projects/RCGallery/Test`）
-- ⬆️ **启动**：`D:/AndroidSDK/emulator/emulator.exe -avd test_device -gpu auto -memory 2048 -noaudio`（或 `bash run_emulator.sh`）
+- ⬆️ **启动**：`ANDROID_AVD_HOME="D:/AndroidStudio/Projects/RCGallery/Test" "D:/AndroidSDK/emulator/emulator.exe" -avd test_device -gpu auto -memory 2048 -noaudio`（或 `bash run_emulator.sh`）
 - ⬇️ **关闭**：`D:/AndroidSDK/platform-tools/adb.exe emu kill`
 - 🔍 **检查状态**：`D:/AndroidSDK/platform-tools/adb.exe devices -l`
 - 📋 **抓 logcat**：先查 PID → `adb shell "ps -A | grep rcgallery"` → `adb logcat --pid=<PID> -v brief | grep <TAG>`
