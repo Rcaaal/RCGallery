@@ -36,6 +36,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 /** PiP 状态与工具方法 */
 object PipState {
     var isInPip: Boolean by mutableStateOf(false)
+    /** SMB 预览是否激活（打开图片/视频全屏查看时隐藏底部导航栏） */
+    var isSmbPreviewActive: Boolean by mutableStateOf(false)
     var exoPlayer: ExoPlayer? = null
     var videoWidth: Int = 16
     var videoHeight: Int = 9
@@ -67,7 +69,7 @@ class MainActivity : ComponentActivity() {
                     val viewModel: GalleryViewModel = viewModel()
                     val currentTab by viewModel.currentTab.collectAsState()
                     var isAlbumActive by remember { mutableStateOf(false) }
-                    val showBottomBar = currentTab == 1 || !isAlbumActive  // 网络tab永远显示，本地tab进入相册时隐藏
+                    val showBottomBar = ((currentTab == 1 && !PipState.isSmbPreviewActive) || !isAlbumActive) && !PipState.isInPip
 
                     fun safeGoBack(navController: androidx.navigation.NavController) {
                         if (navController.currentBackStackEntry?.destination?.route != Route.AlbumGrid.route) {

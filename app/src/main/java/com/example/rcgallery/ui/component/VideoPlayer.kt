@@ -52,7 +52,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.example.rcgallery.PipState
@@ -78,6 +81,7 @@ fun VideoPlayer(
     keepControllerVisible: Boolean = false,
     onShowInfoClick: () -> Unit = {},
     onMoveToTrash: () -> Unit = {},
+    dataSourceFactory: DataSource.Factory? = null,
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
@@ -100,7 +104,10 @@ fun VideoPlayer(
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(uri.toString()))
+            val factory = dataSourceFactory ?: DefaultDataSource.Factory(context)
+            val mediaSource = ProgressiveMediaSource.Factory(factory)
+                .createMediaSource(MediaItem.fromUri(uri))
+            setMediaSource(mediaSource)
             // ❌ 不在 remember 中 prepare() — 等 TextureView surface 就绪后再 prepare
             //    防止 codec 在无 surface 时初始化导致死机
             playWhenReady = false

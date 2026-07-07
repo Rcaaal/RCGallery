@@ -549,24 +549,10 @@ fun MediaGridScreen(
                                         is MediaDisplayMode.List -> "list"
                                         is MediaDisplayMode.Grid -> "grid_${mode.columns}"
                                     }).apply()
-                                }
+                                },
+                                hasActiveFilter = hasActiveMediaFilter,
+                                onOpenFilter = { showMediaFilterPage = true }
                             )
-                            // ── 筛选按钮 ──
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (hasActiveMediaFilter) MaterialTheme.colorScheme.primaryContainer
-                                        else MaterialTheme.colorScheme.surface,
-                                tonalElevation = if (hasActiveMediaFilter) 0.dp else 3.dp,
-                                shadowElevation = if (hasActiveMediaFilter) 0.dp else 4.dp,
-                                onClick = { showMediaFilterPage = true }
-                            ) {
-                                Text("☰ 筛选",
-                                    color = if (hasActiveMediaFilter) MaterialTheme.colorScheme.onPrimaryContainer
-                                            else MaterialTheme.colorScheme.onSurface,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
                             Spacer(Modifier.weight(1f))
                             MediaSortSelector(
                                 currentSort = mediaSortMode,
@@ -1297,6 +1283,8 @@ private class SimpleGridAdapter(
 private fun MediaDisplayModeSelector(
     currentMode: MediaDisplayMode,
     onSelectMode: (MediaDisplayMode) -> Unit,
+    hasActiveFilter: Boolean = false,
+    onOpenFilter: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val gridOptions = listOf(
@@ -1310,6 +1298,23 @@ private fun MediaDisplayModeSelector(
     var expanded by remember { mutableStateOf(false) }
 
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        // ── 筛选按钮 ──
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (hasActiveFilter) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+            tonalElevation = if (hasActiveFilter) 0.dp else 3.dp,
+            shadowElevation = if (hasActiveFilter) 0.dp else 4.dp,
+            onClick = onOpenFilter
+        ) {
+            Text("☰ 筛选",
+                color = if (hasActiveFilter) MaterialTheme.colorScheme.onPrimaryContainer
+                        else MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+        // 列数选择
         Box {
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -1321,7 +1326,7 @@ private fun MediaDisplayModeSelector(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
                         text = if (isListMode) "列数" else gridOptions.first { isSelected(it.first) }.second,
@@ -1382,7 +1387,7 @@ private fun MediaDisplayModeSelector(
                 color = if (isListMode) MaterialTheme.colorScheme.onPrimaryContainer
                         else MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             )
         }
     }
@@ -1410,10 +1415,10 @@ private fun MediaSortSelector(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = "排序: ${currentSort.label}",
+                    text = "${currentSort.label}",
                     color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.labelMedium
                 )
