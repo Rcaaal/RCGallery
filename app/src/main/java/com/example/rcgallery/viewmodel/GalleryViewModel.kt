@@ -44,6 +44,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _mediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val mediaItems: StateFlow<List<MediaItem>> = _mediaItems.asStateFlow()
 
+    // ── 日期视图：全部媒体项（按 dateAdded 降序，用于按天分组）──
+    private val _allMediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
+    val allMediaItems: StateFlow<List<MediaItem>> = _allMediaItems.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
@@ -133,6 +137,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     AppLogger.e("VM", "loadAlbums FAIL", it)
                 }
             _isLoading.value = false
+        }
+    }
+
+    /** 加载全部媒体（不限相册，按 dateAdded 降序，用于日期分组视图） */
+    fun loadAllMedia() {
+        viewModelScope.launch {
+            _allMediaItems.value = repository.loadMediaItems(albumId = null, pageSize = 10000)
+                .getOrDefault(emptyList())
+            AppLogger.d("VM", "loadAllMedia count=${_allMediaItems.value.size}")
         }
     }
 

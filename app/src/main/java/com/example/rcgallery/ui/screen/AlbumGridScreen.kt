@@ -44,6 +44,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
+import com.example.rcgallery.model.MediaItem
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.ui.component.DevOverlay
 import com.example.rcgallery.ui.component.FastScrollerView
@@ -157,6 +158,11 @@ fun AlbumGridScreen(
                 })
         )
     }
+
+    // ── 日期分组视图状态 ──
+    var isDateView by remember { mutableStateOf(false) }
+    val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
+    var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
@@ -343,6 +349,7 @@ fun AlbumGridScreen(
                     albumRvRef = albumRvRef,
                     albumSortMode = albumSortMode,
                     onSelectSort = { mode ->
+                        isDateView = false
                         albumSortMode = mode
                         prefs.edit().putString("album_sort_mode", when (mode) {
                             AlbumSortMode.NAME -> "name"
@@ -352,6 +359,15 @@ fun AlbumGridScreen(
                             AlbumSortMode.VIDEO_COUNT -> "video_count"
                         }).apply()
                     },
+                    isDateView = isDateView,
+                    onToggleDateView = {
+                        isDateView = !isDateView
+                        if (isDateView) viewModel.loadAllMedia()
+                    },
+                    allDateMediaItems = allMediaItems,
+                    selectedDatePhotoIndex = selectedDatePhotoIndex,
+                    onDatePhotoClick = { idx -> selectedDatePhotoIndex = idx },
+                    onDatePhotoBack = { selectedDatePhotoIndex = -1 },
                     onOpenSettings = { showInertiaSettings = true },
                     onOpenLog = { showLogDialog = true },
                     onOpenTrash = {
@@ -406,6 +422,15 @@ fun AlbumGridScreen(
             if (showTrash) {
                 TrashScreen(
                     onBackClick = { showTrash = false }
+                )
+            }
+            // ── 日期视图 Preview 覆盖层 ──
+            if (isDateView && selectedDatePhotoIndex >= 0 && selectedDatePhotoIndex < allMediaItems.size) {
+                BackHandler { selectedDatePhotoIndex = -1 }
+                PreviewScreen(
+                    initialIndex = selectedDatePhotoIndex,
+                    onBackClick = { selectedDatePhotoIndex = -1 },
+                    items = allMediaItems
                 )
             }
         }
@@ -504,7 +529,14 @@ private fun AlbumGridContent(
     albumRvRef: MutableState<RecyclerView?>,
     albumTags: Map<String, List<TagEntity>> = emptyMap(),
     allTags: List<TagEntity> = emptyList(),
-    onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> }
+    onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
+    // ── 日期分组视图参数 ──
+    isDateView: Boolean = false,
+    onToggleDateView: () -> Unit = {},
+    allDateMediaItems: List<MediaItem> = emptyList(),
+    selectedDatePhotoIndex: Int = -1,
+    onDatePhotoClick: (Int) -> Unit = {},
+    onDatePhotoBack: () -> Unit = {}
 ) {
     // ── Grid 模式多选状态 ──
     var isAlbumMultiSelect by remember { mutableStateOf(false) }
@@ -639,6 +671,7 @@ private fun AlbumGridContent(
                 }
             }
             // ── RecyclerView 内容区域（填满全屏）──
+            if (!isDateView) {
             AndroidView(
                 factory = { ctx ->
                     val adapter = AlbumGridAdapter(
@@ -695,6 +728,25 @@ private fun AlbumGridContent(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+            }  // end if (!isDateView)
+            // ── 日期分组视图 ──
+            if (isDateView && allDateMediaItems.isNotEmpty()) {
+                val columns = when (val mode = displayMode) {
+                    is AlbumDisplayMode.Grid -> mode.columns
+                    is AlbumDisplayMode.List -> 1
+                }
+                val dateViewItems = remember(allDateMediaItems, displayMode) {
+                    buildDateViewItems(allDateMediaItems)
+                }
+                DateGroupRecyclerView(
+                    items = dateViewItems,
+                    columns = columns,
+                    onClick = { mediaItem ->
+                        val idx = allDateMediaItems.indexOf(mediaItem)
+                        if (idx >= 0) onDatePhotoClick(idx)
+                    }
+                )
+            }
             // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
             Row(
                 modifier = Modifier
@@ -709,9 +761,16 @@ private fun AlbumGridContent(
                     onSelectMode = onSelectMode
                 )
                 Spacer(Modifier.weight(1f))
+                DateButton(
+                    isActive = isDateView,
+                    onClick = onToggleDateView
+                )
                 AlbumSortSelector(
                     currentSort = albumSortMode,
-                    onSelectSort = onSelectSort
+                    onSelectSort = { mode ->
+                        if (isDateView) onToggleDateView()
+                        onSelectSort(mode)
+                    }
                 )
             }
         }
@@ -732,10 +791,10 @@ private fun AlbumGridContent(
                 onDismiss = { showBatchTagDialog = false }
             )
         }
+        }
     }
-}
 
-// ── 批量 TAG 对话框（复用 TagManageDialog，隐藏现有标签和移除功能）──
+    // ── 批量 TAG 对话框（复用 TagManageDialog，隐藏现有标签和移除功能）──
 @Composable
 private fun BatchTagDialog(
     title: String,
@@ -1490,3 +1549,290 @@ private fun getRequiredPermissions(): Array<String> {
         arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 }
+
+// ══════════════════════════════════════
+//  日期按钮（同排序 Surface chip 风格）
+// ══════════════════════════════════════
+
+@Composable
+private fun DateButton(
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+            tonalElevation = if (isActive) 0.dp else 3.dp,
+            shadowElevation = if (isActive) 0.dp else 4.dp,
+            onClick = onClick
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "日期",
+                    color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════
+//  日期分组视图数据与适配器
+// ══════════════════════════════════════
+
+/** 日期分组视图的单个条目 */
+private sealed class DateViewItem {
+    data class Header(val label: String) : DateViewItem()
+    data class Media(val item: MediaItem) : DateViewItem()
+}
+
+/** 将全部媒体项按 dateAdded 日期分组，生成 [DateViewItem] 扁平列表 */
+private fun buildDateViewItems(allItems: List<MediaItem>): List<DateViewItem> {
+    if (allItems.isEmpty()) return emptyList()
+    val cal = java.util.Calendar.getInstance()
+    val grouped = allItems.groupBy { item ->
+        cal.timeInMillis = item.dateAdded * 1000L
+        val y = cal.get(java.util.Calendar.YEAR)
+        val m = cal.get(java.util.Calendar.MONTH)
+        val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+        "$y-${m + 1}-$d"
+    }
+    return grouped.entries
+        .sortedByDescending { it.key }
+        .flatMap { (dateKey, items) ->
+            listOf(DateViewItem.Header(formatDateLabel(dateKey))) + items.map { DateViewItem.Media(it) }
+        }
+}
+
+/** 将 "YYYY-M-D" 转为自然语言日期标签 */
+private fun formatDateLabel(dateKey: String): String {
+    val parts = dateKey.split("-")
+    if (parts.size < 3) return dateKey
+    val y = parts[0].toIntOrNull() ?: return dateKey
+    val m = parts[1].toIntOrNull() ?: return dateKey
+    val d = parts[2].toIntOrNull() ?: return dateKey
+    val now = java.util.Calendar.getInstance()
+    val target = java.util.Calendar.getInstance().apply {
+        set(y, m - 1, d, 0, 0, 0)
+    }
+    now.set(now.get(java.util.Calendar.YEAR), now.get(java.util.Calendar.MONTH), now.get(java.util.Calendar.DAY_OF_MONTH), 0, 0, 0)
+    val diffDays = ((now.timeInMillis - target.timeInMillis) / (1000L * 60 * 60 * 24)).toInt()
+    return when {
+        diffDays == 0 -> "今天"
+        diffDays == 1 -> "昨天"
+        diffDays in 2..6 -> {
+            val names = arrayOf("周日", "周一", "周二", "周三", "周四", "周五", "周六")
+            names[target.get(java.util.Calendar.DAY_OF_WEEK) - 1]
+        }
+        y == now.get(java.util.Calendar.YEAR) -> "${m}月${d}日"
+        else -> "${y}年${m}月${d}日"
+    }
+}
+
+/** 日期分组视图的 Composable RecyclerView 包装 */
+@Composable
+private fun DateGroupRecyclerView(
+    items: List<DateViewItem>,
+    columns: Int,
+    onClick: (MediaItem) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AndroidView(
+        factory = { ctx ->
+            val density = ctx.resources.displayMetrics.density
+            val topPad = (44 * density).toInt()
+            val adapter = DateGroupAdapter(items, columns, onClick)
+            RecyclerView(ctx).apply {
+                layoutManager = GridLayoutManager(ctx, columns).apply {
+                    spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                        override fun getSpanSize(position: Int): Int {
+                            return if (adapter.getItemViewType(position) == DateGroupAdapter.VIEW_TYPE_HEADER) columns else 1
+                        }
+                    }
+                }
+                this.adapter = adapter
+                clipToPadding = false
+                setPadding(0, topPad, 0, 0)
+            }
+        },
+        update = { rv ->
+            val adapter = rv.adapter as DateGroupAdapter
+            adapter.columns = columns
+            adapter.items = items
+            adapter.notifyDataSetChanged()
+            (rv.layoutManager as GridLayoutManager).spanCount = columns
+            (rv.layoutManager as GridLayoutManager).spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                override fun getSpanSize(position: Int): Int {
+                    return if (adapter.getItemViewType(position) == DateGroupAdapter.VIEW_TYPE_HEADER) columns else 1
+                }
+            }
+        },
+        modifier = modifier.fillMaxSize()
+    )
+}
+
+/** 日期分组 RecyclerView 适配器 */
+private class DateGroupAdapter(
+    var items: List<DateViewItem>,
+    var columns: Int,
+    private val onClick: (MediaItem) -> Unit
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    companion object {
+        const val VIEW_TYPE_HEADER = 0
+        const val VIEW_TYPE_MEDIA = 1
+        const val VIEW_TYPE_LIST_MEDIA = 2
+    }
+
+    override fun getItemCount() = items.size
+
+    override fun getItemViewType(position: Int): Int {
+        return when (items[position]) {
+            is DateViewItem.Header -> VIEW_TYPE_HEADER
+            is DateViewItem.Media -> if (columns == 1) VIEW_TYPE_LIST_MEDIA else VIEW_TYPE_MEDIA
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        val ctx = parent.context
+        val density = ctx.resources.displayMetrics.density
+        val screenWidth = ctx.resources.displayMetrics.widthPixels
+
+        return when (viewType) {
+            VIEW_TYPE_HEADER -> {
+                val tv = TextView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    setTextSize(16f)
+                    setTextColor(android.graphics.Color.WHITE)
+                    setPadding((14 * density).toInt(), (10 * density).toInt(), (14 * density).toInt(), (6 * density).toInt())
+                }
+                object : RecyclerView.ViewHolder(tv) {}
+            }
+            VIEW_TYPE_LIST_MEDIA -> {
+                // 列表模式：缩略图 + 文件名 + 文件信息
+                val gapPx = (2 * density).toInt()
+                val thumbSize = (56 * density).toInt()
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    setPadding(gapPx, gapPx, gapPx, gapPx)
+                }
+                val iv = ImageView(ctx).apply {
+                    layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                row.addView(iv)
+
+                val textColumn = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        weight = 1f
+                        setMargins((8 * density).toInt(), 0, 0, 0)
+                        gravity = android.view.Gravity.CENTER_VERTICAL
+                    }
+                }
+                val nameTv = TextView(ctx).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    setTextSize(14f)
+                    setTextColor(android.graphics.Color.WHITE)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+                textColumn.addView(nameTv)
+                val infoTv = TextView(ctx).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    setTextSize(12f)
+                    setTextColor(android.graphics.Color.GRAY)
+                    maxLines = 1
+                }
+                textColumn.addView(infoTv)
+                row.addView(textColumn)
+
+                row.setOnClickListener {
+                    val pos = row.tag as? Int ?: return@setOnClickListener
+                    val item = items.getOrNull(pos) as? DateViewItem.Media
+                    if (item != null) onClick(item.item)
+                }
+
+                ListMediaViewHolder(row, iv, nameTv, infoTv)
+            }
+            else -> {
+                // Grid 模式：正方形缩略图
+                val gapPx = (2 * density).toInt()
+                val side = (screenWidth / columns) - gapPx * 2
+                val iv = ImageView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(side, side)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setPadding(gapPx, gapPx, gapPx, gapPx)
+                }
+                iv.setOnClickListener {
+                    val pos = iv.tag as? Int ?: return@setOnClickListener
+                    val item = items.getOrNull(pos) as? DateViewItem.Media
+                    if (item != null) onClick(item.item)
+                }
+                object : RecyclerView.ViewHolder(iv) {}
+            }
+        }
+    }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        when (val item = items[position]) {
+            is DateViewItem.Header -> {
+                (holder.itemView as TextView).text = item.label
+            }
+            is DateViewItem.Media -> {
+                if (holder is ListMediaViewHolder) {
+                    holder.itemView.tag = position
+                    holder.imageView.load(item.item.uri) { crossfade(true) }
+                    holder.nameView.text = item.item.fileName
+                    holder.infoView.text = buildString {
+                        if (item.item.isVideo && item.item.duration > 0) {
+                            append("%d:%02d".format(item.item.duration / 1000 / 60, item.item.duration / 1000 % 60))
+                        } else if (item.item.width > 0 && item.item.height > 0) {
+                            append("${item.item.width}×${item.item.height}")
+                        }
+                        if (item.item.size > 0) {
+                            append(" · ")
+                            append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.item.size))
+                        }
+                    }
+                } else {
+                    val iv = holder.itemView as ImageView
+                    iv.tag = position
+                    iv.load(item.item.uri) { crossfade(true) }
+                }
+            }
+        }
+    }
+
+    private class ListMediaViewHolder(
+        itemView: android.view.View,
+        val imageView: ImageView,
+        val nameView: TextView,
+        val infoView: TextView
+    ) : RecyclerView.ViewHolder(itemView) {}
+}
+

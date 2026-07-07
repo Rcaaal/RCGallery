@@ -63,7 +63,7 @@ fun FloatingJumpButton(
 
     Box(
         modifier = modifier
-            .padding(start = 16.dp, bottom = 56.dp)
+            .padding(start = 16.dp, bottom = 10.dp)
             .size(42.dp)
             .clip(CircleShape)
             .background(Color(0xCC333333))
