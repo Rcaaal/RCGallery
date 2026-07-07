@@ -170,9 +170,10 @@ fun NetworkBrowserScreen(
                             subFolders = s.subFolders,
                             mediaFiles = s.mediaFiles,
                             onFolderClick = { folder -> viewModel.smbOpenFolder(folder.path, folder.name) },
-                            onFileClick = { idx, file ->
-                                AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
-                                previewState = idx to s.mediaFiles
+                            onFileClick = { idx, files ->
+                                val file = files.getOrNull(idx)
+                                if (file != null) AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
+                                previewState = idx to files
                             }
                         )
                     }
@@ -295,7 +296,7 @@ private fun FolderMixedContent(
     subFolders: List<SmbSubFolder>,
     mediaFiles: List<SmbFileInfo>,
     onFolderClick: (SmbSubFolder) -> Unit,
-    onFileClick: (Int, SmbFileInfo) -> Unit
+    onFileClick: (Int, List<SmbFileInfo>) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var isListMode by remember { mutableStateOf(true) } // 默认列表模式
@@ -307,12 +308,17 @@ private fun FolderMixedContent(
         return
     }
 
+    // latestMediaFiles 每次重组时更新为最新的 mediaFiles，
+    // 这样 remember 内的 onFileClick 就能始终读到当前文件夹的文件列表
+    var latestMediaFiles by remember { mutableStateOf(mediaFiles) }
+    latestMediaFiles = mediaFiles
+
     val adapter = remember {
         FolderMixedAdapter(
             subFolders = subFolders,
             mediaFiles = mediaFiles,
             onFolderClick = onFolderClick,
-            onFileClick = onFileClick,
+            onFileClick = { idx, _ -> onFileClick(idx, latestMediaFiles) },
             scope = scope,
             isListMode = isListMode
         )
@@ -990,7 +996,7 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
                     bitmap = thumbCache
                 }
 
-                // ③ 后台流式解码 + 写入预览缓存
+                // ③ 后台流式解码 + 写入预览缓存（必须切 IO 线程，BitmapFactory.decodeStream 内部触发 SMB 网络 I/O）
                 val streamResult = repo.getInputStream(fileInfo.path)
                 val stream = streamResult.getOrNull()
                 if (stream == null) {
@@ -998,6 +1004,7 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
                     return@withTimeout
                 }
                 try {
+                    withContext(kotlinx.coroutines.Dispatchers.IO) {
                     val buffered = java.io.BufferedInputStream(stream, 512 * 1024)
                     buffered.mark(512 * 1024)
                     val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1023,6 +1030,7 @@ private fun SmbImageViewer(fileInfo: SmbFileInfo) {
                     } else if (thumbCache == null) {
                         isError = true
                     }
+                    }   // ← withContext(IO)
                 } catch (e: Exception) {
                     AppLogger.d("SMB-WARN", "preview error: ${e.message}")
                     if (thumbCache == null) isError = true
@@ -1270,6 +1278,8 @@ private fun SmbCachedVideoPlayer(
         }
     }
 
+    // httpUrl 就绪后 update 块负责同步 player 到 PlayerView 并 prepare
+
     // 渲染
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasError) {
@@ -1316,12 +1326,16 @@ private fun SmbCachedVideoPlayer(
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        player = exoPlayer
-                        post {
-                            AppLogger.d("SMB-VIDEO", "proxy surface ready, calling prepare()")
-                            exoPlayer?.prepare()
-                            exoPlayer?.playWhenReady = true
-                        }
+                    }
+                },
+                update = { view ->
+                    // factory 创建时 exoPlayer 可能为 null（httpUrl 尚未就绪），
+                    // 等 httpUrl 到来后 exoPlayer 变为非 null，update 负责同步到 PlayerView
+                    if (view.player !== exoPlayer) {
+                        view.player = exoPlayer
+                        exoPlayer?.prepare()
+                        exoPlayer?.playWhenReady = true
+                        AppLogger.d("SMB-VIDEO", "proxy update set player + prepare")
                     }
                 }
             )
