@@ -725,6 +725,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _tempFilter = MutableStateFlow(TempFilter())
     val tempFilter: StateFlow<TempFilter> = _tempFilter.asStateFlow()
 
+    // ── 图片筛选状态（纯内存，不持久化，重启即失）──
+    private val _mediaPersistentRules = MutableStateFlow<List<TagRule>>(emptyList())
+    val mediaPersistentRules: StateFlow<List<TagRule>> = _mediaPersistentRules.asStateFlow()
+
+    private val _mediaTempFilter = MutableStateFlow(TempFilter())
+    val mediaTempFilter: StateFlow<TempFilter> = _mediaTempFilter.asStateFlow()
+
     private fun loadPersistentRules() {
         val jsonStr = getApplication<Application>()
             .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -816,13 +823,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 判断媒体文件是否应被隐藏（基于持久规则 + 临时筛选）。
+     * 判断媒体文件是否应被隐藏（基于图片筛选规则 + 临时筛选）。
      */
     fun shouldHideMedia(filePath: String, mediaTags: List<String>, albumTags: List<String>): Boolean {
         val allTagSet = (albumTags + mediaTags).toSet()
 
-        // 先检查持久规则
-        val pRules = getActiveMediaRules()
+        // 检查持久规则（图片筛选，全部生效，无需 scope 过滤）
+        val pRules = _mediaPersistentRules.value.filter { it.enabled }
         if (pRules.isNotEmpty()) {
             val showOnlyRules = pRules.filter { it.mode == FilterMode.SHOW_ONLY }
             if (showOnlyRules.isNotEmpty()) {
@@ -832,8 +839,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             if (pRules.filter { it.mode == FilterMode.HIDE }.any { ruleMatches(it, allTagSet) }) return true
         }
 
-        // 再检查临时筛选（图片列表专用）
-        val temp = _tempFilter.value
+        // 再检查临时筛选（图片专用）
+        val temp = _mediaTempFilter.value
         if (temp.isActive) {
             if (temp.mode == FilterMode.HIDE) {
                 if (ruleMatches(temp, allTagSet)) return true
@@ -919,6 +926,56 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 重置临时筛选 */
     fun resetTempFilter() {
         _tempFilter.value = TempFilter()
+    }
+
+    // ── 图片筛选 CRUD（纯内存，不持久化）──
+
+    /** 添加图片规则并检测冲突。返回 null=成功，非 null=冲突的规则名 */
+    fun addMediaRule(rule: TagRule): String? {
+        val current = _mediaPersistentRules.value.toMutableList()
+        current.add(rule)
+        val conflict = findFirstConflict(current)
+        if (conflict != null) {
+            return current[conflict.second].name
+        }
+        _mediaPersistentRules.value = current
+        return null
+    }
+
+    /** 更新图片规则并检测冲突。返回 null=成功，非 null=冲突的规则名 */
+    fun updateMediaRule(rule: TagRule): String? {
+        val current = _mediaPersistentRules.value.toMutableList()
+        val idx = current.indexOfFirst { it.id == rule.id }
+        if (idx < 0) return null
+        current[idx] = rule
+        val conflict = findFirstConflict(current)
+        if (conflict != null) {
+            return current[conflict.second].name
+        }
+        _mediaPersistentRules.value = current
+        return null
+    }
+
+    /** 删除图片规则 */
+    fun deleteMediaRule(ruleId: String) {
+        _mediaPersistentRules.value = _mediaPersistentRules.value.filter { it.id != ruleId }
+    }
+
+    /** 切换图片规则启用/禁用状态 */
+    fun toggleMediaRule(ruleId: String) {
+        _mediaPersistentRules.value = _mediaPersistentRules.value.map {
+            if (it.id == ruleId) it.copy(enabled = !it.enabled) else it
+        }
+    }
+
+    /** 设置图片临时筛选 */
+    fun setMediaTempFilter(filter: TempFilter) {
+        _mediaTempFilter.value = filter
+    }
+
+    /** 重置图片临时筛选 */
+    fun resetMediaTempFilter() {
+        _mediaTempFilter.value = TempFilter()
     }
 
     private fun refreshTrashCount() {

@@ -925,38 +925,11 @@ private fun AlbumGridContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // 筛选按钮（同款 Surface chip 风格，与列数按钮完全一致）
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (hasActiveFilter) MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surface,
-                    tonalElevation = if (hasActiveFilter) 0.dp else 3.dp,
-                    shadowElevation = if (hasActiveFilter) 0.dp else 4.dp,
-                    onClick = onOpenFilter
-                ) {
-                    Box {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
-                        ) {
-                            Text("☰",
-                                color = if (hasActiveFilter) MaterialTheme.colorScheme.onPrimaryContainer
-                                        else MaterialTheme.colorScheme.onSurface,
-                                style = MaterialTheme.typography.labelMedium)
-                        }
-                        if (hasActiveFilter) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .size(8.dp)
-                                    .background(Color(0xFF4CAF50), CircleShape)
-                            )
-                        }
-                    }
-                }
                 DisplayModeSelector(
                     currentMode = displayMode,
-                    onSelectMode = onSelectMode
+                    onSelectMode = onSelectMode,
+                    hasActiveFilter = hasActiveFilter,
+                    onOpenFilter = onOpenFilter
                 )
                 Spacer(Modifier.weight(1f))
                 DateButton(
@@ -1582,6 +1555,8 @@ private class ListVH private constructor(
 private fun DisplayModeSelector(
     currentMode: AlbumDisplayMode,
     onSelectMode: (AlbumDisplayMode) -> Unit,
+    hasActiveFilter: Boolean = false,
+    onOpenFilter: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val gridOptions = listOf(
@@ -1595,7 +1570,26 @@ private fun DisplayModeSelector(
     var expanded by remember { mutableStateOf(false) }
 
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        // 列数选择 — 同款 Surface chip 风格
+        // ── 筛选按钮 ──
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = if (hasActiveFilter) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surface,
+            tonalElevation = if (hasActiveFilter) 0.dp else 3.dp,
+            shadowElevation = if (hasActiveFilter) 0.dp else 4.dp,
+            onClick = onOpenFilter
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text("☰ 筛选",
+                    color = if (hasActiveFilter) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        // 列数选择
         Box {
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -1607,7 +1601,7 @@ private fun DisplayModeSelector(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
                         text = if (isListMode) "列数" else gridOptions.first { isSelected(it.first) }.second,
@@ -1669,7 +1663,7 @@ private fun DisplayModeSelector(
                 color = if (isListMode) MaterialTheme.colorScheme.onPrimaryContainer
                         else MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             )
         }
     }
@@ -1697,10 +1691,10 @@ private fun AlbumSortSelector(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = "排序: ${currentSort.label}",
+                    text = "${currentSort.label}",
                     color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.labelMedium
                 )
@@ -1788,7 +1782,7 @@ private fun DateButton(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
                     text = "日期",

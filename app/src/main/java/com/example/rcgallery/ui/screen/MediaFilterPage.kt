@@ -28,16 +28,17 @@ import androidx.activity.compose.BackHandler
 import java.util.UUID
 
 /**
- * 全屏筛选管理页面。
+ * 全屏图片筛选管理页面。
  *
- * 包含：持久规则列表（toggle 启用/禁用）、临时筛选、新建/编辑规则。
+ * 和 FilterPage 对等平行，但只管理图片筛选规则和图片临时筛选。
+ * 全部在内存中，重启即失。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FilterPage(
+fun MediaFilterPage(
     allTags: List<TagEntity>,
-    persistentRules: List<TagRule>,
-    tempFilter: TempFilter,
+    mediaPersistentRules: List<TagRule>,
+    mediaTempFilter: TempFilter,
     onBack: () -> Unit,
     onToggleRule: (String) -> Unit,
     onSaveRule: (TagRule) -> String?,  // 返回 null=成功，非 null=冲突规则名
@@ -61,7 +62,7 @@ fun FilterPage(
     ) else null
 
     if (currentEdit != null) {
-        RuleEditPage(
+        MediaRuleEditPage(
             rule = currentEdit,
             allTags = allTags,
             isNew = showNewRule,
@@ -87,8 +88,8 @@ fun FilterPage(
 
     // ── 重置二次确认弹窗 ──
     if (showResetDialog) {
-        val hasPersistent = persistentRules.any { it.enabled }
-        val hasTemp = tempFilter.isActive
+        val hasPersistent = mediaPersistentRules.any { it.enabled }
+        val hasTemp = mediaTempFilter.isActive
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
             title = { Text("重置筛选") },
@@ -119,7 +120,7 @@ fun FilterPage(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("筛选") },
+                title = { Text("图片筛选") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
@@ -154,18 +155,18 @@ fun FilterPage(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            // ── 持久规则 ──
-            Text("持久规则", style = MaterialTheme.typography.titleSmall,
+            // ── 筛选规则（纯内存，重启即失） ──
+            Text("筛选规则", style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
 
-            if (persistentRules.isEmpty()) {
+            if (mediaPersistentRules.isEmpty()) {
                 Text("无当前筛选目标", fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 16.dp))
             } else {
-                persistentRules.forEach { rule ->
-                    RuleListItem(
+                mediaPersistentRules.forEach { rule ->
+                    MediaRuleListItem(
                         rule = rule,
                         onToggle = { onToggleRule(rule.id) },
                         onClick = { editingRule = rule }
@@ -186,13 +187,13 @@ fun FilterPage(
 
             Spacer(Modifier.height(24.dp))
 
-            // ── 临时筛选（相册 + 图片列表） ──
+            // ── 临时筛选 ──
             Text("临时筛选", style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
 
-            TempFilterSection(
-                filter = tempFilter,
+            MediaTempFilterSection(
+                filter = mediaTempFilter,
                 allTags = allTags,
                 onFilterChange = onSetTempFilter
             )
@@ -205,7 +206,7 @@ fun FilterPage(
 // ══════════════════════════════════════
 
 @Composable
-private fun RuleListItem(
+private fun MediaRuleListItem(
     rule: TagRule,
     onToggle: () -> Unit,
     onClick: () -> Unit
@@ -243,7 +244,7 @@ private fun RuleListItem(
 // ══════════════════════════════════════
 
 @Composable
-private fun TempFilterSection(
+private fun MediaTempFilterSection(
     filter: TempFilter,
     allTags: List<TagEntity>,
     onFilterChange: (TempFilter) -> Unit
@@ -340,7 +341,7 @@ private fun TempFilterSection(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RuleEditPage(
+private fun MediaRuleEditPage(
     rule: TagRule,
     allTags: List<TagEntity>,
     isNew: Boolean,
@@ -405,7 +406,7 @@ private fun RuleEditPage(
                                 tagNames = selectedTagNames.toList(),
                                 logic = logic,
                                 mode = mode,
-                                scope = com.example.rcgallery.model.FilterScope.ALBUM
+                                scope = FilterScope.ALBUM
                             ))
                         }
                     ) { Text("保存") }

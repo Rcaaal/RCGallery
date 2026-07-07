@@ -57,8 +57,6 @@ import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
-import com.example.rcgallery.model.TempFilter
-import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -80,7 +78,10 @@ fun MediaGridScreen(
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
-    val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
+    val mediaPersistentRules by viewModel.mediaPersistentRules.collectAsStateWithLifecycle()
+    val mediaTempFilter by viewModel.mediaTempFilter.collectAsStateWithLifecycle()
+    var showMediaFilterPage by remember { mutableStateOf(false) }
+    val hasActiveMediaFilter = mediaPersistentRules.any { it.enabled } || mediaTempFilter.isActive
 
     // ── 相册 TAG 管理 ──
     val currentAlbumTags = remember(albumDirectoryPath, albumTags) {
@@ -254,21 +255,12 @@ fun MediaGridScreen(
         )
     }
 
-    // ── 临时筛选（标签）—— 在 sortedItems 之后过滤 ──
-    val tagFilteredItems = remember(sortedItems, tempFilter, mediaTags, albumTags) {
-        if (!tempFilter.isActive) sortedItems
-        else sortedItems.filter { item ->
-            val allTags = (mediaTags[item.filePath]?.map { it.name } ?: emptyList()) +
-                    (albumTags[albumDirectoryPath]?.map { it.name } ?: emptyList())
-            val allSet = allTags.toSet()
-            val tempTags = tempFilter.tagNames.toSet()
-            if (tempTags.isEmpty()) return@filter true
-            val matches = if (tempFilter.logic == com.example.rcgallery.model.FilterLogic.AND) {
-                tempTags.all { it in allTags }
-            } else {
-                tempTags.any { it in allTags }
-            }
-            if (tempFilter.mode == FilterMode.HIDE) !matches else matches
+    // ── 标签筛选（持久规则 + 临时筛选）—— 在 sortedItems 之后过滤 ──
+    val tagFilteredItems = remember(sortedItems, mediaTempFilter, mediaPersistentRules, mediaTags, albumTags) {
+        sortedItems.filter { item ->
+            val mTags = mediaTags[item.filePath]?.map { it.name } ?: emptyList()
+            val aTags = albumTags[albumDirectoryPath]?.map { it.name } ?: emptyList()
+            !viewModel.shouldHideMedia(item.filePath, mTags, aTags)
         }
     }
 
@@ -559,6 +551,22 @@ fun MediaGridScreen(
                                     }).apply()
                                 }
                             )
+                            // ── 筛选按钮 ──
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (hasActiveMediaFilter) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.surface,
+                                tonalElevation = if (hasActiveMediaFilter) 0.dp else 3.dp,
+                                shadowElevation = if (hasActiveMediaFilter) 0.dp else 4.dp,
+                                onClick = { showMediaFilterPage = true }
+                            ) {
+                                Text("☰ 筛选",
+                                    color = if (hasActiveMediaFilter) MaterialTheme.colorScheme.onPrimaryContainer
+                                            else MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
                             Spacer(Modifier.weight(1f))
                             MediaSortSelector(
                                 currentSort = mediaSortMode,
@@ -684,6 +692,31 @@ fun MediaGridScreen(
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
                     items = tagFilteredItems
+                )
+            }
+
+            // ── 图片筛选全屏覆盖层 ──
+            if (showMediaFilterPage) {
+                val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+                MediaFilterPage(
+                    allTags = allTags,
+                    mediaPersistentRules = mediaPersistentRules,
+                    mediaTempFilter = mediaTempFilter,
+                    onBack = { showMediaFilterPage = false },
+                    onToggleRule = { viewModel.toggleMediaRule(it) },
+                    onSaveRule = { rule ->
+                        if (mediaPersistentRules.any { it.id == rule.id }) {
+                            viewModel.updateMediaRule(rule)
+                        } else {
+                            viewModel.addMediaRule(rule)
+                        }
+                    },
+                    onDeleteRule = { viewModel.deleteMediaRule(it) },
+                    onSetTempFilter = { viewModel.setMediaTempFilter(it) },
+                    onReset = {
+                        viewModel.resetMediaTempFilter()
+                        mediaPersistentRules.forEach { if (it.enabled) viewModel.toggleMediaRule(it.id) }
+                    }
                 )
             }
 
