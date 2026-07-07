@@ -959,7 +959,7 @@ private class SimpleGridAdapter(
                 if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
-            if (item.isVideo) iv.load(item.uri) { crossfade(true) } else iv.load(item.uri) { crossfade(true) }
+            if (item.isVideo) iv.load(item.uri) { crossfade(false) } else iv.load(item.uri) { crossfade(false) }
             if (item.isVideo) {
                 val formatCode = item.fileName.substringAfterLast('.', "")
                     .takeIf { it.isNotBlank() }?.uppercase() ?: "VIDEO"
@@ -1179,7 +1179,7 @@ private class SimpleGridAdapter(
                 if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
-            iv.load(item.uri) { crossfade(true) }
+            iv.load(item.uri) { crossfade(false) }
             nameTv.text = item.fileName
             infoTv.text = buildString {
                 if (item.isVideo && item.duration > 0) {

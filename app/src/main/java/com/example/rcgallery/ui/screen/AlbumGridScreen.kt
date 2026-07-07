@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -385,7 +386,11 @@ fun AlbumGridScreen(
                     onManageAlbumTags = { album -> tagDialogAlbum = album },
                     allTags = allTags,
                     onBatchAddTagsToAlbums = { dirPath, tagName -> viewModel.addAlbumTag(dirPath, tagName) },
-                    onBatchAddTagsToMedia = { filePath, tagName -> viewModel.addMediaTag(filePath, tagName) }
+                    onBatchAddTagsToMedia = { filePath, tagName -> viewModel.addMediaTag(filePath, tagName) },
+                    onDeleteDateMedia = { paths ->
+                        val toDelete = allMediaItems.filter { it.filePath in paths }
+                        toDelete.forEach { viewModel.moveToTrash(it) }
+                    }
                 )
                 // ── TAG 管理对话框 ──
                 val currentTagAlbum = tagDialogAlbum
@@ -540,6 +545,7 @@ private fun AlbumGridContent(
     allTags: List<TagEntity> = emptyList(),
     onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
     onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
+    onDeleteDateMedia: (List<String>) -> Unit = {},
     // ── 日期分组视图参数 ──
     isDateView: Boolean = false,
     onToggleDateView: () -> Unit = {},
@@ -605,12 +611,17 @@ private fun AlbumGridContent(
                 title = {
                     Text(
                         if (isAlbumMultiSelect) "已选 ${selectedAlbumIds.size} 项"
+                        else if (isDateMultiSelect) "已选 ${selectedDateMediaPaths.size} 项"
                         else "RCGallery"
                     )
                 },
                 navigationIcon = {
                     if (isAlbumMultiSelect) {
                         TextButton(onClick = { exitAlbumMultiSelect() }) {
+                            Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    } else if (isDateMultiSelect) {
+                        TextButton(onClick = { exitDateMultiSelect() }) {
                             Text("取消", color = MaterialTheme.colorScheme.onSurface)
                         }
                     }
@@ -620,7 +631,7 @@ private fun AlbumGridContent(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
                 actions = {
-                    if (!isAlbumMultiSelect) {
+                    if (!isAlbumMultiSelect && !isDateMultiSelect) {
                     // ── 齿轮菜单按钮 ──
                     var showGearMenu by remember { mutableStateOf(false) }
                     Box(modifier = Modifier.padding(end = 4.dp)) {
@@ -705,6 +716,19 @@ private fun AlbumGridContent(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                     ) {
                         Text("批量加标签 (${selectedDateMediaPaths.size})", fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            onDeleteDateMedia(selectedDateMediaPaths.toList())
+                            exitDateMultiSelect()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                    ) {
+                        Text("删除到回收站 (${selectedDateMediaPaths.size})", fontSize = 13.sp)
                     }
                     Spacer(Modifier.width(8.dp))
                 }
@@ -806,7 +830,16 @@ private fun AlbumGridContent(
                         if (!isDateMultiSelect) isDateMultiSelect = true
                         toggleDateMediaSelection(mediaItem.filePath)
                     },
-                    selectedPaths = selectedDateMediaPaths
+                    selectedPaths = selectedDateMediaPaths,
+                    onDragSelectRange = { start, end ->
+                        val minIdx = minOf(start, end)
+                        val maxIdx = maxOf(start, end)
+                        val paths = (minIdx..maxIdx).mapNotNull { i ->
+                            (dateViewItems.getOrNull(i) as? DateViewItem.Media)?.item?.filePath
+                        }.toSet()
+                        if (paths.isNotEmpty()) isDateMultiSelect = true
+                        selectedDateMediaPaths = paths
+                    }
                 )
             }
             // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
@@ -1722,6 +1755,7 @@ private fun DateGroupRecyclerView(
     onClick: (MediaItem) -> Unit,
     onLongClick: (MediaItem) -> Unit = {},
     selectedPaths: Set<String> = emptySet(),
+    onDragSelectRange: (startPos: Int, endPos: Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     AndroidView(
@@ -1732,7 +1766,7 @@ private fun DateGroupRecyclerView(
                 this.onLongClick = onLongClick
                 this.selectedPaths = selectedPaths
             }
-            RecyclerView(ctx).apply {
+            val rv = RecyclerView(ctx).apply {
                 layoutManager = GridLayoutManager(ctx, columns).apply {
                     spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
                         override fun getSpanSize(position: Int): Int {
@@ -1744,6 +1778,70 @@ private fun DateGroupRecyclerView(
                 clipToPadding = false
                 setPadding(0, topPad, 0, 0)
             }
+
+            // ── 滑动手势多选 ──
+            val dragState = object {
+                var dragStartIdx = -1
+                var isDragging = false
+            }
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
+            var downX = 0f; var downY = 0f
+
+            rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+                override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            dragState.isDragging = false
+                            dragState.dragStartIdx = -1
+                            downX = e.x; downY = e.y
+                            handler.removeCallbacksAndMessages(null)
+                            handler.postDelayed({
+                                val child = rv.findChildViewUnder(downX, downY) ?: return@postDelayed
+                                val pos = rv.getChildAdapterPosition(child)
+                                if (pos < 0) return@postDelayed
+                                val item = items.getOrNull(pos) as? DateViewItem.Media ?: return@postDelayed
+                                dragState.dragStartIdx = pos
+                                dragState.isDragging = true
+                                onLongClick(item.item)
+                            }, longPressMs)
+                            return false
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            val slop = android.view.ViewConfiguration.get(rv.context).scaledTouchSlop
+                            if (kotlin.math.abs(e.x - downX) > slop || kotlin.math.abs(e.y - downY) > slop) {
+                                handler.removeCallbacksAndMessages(null)
+                            }
+                            if (dragState.isDragging) return true
+                            return false
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            handler.removeCallbacksAndMessages(null)
+                            dragState.isDragging = false
+                            dragState.dragStartIdx = -1
+                            return false
+                        }
+                    }
+                    return false
+                }
+
+                override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
+                    if (!dragState.isDragging) return
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_MOVE -> {
+                            val child = rv.findChildViewUnder(e.x, e.y)
+                            val pos = child?.let { rv.getChildAdapterPosition(it) } ?: return
+                            onDragSelectRange(dragState.dragStartIdx, pos)
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            dragState.isDragging = false
+                            dragState.dragStartIdx = -1
+                        }
+                    }
+                }
+            })
+
+            rv
         },
         update = { rv ->
             val adapter = rv.adapter as DateGroupAdapter
@@ -1810,6 +1908,7 @@ private class DateGroupAdapter(
                 // 列表模式：缩略图（包对号覆盖层）+ 文件名 + 文件信息
                 val gapPx = (2 * density).toInt()
                 val thumbSize = (56 * density).toInt()
+                val rv = parent as RecyclerView
                 val row = LinearLayout(ctx).apply {
                     orientation = LinearLayout.HORIZONTAL
                     layoutParams = ViewGroup.LayoutParams(
@@ -1890,12 +1989,14 @@ private class DateGroupAdapter(
                 row.addView(textColumn)
 
                 row.setOnClickListener {
-                    val pos = row.tag as? Int ?: return@setOnClickListener
+                    val pos = rv.getChildAdapterPosition(row)
+                    if (pos < 0) return@setOnClickListener
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item)
                 }
                 row.setOnLongClickListener {
-                    val pos = row.tag as? Int ?: return@setOnLongClickListener true
+                    val pos = rv.getChildAdapterPosition(row)
+                    if (pos < 0) return@setOnLongClickListener true
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onLongClick(item.item)
                     true
@@ -1907,6 +2008,7 @@ private class DateGroupAdapter(
                 // Grid 模式：正方形缩略图 + 多选对号覆盖层
                 val gapPx = (2 * density).toInt()
                 val side = (screenWidth / columns) - gapPx * 2
+                val rv = parent as RecyclerView
                 val frame = FrameLayout(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(side, side)
                 }
@@ -1944,12 +2046,14 @@ private class DateGroupAdapter(
                 frame.addView(checkmark)
 
                 frame.setOnClickListener {
-                    val pos = frame.tag as? Int ?: return@setOnClickListener
+                    val pos = rv.getChildAdapterPosition(frame)
+                    if (pos < 0) return@setOnClickListener
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item)
                 }
                 frame.setOnLongClickListener {
-                    val pos = frame.tag as? Int ?: return@setOnLongClickListener true
+                    val pos = rv.getChildAdapterPosition(frame)
+                    if (pos < 0) return@setOnLongClickListener true
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onLongClick(item.item)
                     true
@@ -1968,7 +2072,7 @@ private class DateGroupAdapter(
                 val isSelected = item.item.filePath in selectedPaths
                 if (holder is ListMediaViewHolder) {
                     holder.itemView.tag = position
-                    holder.imageView.load(item.item.uri) { crossfade(true) }
+                    holder.imageView.load(item.item.uri) { crossfade(false) }
                     holder.nameView.text = item.item.fileName
                     holder.infoView.text = buildString {
                         if (item.item.isVideo && item.item.duration > 0) {
@@ -1987,9 +2091,8 @@ private class DateGroupAdapter(
                     }
                 } else {
                     val frame = holder.itemView as FrameLayout
-                    frame.tag = position
                     val iv = frame.getChildAt(0) as ImageView
-                    iv.load(item.item.uri) { crossfade(true) }
+                    iv.load(item.item.uri) { crossfade(false) }
                     val checkmark = frame.findViewById<FrameLayout>(android.R.id.checkbox)
                     if (checkmark != null) {
                         checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE

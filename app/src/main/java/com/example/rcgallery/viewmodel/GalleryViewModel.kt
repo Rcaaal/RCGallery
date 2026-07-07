@@ -115,7 +115,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         AppLogger.d("VM", "loadAlbums")
         viewModelScope.launch {
             _isLoading.value = true
-            repository.loadAlbums()
+            val result = withContext(Dispatchers.IO) { repository.loadAlbums() }
+            result
                 .onSuccess { albums ->
                     // 从各相册计数中减去已回收的文件数
                     val trashList = trashManager.getAll()
@@ -143,8 +144,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 加载全部媒体（不限相册，按 dateAdded 降序，用于日期分组视图） */
     fun loadAllMedia() {
         viewModelScope.launch {
-            _allMediaItems.value = repository.loadMediaItems(albumId = null, pageSize = 10000)
-                .getOrDefault(emptyList())
+            _allMediaItems.value = withContext(Dispatchers.IO) {
+                repository.loadMediaItems(albumId = null, pageSize = 10000)
+            }.getOrDefault(emptyList())
             AppLogger.d("VM", "loadAllMedia count=${_allMediaItems.value.size}")
         }
     }
@@ -156,7 +158,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _isLoading.value = true
 
         loadMediaJob = viewModelScope.launch {
-            repository.loadMediaItems(albumId = albumId)
+            val result = withContext(Dispatchers.IO) { repository.loadMediaItems(albumId = albumId) }
+            result
                 .onSuccess {
                     val match = pendingAlbumId == albumId
                     AppLogger.d("VM", "loadMedia OK albumId=[$albumId] items=${it.size} pendingMatch=$match")
@@ -287,6 +290,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refreshTrashCount()
         // 如果当前正在浏览该相册，从列表中移除（同步过滤，不走 loadMedia 全量重查）
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
+        // 如果日期视图打开，从全量列表中也移除
+        _allMediaItems.value = _allMediaItems.value.filter { it.uri.toString() != item.uri.toString() }
         // 直接更新相册计数（减 1），count=0 的相册自动移除
         _albums.value = _albums.value.mapNotNull { album ->
             if (album.bucketId == item.albumId) {
