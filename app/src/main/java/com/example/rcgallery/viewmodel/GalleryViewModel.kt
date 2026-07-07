@@ -799,16 +799,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val rules = getActiveAlbumRules()
         if (rules.isEmpty()) return false
         val tagSet = albumTags.toSet()
+        AppLogger.d("Filter", "shouldHideAlbum dir=$directoryPath tags=$tagSet activeRules=${rules.map { "${it.name}:${it.mode}:${it.tagNames}" }}")
 
         // 先检查是否有 SHOW_ONLY 规则：如果任一 SHOW_ONLY 规则不命中 → 隐藏
         val showOnlyRules = rules.filter { it.mode == FilterMode.SHOW_ONLY }
         if (showOnlyRules.isNotEmpty()) {
             val hitsAnyShowOnly = showOnlyRules.any { ruleMatches(it, tagSet) }
+            AppLogger.d("Filter", "  showOnlyRules hits=$hitsAnyShowOnly")
             if (!hitsAnyShowOnly) return true
         }
 
         // 再检查 HIDE 规则：命中任一 HIDE → 隐藏
-        return rules.filter { it.mode == FilterMode.HIDE }.any { ruleMatches(it, tagSet) }
+        val hideResult = rules.filter { it.mode == FilterMode.HIDE }.any { ruleMatches(it, tagSet) }
+        AppLogger.d("Filter", "  hideResult=$hideResult")
+        return hideResult
     }
 
     /**

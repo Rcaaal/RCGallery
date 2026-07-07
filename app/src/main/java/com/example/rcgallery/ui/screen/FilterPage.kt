@@ -186,8 +186,8 @@ fun FilterPage(
 
             Spacer(Modifier.height(24.dp))
 
-            // ── 临时筛选（图片列表） ──
-            Text("临时筛选（图片）", style = MaterialTheme.typography.titleSmall,
+            // ── 临时筛选（相册 + 图片列表） ──
+            Text("临时筛选", style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
 

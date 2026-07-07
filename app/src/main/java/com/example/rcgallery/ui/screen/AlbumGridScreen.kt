@@ -162,44 +162,6 @@ fun AlbumGridScreen(
         )
     }
 
-    // ── 筛选规则过滤后的相册列表 ──
-    val filteredAlbums = remember(albums, persistentRules, albumTags) {
-        val hasActiveAlbumRule = persistentRules.any {
-            it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
-        }
-        if (!hasActiveAlbumRule) albums
-        else albums.filter { album ->
-            val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
-            !viewModel.shouldHideAlbum(album.directoryPath, tagNames)
-        }
-    }
-
-    var showFilterPage by remember { mutableStateOf(false) }
-    if (showFilterPage) {
-        val allTags by viewModel.allTags.collectAsStateWithLifecycle()
-        val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
-        FilterPage(
-            allTags = allTags,
-            persistentRules = persistentRules,
-            tempFilter = tempFilter,
-            onBack = { showFilterPage = false },
-            onToggleRule = { viewModel.toggleRule(it) },
-            onSaveRule = { rule ->
-                if (persistentRules.any { it.id == rule.id }) {
-                    viewModel.updateRule(rule)
-                } else {
-                    viewModel.addRule(rule)
-                }
-            },
-            onDeleteRule = { viewModel.deleteRule(it) },
-            onSetTempFilter = { viewModel.setTempFilter(it) },
-            onReset = {
-                viewModel.resetTempFilter()
-                persistentRules.forEach { if (it.enabled) viewModel.toggleRule(it.id) }
-            }
-        )
-    }
-
     // ── 日期分组视图状态（持久化）──
     var isDateView by remember {
         mutableStateOf(prefs.getBoolean("date_view", false))
@@ -339,6 +301,42 @@ fun AlbumGridScreen(
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val albumRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
+    val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
+
+    // ── 筛选规则过滤后的相册列表（持久规则 + 临时筛选叠加）──
+    val filteredAlbums = remember(albums, persistentRules, albumTags, tempFilter) {
+        val hasActiveAlbumRule = persistentRules.any {
+            it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
+        }
+        val hasTemp = tempFilter.isActive
+        AppLogger.d("Filter", "filteredAlbums recalc persistent=$hasActiveAlbumRule temp=$hasTemp")
+        if (!hasActiveAlbumRule && !hasTemp) albums
+        else {
+            albums.filter { album ->
+                val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
+                // 先过持久规则
+                val byPersistent = if (hasActiveAlbumRule) viewModel.shouldHideAlbum(album.directoryPath, tagNames) else false
+                val byTemp = if (hasTemp) {
+                    val tagSet = tagNames.toSet()
+                    val tempTags = tempFilter.tagNames.toSet()
+                    val matches = if (tempFilter.logic == com.example.rcgallery.model.FilterLogic.AND) {
+                        tempTags.all { it in tagSet }
+                    } else {
+                        tempTags.any { it in tagSet }
+                    }
+                    if (tempFilter.mode == com.example.rcgallery.model.FilterMode.HIDE) matches else !matches
+                } else false
+                val hide = byPersistent || byTemp
+                AppLogger.d("Filter", "  album=${album.bucketName} tags=$tagNames hide=$hide (persistent=$byPersistent temp=$byTemp)")
+                !hide
+            }.also { result ->
+                AppLogger.d("Filter", "  result: ${result.size}/${albums.size} albums kept")
+            }
+        }
+    }
+
+    var showFilterPage by remember { mutableStateOf(false) }
+
     // ── 权限请求 launcher ──
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -359,6 +357,8 @@ fun AlbumGridScreen(
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
+            var showFilterPage by remember { mutableStateOf(false) }
+
             if (!hasPermission) {
                 NoPermissionContent(onRequestPermission = {
                     val permissions = getRequiredPermissions()
@@ -437,7 +437,7 @@ fun AlbumGridScreen(
                         val toDelete = allMediaItems.filter { it.filePath in paths }
                         toDelete.forEach { viewModel.moveToTrash(it) }
                     },
-                    hasActiveFilter = persistentRules.any { it.enabled },
+                    hasActiveFilter = persistentRules.any { it.enabled } || tempFilter.isActive,
                     onOpenFilter = { showFilterPage = true }
                 )
                 // ── TAG 管理对话框 ──
@@ -493,6 +493,30 @@ fun AlbumGridScreen(
                     initialIndex = selectedDatePhotoIndex,
                     onBackClick = { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) },
                     items = allMediaItems
+                )
+            }
+            // ── 筛选规则页面（全屏覆盖层）──
+            if (showFilterPage) {
+                val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+                FilterPage(
+                    allTags = allTags,
+                    persistentRules = persistentRules,
+                    tempFilter = tempFilter,
+                    onBack = { showFilterPage = false },
+                    onToggleRule = { viewModel.toggleRule(it) },
+                    onSaveRule = { rule ->
+                        if (persistentRules.any { it.id == rule.id }) {
+                            viewModel.updateRule(rule)
+                        } else {
+                            viewModel.addRule(rule)
+                        }
+                    },
+                    onDeleteRule = { viewModel.deleteRule(it) },
+                    onSetTempFilter = { viewModel.setTempFilter(it) },
+                    onReset = {
+                        viewModel.resetTempFilter()
+                        persistentRules.forEach { if (it.enabled) viewModel.toggleRule(it.id) }
+                    }
                 )
             }
         }
@@ -901,26 +925,39 @@ private fun AlbumGridContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                // 筛选按钮（同款 Surface chip 风格，与列数按钮完全一致）
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (hasActiveFilter) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.surface,
+                    tonalElevation = if (hasActiveFilter) 0.dp else 3.dp,
+                    shadowElevation = if (hasActiveFilter) 0.dp else 4.dp,
+                    onClick = onOpenFilter
+                ) {
+                    Box {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)
+                        ) {
+                            Text("☰",
+                                color = if (hasActiveFilter) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else MaterialTheme.colorScheme.onSurface,
+                                style = MaterialTheme.typography.labelMedium)
+                        }
+                        if (hasActiveFilter) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(8.dp)
+                                    .background(Color(0xFF4CAF50), CircleShape)
+                            )
+                        }
+                    }
+                }
                 DisplayModeSelector(
                     currentMode = displayMode,
                     onSelectMode = onSelectMode
                 )
-                // 筛选按钮（三横线图标）
-                Box {
-                    IconButton(onClick = onOpenFilter) {
-                        Text("☰", fontSize = 16.sp,
-                            color = if (hasActiveFilter) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface)
-                    }
-                    // 有生效规则时在右上角显示小绿点
-                    if (hasActiveFilter) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .size(8.dp)
-                                .background(Color(0xFF4CAF50), CircleShape)
-                        )
-                    }
-                }
                 Spacer(Modifier.weight(1f))
                 DateButton(
                     isActive = isDateView,
@@ -933,8 +970,8 @@ private fun AlbumGridContent(
                         onSelectSort(mode)
                     }
                 )
-            }
-        }
+            }  // end Row
+        }  // end Box
 
         // ── 批量 TAG 对话框 ──
         if (showBatchTagDialog) {
