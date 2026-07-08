@@ -901,6 +901,12 @@ private class SimpleGridAdapter(
                 val iv = ImageView(context).apply {
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((6 * density).toFloat())
+                        setColor(android.graphics.Color.TRANSPARENT)
+                    }
+                    clipToOutline = true
                 }
                 frame.addView(iv)
                 val tv = TextView(context).apply {
@@ -1108,6 +1114,12 @@ private class SimpleGridAdapter(
                 val iv = ImageView(context).apply {
                     layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
                     scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((6 * density).toFloat())
+                        setColor(android.graphics.Color.TRANSPARENT)
+                    }
+                    clipToOutline = true
                 }
                 row.addView(iv)
 

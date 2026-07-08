@@ -319,6 +319,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         AppLogger.d("VM", "moveToTrash: ${item.fileName}")
+        // 通知本地相册刷新（TAG 页删除后本地相册同步更新）
+        loadAlbums()
     }
 
     /**
