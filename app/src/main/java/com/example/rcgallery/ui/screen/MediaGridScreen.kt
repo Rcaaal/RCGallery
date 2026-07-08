@@ -1104,6 +1104,7 @@ private class SimpleGridAdapter(
                 }
                 val row = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
