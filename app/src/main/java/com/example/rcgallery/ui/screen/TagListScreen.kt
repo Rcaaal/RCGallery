@@ -302,7 +302,7 @@ fun TagListScreen(
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         modifier = Modifier
-                                            .align(Alignment.CenterVertically)
+                                            .fillMaxHeight()
                                             .padding(start = 10.dp, end = 4.dp)
                                     ) {
                                         Text(tag.name, fontSize = 12.sp, color = Color.White, maxLines = 1)
@@ -327,7 +327,7 @@ fun TagListScreen(
                                 ) {
                                     Box(
                                         Modifier
-                                            .align(Alignment.CenterVertically)
+                                            .fillMaxHeight()
                                             .padding(horizontal = 10.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -397,7 +397,12 @@ fun TagListScreen(
             HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp))
 
             // ═══ ④ 结果区域（3/4 剩余空间） ═══
+            // 当 overlay 显示时隐藏滚动内容，防止 Compose 手势拦截 VideoPlayer seek 拖拽
+            val showContentOverlay = selectedAlbum != null || selectedMediaIndex >= 0
             Box(Modifier.fillMaxSize().weight(1f)) {
+                if (showContentOverlay) {
+                    // 占位，不渲染任何可滚动手势区域
+                } else {
                 when {
                     isSearching -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -419,6 +424,7 @@ fun TagListScreen(
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
                                 modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                                contentPadding = PaddingValues(top = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
@@ -429,7 +435,10 @@ fun TagListScreen(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .aspectRatio(1f)
-                                            .clickable { selectedAlbum = album }
+                                            .clickable {
+                                                viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
+                                                selectedAlbum = album
+                                            }
                                     ) {
                                         Column(
                                             modifier = Modifier
@@ -487,6 +496,7 @@ fun TagListScreen(
                         }
                     }
                 }
+                }
             }
         }
 
@@ -529,6 +539,7 @@ private fun GroupedMediaList(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 12.dp),
+        contentPadding = PaddingValues(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         groups.forEach { (albumName, items) ->

@@ -405,6 +405,7 @@ fun AlbumGridScreen(
                     albumTags = albumTags,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
+                        viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
                         selectedAlbumDirectoryPath = album.directoryPath

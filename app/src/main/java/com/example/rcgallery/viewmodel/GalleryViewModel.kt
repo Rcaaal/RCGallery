@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
 import com.example.rcgallery.data.TagRepository
 import com.example.rcgallery.data.TrashManager
+import com.example.rcgallery.data.ViewHistoryRepository
+import com.example.rcgallery.data.db.ViewHistoryEntity
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDevice
 import com.example.rcgallery.data.smb.SmbRepository
@@ -43,6 +45,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val tagRepository = TagRepository(application)
     private val observer = MediaStoreObserver(application)
     private val trashManager = TrashManager(application)
+    private val viewHistoryRepository = ViewHistoryRepository(application)
 
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
@@ -57,8 +60,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    // ── Tab 切换（本地 / 网络）──
-    private val _currentTab = MutableStateFlow(0)  // 0=本地, 1=网络
+    // ── Tab 切换（最近 / 本地 / 标签 / 网络）──
+    private val _currentTab = MutableStateFlow(1)  // 默认启动本地
     val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
 
     fun switchTab(tab: Int) {
@@ -95,6 +98,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ── 媒体项星标状态 ──
     private val _starredMediaUris = MutableStateFlow<Set<String>>(emptySet())
     val starredMediaUris: StateFlow<Set<String>> = _starredMediaUris.asStateFlow()
+
+    // ── 最近浏览 ──
+    private val _recentAlbums = MutableStateFlow<List<Album>>(emptyList())
+    val recentAlbums: StateFlow<List<Album>> = _recentAlbums.asStateFlow()
+
+    private val _recentImages = MutableStateFlow<List<MediaItem>>(emptyList())
+    val recentImages: StateFlow<List<MediaItem>> = _recentImages.asStateFlow()
+
+    private val _recentVideos = MutableStateFlow<List<MediaItem>>(emptyList())
+    val recentVideos: StateFlow<List<MediaItem>> = _recentVideos.asStateFlow()
 
     // ── 筛选规则系统 ──
     private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
@@ -1391,5 +1404,94 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    // ══════════════════════════════════════
+    //  浏览历史记录
+    // ══════════════════════════════════════
+
+    /** 记录图片/视频浏览历史 */
+    fun recordViewHistory(item: MediaItem) {
+        val type = when {
+            item.isVideo -> ViewHistoryEntity.TYPE_VIDEO
+            else -> ViewHistoryEntity.TYPE_IMAGE
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            viewHistoryRepository.recordView(
+                targetKey = item.filePath.ifEmpty { item.uri.toString() },
+                id = item.id,
+                targetType = type
+            )
+            AppLogger.d("VM", "recordViewHistory: ${item.fileName} type=$type")
+        }
+    }
+
+    /** 记录相册浏览历史 */
+    fun recordAlbumView(bucketId: String, albumName: String, directoryPath: String) {
+        val key = "album:$directoryPath"
+        viewModelScope.launch(Dispatchers.IO) {
+            viewHistoryRepository.recordView(
+                targetKey = key,
+                id = bucketId.hashCode().toLong(),
+                targetType = ViewHistoryEntity.TYPE_ALBUM
+            )
+            AppLogger.d("VM", "recordAlbumView: $albumName")
+        }
+    }
+
+    /** 加载最近浏览的相册 */
+    fun loadRecentAlbums() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val recent = viewHistoryRepository.getRecentAlbums()
+            val albums = _albums.value
+            val result = recent.mapNotNull { entity ->
+                // targetKey="album:/path" → 截取目录路径
+                val dirPath = entity.targetKey.removePrefix("album:")
+                albums.find { it.directoryPath == dirPath }
+            }
+            _recentAlbums.value = result
+            AppLogger.d("VM", "loadRecentAlbums: ${result.size}")
+        }
+    }
+
+    /** 加载最近浏览的图片 */
+    fun loadRecentImages() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val recent = viewHistoryRepository.getRecentImages()
+            val filePaths = recent.map { it.targetKey }.filter { it.isNotEmpty() }
+            if (filePaths.isEmpty()) {
+                _recentImages.value = emptyList()
+                return@launch
+            }
+            val result = repository.loadMediaItemsByPaths(filePaths).getOrDefault(emptyList())
+            // 按浏览时间排序
+            val pathOrder = filePaths.withIndex().associate { (idx, p) -> p to idx }
+            _recentImages.value = result.sortedBy { pathOrder[it.filePath] ?: Int.MAX_VALUE }
+            AppLogger.d("VM", "loadRecentImages: ${_recentImages.value.size}")
+        }
+    }
+
+    /** 加载最近浏览的视频 */
+    fun loadRecentVideos() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val recent = viewHistoryRepository.getRecentVideos()
+            val filePaths = recent.map { it.targetKey }.filter { it.isNotEmpty() }
+            if (filePaths.isEmpty()) {
+                _recentVideos.value = emptyList()
+                return@launch
+            }
+            val result = repository.loadMediaItemsByPaths(filePaths).getOrDefault(emptyList())
+            // 按浏览时间排序
+            val pathOrder = filePaths.withIndex().associate { (idx, p) -> p to idx }
+            _recentVideos.value = result.sortedBy { pathOrder[it.filePath] ?: Int.MAX_VALUE }
+            AppLogger.d("VM", "loadRecentVideos: ${_recentVideos.value.size}")
+        }
+    }
+
+    /** 刷新所有最近浏览 */
+    fun refreshRecent() {
+        loadRecentAlbums()
+        loadRecentImages()
+        loadRecentVideos()
     }
 }

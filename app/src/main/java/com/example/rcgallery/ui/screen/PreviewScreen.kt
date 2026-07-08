@@ -236,6 +236,7 @@ fun PreviewScreen(
     LaunchedEffect("page:${pagerState.currentPage}") {
         showInfo = false  // 翻页关闭信息面板
         AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
+        currentItem?.let { viewModel.recordViewHistory(it) }
     }
 
     // ── 相册重命名 ──
@@ -885,15 +886,16 @@ private fun MediaTagRow(
             Surface(
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
                 color = Color(0xFF3366AA),
-                modifier = Modifier.clickable { onTagClick() }
+                modifier = Modifier.height(22.dp).clickable { onTagClick() }
             ) {
-                Text(
-                    tag.name,
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                )
+                Box(Modifier.fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        tag.name,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
+                }
             }
         }
 
@@ -902,10 +904,11 @@ private fun MediaTagRow(
             Surface(
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
                 color = Color(0xFF555555),
-                modifier = Modifier.clickable { showExpanded = true }
+                modifier = Modifier.height(22.dp).clickable { showExpanded = true }
             ) {
-                Text("展开", color = Color.White, fontSize = 10.sp,
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                Box(Modifier.fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                    Text("展开", color = Color.White, fontSize = 10.sp)
+                }
             }
         }
     }

@@ -79,10 +79,9 @@ fun TagManageDialog(
                                 modifier = Modifier.height(28.dp)
                             ) {
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .align(Alignment.CenterVertically)
-                                        .padding(start = 8.dp, end = if (isReadOnly) 8.dp else 4.dp)
+                                    Modifier.fillMaxHeight()
+                                        .padding(start = 8.dp, end = if (isReadOnly) 8.dp else 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
                                         tag.name,
@@ -102,10 +101,10 @@ fun TagManageDialog(
                                             Text("✕", fontSize = 10.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
+                                }     // close Row
+                            }         // close Surface
+                    }                 // close forEach
+                }                     // close outer Row
                     Spacer(Modifier.height(8.dp))
                 }
 

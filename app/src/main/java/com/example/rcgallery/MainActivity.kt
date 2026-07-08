@@ -25,6 +25,7 @@ import androidx.navigation.navArgument
 import com.example.rcgallery.ui.navigation.Route
 import com.example.rcgallery.ui.screen.AlbumGridScreen
 import com.example.rcgallery.ui.screen.NetworkBrowserScreen
+import com.example.rcgallery.ui.screen.RecentScreen
 import com.example.rcgallery.ui.screen.SearchScreen
 import com.example.rcgallery.ui.screen.TagListScreen
 import com.example.rcgallery.ui.theme.RCGalleryTheme
@@ -73,9 +74,9 @@ class MainActivity : ComponentActivity() {
                     var isAlbumActive by remember { mutableStateOf(false) }
                     val showBottomBar = when {
                         PipState.isInPip -> false
-                        currentTab == 1 -> !isAlbumActive
-                        currentTab == 2 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList
-                        else -> !isAlbumActive
+                        currentTab == 2 -> !isAlbumActive  // 标签
+                        currentTab == 3 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList  // 网络
+                        else -> !isAlbumActive  // 最近、本地
                     }
 
                     fun safeGoBack(navController: androidx.navigation.NavController) {
@@ -90,22 +91,28 @@ class MainActivity : ComponentActivity() {
                             if (showBottomBar) {
                                 NavigationBar(modifier = Modifier.fillMaxWidth().height(80.dp)) {
                                     NavigationBarItem(
-                                        icon = { Text("📁") },
-                                        label = { Text("本地") },
+                                        icon = { Text("🕐") },
+                                        label = { Text("最近") },
                                         selected = currentTab == 0,
                                         onClick = { viewModel.switchTab(0) }
                                     )
                                     NavigationBarItem(
-                                        icon = { Text("🏷") },
-                                        label = { Text("标签") },
+                                        icon = { Text("📁") },
+                                        label = { Text("本地") },
                                         selected = currentTab == 1,
                                         onClick = { viewModel.switchTab(1) }
                                     )
                                     NavigationBarItem(
-                                        icon = { Text("🌐") },
-                                        label = { Text("网络") },
+                                        icon = { Text("🏷") },
+                                        label = { Text("标签") },
                                         selected = currentTab == 2,
                                         onClick = { viewModel.switchTab(2) }
+                                    )
+                                    NavigationBarItem(
+                                        icon = { Text("🌐") },
+                                        label = { Text("网络") },
+                                        selected = currentTab == 3,
+                                        onClick = { viewModel.switchTab(3) }
                                     )
                                 }
                             }
@@ -114,6 +121,12 @@ class MainActivity : ComponentActivity() {
                         Box(modifier = Modifier.padding(innerPadding)) {
                             when (currentTab) {
                                 0 -> {
+                                    RecentScreen(
+                                        viewModel = viewModel,
+                                        onOverlayChanged = { active -> isAlbumActive = active }
+                                    )
+                                }
+                                1 -> {
                                     val navController = rememberNavController()
                                     NavHost(
                                         navController = navController,
@@ -156,14 +169,14 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
-                                1 -> {
+                                2 -> {
                                     TagListScreen(
                                         viewModel = viewModel,
-                                        onBackClick = { viewModel.switchTab(0) },
+                                        onBackClick = { viewModel.switchTab(1) },
                                         onOverlayChanged = { active -> isAlbumActive = active }
                                     )
                                 }
-                                2 -> {
+                                3 -> {
                                     NetworkBrowserScreen(viewModel = viewModel)
                                 }
                             }
