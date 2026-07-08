@@ -1,17 +1,14 @@
 package com.example.rcgallery.ui.screen
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
@@ -148,6 +145,10 @@ fun TagListScreen(
     // 按相册分组
     val mediaGroups = remember(flatFilteredMedia) {
         flatFilteredMedia.groupBy { it.albumName ?: "未分类" }
+    }
+    // 预计算 index 映射（O(n) → 后续 O(1) 查询，避免 indexOf O(n²)）
+    val indexMap = remember(flatFilteredMedia) {
+        flatFilteredMedia.withIndex().associate { (idx, item) -> item to idx }
     }
     // 每个分组的折叠状态
     val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
@@ -467,7 +468,7 @@ fun TagListScreen(
                         } else {
                             GroupedMediaList(
                                 groups = mediaGroups,
-                                flatList = flatFilteredMedia,
+                                indexMap = indexMap,
                                 collapsedGroups = collapsedGroups,
                                 onMediaClick = { idx -> selectedMediaIndex = idx }
                             )
@@ -481,7 +482,7 @@ fun TagListScreen(
                         } else {
                             GroupedMediaList(
                                 groups = mediaGroups,
-                                flatList = flatFilteredMedia,
+                                indexMap = indexMap,
                                 collapsedGroups = collapsedGroups,
                                 onMediaClick = { idx -> selectedMediaIndex = idx }
                             )
@@ -517,12 +518,12 @@ fun TagListScreen(
 }
 
 // ═══════════════════════════════════════════════
-// 分组媒体列表（相册卡片 + 4列缩略图 + 折叠）
+// 分组媒体列表（相册名 header + 每行独立懒加载）
 // ═══════════════════════════════════════════════
 @Composable
 private fun GroupedMediaList(
     groups: Map<String, List<MediaItem>>,
-    flatList: List<MediaItem>,
+    indexMap: Map<MediaItem, Int>,
     collapsedGroups: MutableMap<String, Boolean>,
     onMediaClick: (Int) -> Unit
 ) {
@@ -530,105 +531,100 @@ private fun GroupedMediaList(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
         groups.forEach { (albumName, items) ->
-            item(key = albumName) {
-                val isCollapsed = collapsedGroups[albumName] ?: false
+            val isCollapsed = collapsedGroups[albumName] ?: false
+            val rows = if (isCollapsed) emptyList() else items.chunked(GRID_COLUMNS)
 
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    )
+            // ── 相册名 header（顶部圆角 + 阴影，点击展开/折叠） ──
+            item(key = "h_$albumName") {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    tonalElevation = 2.dp,
+                    shadowElevation = 3.dp,
+                    shape = RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
                 ) {
-                    Column {
-                        // ── 卡片头部：相册名 + 展开/折叠 ──
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    collapsedGroups[albumName] = !isCollapsed
-                                },
-                            color = Color.Transparent
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = if (isCollapsed) "▶" else "▼",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    albumName,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Text(
-                                    "${items.size} 项",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { collapsedGroups[albumName] = !isCollapsed }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isCollapsed) "▶" else "▼",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            albumName,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${items.size} 项",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
 
-                        // ── 4 列缩略图网格 ──
-                        AnimatedVisibility(
-                            visible = !isCollapsed,
-                            enter = expandVertically(),
-                            exit = shrinkVertically()
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
-                            ) {
-                                items.chunked(GRID_COLUMNS).forEach { row ->
-                                    Row(modifier = Modifier.fillMaxWidth()) {
-                                        row.forEach { item ->
-                                            val idx = flatList.indexOf(item)
-                                            Box(
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .aspectRatio(1f)
-                                                    .padding(3.dp)
-                                                    .clip(RoundedCornerShape(6.dp))
-                                                    .background(
-                                                        MaterialTheme.colorScheme.surfaceVariant
-                                                            .copy(alpha = 0.4f)
-                                                    )
-                                                    .clickable { onMediaClick(idx) }
-                                            ) {
-                                                GalleryThumbnail(
-                                                    uri = item.uri,
-                                                    contentDescription = item.fileName,
-                                                    targetSize = 150
-                                                )
-                                            }
-                                        }
-                                        // 填充最后一行不足 GRID_COLUMNS 的空位
-                                        repeat(GRID_COLUMNS - row.size) {
-                                            Spacer(Modifier.weight(1f))
-                                        }
-                                    }
+            // ── 每行 4 个缩略图（独立 lazy item，仅渲染可见行） ──
+            rows.forEachIndexed { rowIdx, row ->
+                val isLastRow = rowIdx == rows.lastIndex
+                item(key = "r_${albumName}_$rowIdx") {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        tonalElevation = 2.dp,
+                        shadowElevation = 3.dp,
+                        shape = if (isLastRow)
+                            RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)
+                        else
+                            RoundedCornerShape(0.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
+                            row.forEach { item ->
+                                val idx = indexMap[item] ?: 0
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .aspectRatio(1f)
+                                        .padding(2.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant
+                                                .copy(alpha = 0.4f)
+                                        )
+                                        .clickable { onMediaClick(idx) }
+                                ) {
+                                    GalleryThumbnail(
+                                        uri = item.uri,
+                                        contentDescription = item.fileName,
+                                        targetSize = 100
+                                    )
                                 }
+                            }
+                            // 填充最后一行空位
+                            repeat(GRID_COLUMNS - row.size) {
+                                Spacer(Modifier.weight(1f))
                             }
                         }
                     }
                 }
             }
         }
+
+        // 底部留白
+        item { Spacer(Modifier.height(16.dp)) }
     }
 }
 
