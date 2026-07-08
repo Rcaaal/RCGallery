@@ -426,7 +426,6 @@ fun TagListScreen(
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),
                                         tonalElevation = 2.dp,
-                                        shadowElevation = 3.dp,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .aspectRatio(1f)
@@ -434,19 +433,19 @@ fun TagListScreen(
                                     ) {
                                         Column(
                                             modifier = Modifier
-                                                .fillMaxSize()
-                                                .padding(6.dp),
-                                            verticalArrangement = Arrangement.Center,
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 4.dp, vertical = 6.dp),
                                             horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            Text("📁", fontSize = 24.sp)
-                                            Spacer(Modifier.height(4.dp))
+                                            Text("📁", fontSize = 20.sp)
+                                            Spacer(Modifier.height(2.dp))
                                             Text(
                                                 album.bucketName,
                                                 fontSize = 10.sp,
                                                 color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                lineHeight = 12.sp
                                             )
                                             Text(
                                                 "${album.count} 项",
@@ -537,14 +536,13 @@ private fun GroupedMediaList(
             val isCollapsed = collapsedGroups[albumName] ?: false
             val rows = if (isCollapsed) emptyList() else items.chunked(GRID_COLUMNS)
 
-            // ── 相册名 header（顶部圆角 + 阴影，点击展开/折叠） ──
+            // ── 相册名 header（顶部圆角，点击展开/折叠） ──
             item(key = "h_$albumName") {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 4.dp),
-                    tonalElevation = 2.dp,
-                    shadowElevation = 3.dp,
+                    tonalElevation = 1.dp,
                     shape = RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
                 ) {
                     Row(
@@ -582,14 +580,16 @@ private fun GroupedMediaList(
             rows.forEachIndexed { rowIdx, row ->
                 val isLastRow = rowIdx == rows.lastIndex
                 item(key = "r_${albumName}_$rowIdx") {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        tonalElevation = 2.dp,
-                        shadowElevation = 3.dp,
-                        shape = if (isLastRow)
-                            RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)
-                        else
-                            RoundedCornerShape(0.dp)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = if (isLastRow)
+                                    RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)
+                                else
+                                    RoundedCornerShape(0.dp)
+                            )
                     ) {
                         Row(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
                             row.forEach { item ->
