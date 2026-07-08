@@ -580,7 +580,6 @@ fun AlbumGridScreen(
                     onDismiss = { showAlbumPickDialog = false },
                     onAlbumSelected = { targetDir, targetName, mode ->
                         viewModel.pasteToAlbum(mode, targetDir, targetName)
-                        viewModel.clearClipboard()
                     }
                 )
             }

@@ -670,7 +670,8 @@ fun PreviewScreen(
                 onAlbumSelected = { targetDir, targetName, mode ->
                     showAlbumPickDialog = false
                     if (singleItem != null) {
-                        // 单张图片操作：先加入中转站再执行粘贴
+                        // 单张图片操作：先清空中转站再加入当前项，防止混入之前的中转站内容
+                        viewModel.clearClipboard()
                         viewModel.addToClipboard(listOf(singleItem))
                         viewModel.pasteToAlbum(mode, targetDir, targetName)
                     }

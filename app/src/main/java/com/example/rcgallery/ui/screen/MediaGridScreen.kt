@@ -374,6 +374,7 @@ fun MediaGridScreen(
                                 val dragState = object {
                                     var dragStartIdx = -1
                                     var isDragging = false
+                                    var longPressConsumed = false  // 长按触发后拦截 click
                                 }
                                 val handler = android.os.Handler(android.os.Looper.getMainLooper())
                                 val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
@@ -385,6 +386,7 @@ fun MediaGridScreen(
                                             MotionEvent.ACTION_DOWN -> {
                                                 dragState.isDragging = false
                                                 dragState.dragStartIdx = -1
+                                                dragState.longPressConsumed = false
                                                 downX = e.x; downY = e.y
                                                 handler.removeCallbacksAndMessages(null)
                                                 handler.postDelayed({
@@ -393,6 +395,7 @@ fun MediaGridScreen(
                                                     if (pos < 0) return@postDelayed
                                                     dragState.dragStartIdx = pos
                                                     dragState.isDragging = true
+                                                    dragState.longPressConsumed = true
                                                     val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
                                                     if (!isMediaMultiSelect) isMediaMultiSelect = true
                                                     toggleMediaSelection(item)
@@ -410,8 +413,12 @@ fun MediaGridScreen(
                                             }
                                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                                                 handler.removeCallbacksAndMessages(null)
+                                                val consumed = dragState.longPressConsumed
                                                 dragState.isDragging = false
                                                 dragState.dragStartIdx = -1
+                                                dragState.longPressConsumed = false
+                                                // 长按已触发过 → 拦截 ACTION_UP，防止 item click 取消选中
+                                                if (consumed) return true
                                                 return false
                                             }
                                         }
@@ -658,7 +665,7 @@ fun MediaGridScreen(
                         exitMediaMultiSelect()
                         showAlbumPickDialog = true
                     },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp)
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 80.dp)
                 )
             }
 
@@ -785,7 +792,6 @@ fun MediaGridScreen(
                     onDismiss = { showAlbumPickDialog = false },
                     onAlbumSelected = { targetDir, targetName, mode ->
                         viewModel.pasteToAlbum(mode, targetDir, targetName)
-                        viewModel.clearClipboard()
                     }
                 )
             }
@@ -875,7 +881,7 @@ private class SimpleGridAdapter(
         }
         when (holder) {
             is GridVH -> holder.bind(item, position, starredUris, selectedUris, columns)
-            is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap)
+            is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap, selectedUris)
         }
     }
 
@@ -1081,6 +1087,8 @@ private class SimpleGridAdapter(
         private val infoTv: TextView,
         val starIv: ImageView,
         val starContainer: android.view.View,
+        private val checkmarkContainer: FrameLayout,
+        private val selectedOverlay: android.view.View,
         private val onClick: (com.example.rcgallery.model.MediaItem) -> Unit,
         private val onManageTags: (com.example.rcgallery.model.MediaItem) -> Unit
     ) : RecyclerView.ViewHolder(itemView) {
@@ -1148,7 +1156,43 @@ private class SimpleGridAdapter(
                     }
                     clipToOutline = true
                 }
-                row.addView(iv)
+                // 选中覆盖层（半透明蓝色 + checkmark）
+                val thumbWrapper = FrameLayout(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
+                }
+                val selectedOverlay = android.view.View(context).apply {
+                    layoutParams = FrameLayout.LayoutParams(thumbSize, thumbSize)
+                    setBackgroundColor(android.graphics.Color.argb(100, 68, 138, 255))
+                    visibility = android.view.View.GONE
+                }
+                val checkmarkContainer = FrameLayout(context).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        (24 * density).toInt(),
+                        (24 * density).toInt(),
+                        android.view.Gravity.CENTER
+                    )
+                    visibility = android.view.View.GONE
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(220, 76, 175, 80))
+                    }
+                }
+                val checkmarkTv = android.widget.TextView(context).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.Gravity.CENTER
+                    )
+                    text = "✓"
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 16f
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                }
+                checkmarkContainer.addView(checkmarkTv)
+                thumbWrapper.addView(iv)
+                thumbWrapper.addView(selectedOverlay)
+                thumbWrapper.addView(checkmarkContainer)
+                row.addView(thumbWrapper)
 
                 val textColumn = LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
@@ -1266,11 +1310,11 @@ private class SimpleGridAdapter(
                     onToggleStar(uriStr)
                 }
 
-                return ListVH(root, iv, nameTv, infoTv, starIv, starContainer, onClick, onManageTags)
+                return ListVH(root, iv, nameTv, infoTv, starIv, starContainer, checkmarkContainer, selectedOverlay, onClick, onManageTags)
             }
         }
 
-        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()) {
+        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap(), selectedUris: Set<String> = emptySet()) {
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -1279,6 +1323,21 @@ private class SimpleGridAdapter(
                 if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
+            // 多选模式：选中标记（覆盖层 + 对号 + 行背景）
+            val inMultiSelect = selectedUris.isNotEmpty()
+            val isSelected = item.uri.toString() in selectedUris
+            if (inMultiSelect) {
+                selectedOverlay.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                checkmarkContainer.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                itemView.setBackgroundColor(
+                    if (isSelected) android.graphics.Color.argb(30, 68, 138, 255)
+                    else android.graphics.Color.TRANSPARENT
+                )
+            } else {
+                selectedOverlay.visibility = android.view.View.GONE
+                checkmarkContainer.visibility = android.view.View.GONE
+                itemView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            }
             iv.load(item.uri) { crossfade(false) }
             nameTv.text = item.fileName
             infoTv.text = buildString {

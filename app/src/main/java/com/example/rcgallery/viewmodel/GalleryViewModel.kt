@@ -1602,7 +1602,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             input.copyTo(output)
                         }
                     }
-                    // 确认写入完成
                     targetFile.setLastModified(System.currentTimeMillis())
 
                     // 让 MediaStore 感知新文件
@@ -1612,10 +1611,17 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
                     // 如果是移动模式：删除源文件
                     if (mode == PasteMode.MOVE) {
+                        // 先尝试 ContentResolver 删除（使 MediaStore 生效）
                         try {
                             context.contentResolver.delete(item.uri, null, null)
-                        } catch (e: Exception) {
-                            AppLogger.e("Paste", "Failed to delete source: ${item.fileName}", e)
+                        } catch (_: Exception) { }
+                        // 再尝试文件级删除（Android 11+ 有 MANAGE_EXTERNAL_STORAGE 时生效）
+                        try {
+                            srcFile.delete()
+                        } catch (_: Exception) { }
+                        // 如果源文件还存在，记录日志
+                        if (srcFile.exists()) {
+                            AppLogger.d("Paste", "Source file still exists after delete: ${item.fileName}")
                         }
                     }
                     successCount++
@@ -1637,13 +1643,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _clipboardItems.value = emptyList()
             }
 
-            // 刷新相册列表和当前视图
+            // 刷新相册列表和所有媒体（确保目标相册的 count 和内容在 UI 中更新）
             if (successCount > 0) {
                 loadAlbums()
-                // 尝试刷新当前相册内容
-                if (_mediaItems.value.isNotEmpty()) {
-                    loadAllMedia()
-                }
+                loadAllMedia()
             }
 
             AppLogger.d("VM", "pasteToAlbum: mode=$mode target=$targetName success=$successCount/${items.size}")

@@ -73,11 +73,11 @@ private fun ActionButton(
         shape = RoundedCornerShape(8.dp),
         color = containerColor,
         onClick = onClick,
-        modifier = Modifier.height(34.dp).widthIn(min = 140.dp)
+        modifier = Modifier.height(34.dp)
     ) {
         Box(
             contentAlignment = Alignment.Center,
-            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp)
+            modifier = Modifier.fillMaxHeight().padding(horizontal = 10.dp)
         ) {
             Text(
                 text = text,
