@@ -73,7 +73,8 @@ class MainActivity : ComponentActivity() {
                     var isAlbumActive by remember { mutableStateOf(false) }
                     val showBottomBar = when {
                         PipState.isInPip -> false
-                        currentTab == 1 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList
+                        currentTab == 1 -> !isAlbumActive
+                        currentTab == 2 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList
                         else -> !isAlbumActive
                     }
 
@@ -156,14 +157,14 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                                 1 -> {
-                                    NetworkBrowserScreen(viewModel = viewModel)
-                                }
-                                2 -> {
                                     TagListScreen(
                                         viewModel = viewModel,
                                         onBackClick = { viewModel.switchTab(0) },
                                         onOverlayChanged = { active -> isAlbumActive = active }
                                     )
+                                }
+                                2 -> {
+                                    NetworkBrowserScreen(viewModel = viewModel)
                                 }
                             }
                         }
