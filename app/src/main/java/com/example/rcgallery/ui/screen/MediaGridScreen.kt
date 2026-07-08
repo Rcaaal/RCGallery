@@ -52,6 +52,10 @@ import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.FloatingJumpButton
+import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
+import com.example.rcgallery.ui.component.ClipboardBadge
+import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.TagManageDialog
@@ -99,6 +103,7 @@ fun MediaGridScreen(
     var isMediaMultiSelect by remember { mutableStateOf(false) }
     var selectedMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showMediaBatchTagDialog by remember { mutableStateOf(false) }
+    var showAlbumPickDialog by remember { mutableStateOf(false) }
     fun exitMediaMultiSelect() {
         isMediaMultiSelect = false
         selectedMediaUris = emptySet()
@@ -341,43 +346,7 @@ fun MediaGridScreen(
                             }   // ← actions
                         )   // ← TopAppBar(
                     },
-                    bottomBar = {
-                        if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
-                            BottomAppBar(
-                                containerColor = Color(0xFF1A1A1A),
-                                tonalElevation = 8.dp
-                            ) {
-                                Text(
-                                    "已选 ${selectedMediaUris.size} 项",
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(start = 16.dp)
-                                )
-                                Spacer(Modifier.weight(1f))
-                                Button(
-                                    onClick = { showMediaBatchTagDialog = true },
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                                ) {
-                                    Text("批量加标签 (${selectedMediaUris.size})", fontSize = 13.sp)
-                                }
-                                Spacer(Modifier.width(8.dp))
-                                Button(
-                                    onClick = {
-                                        val toDelete = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
-                                        toDelete.forEach { item -> viewModel.moveToTrash(item) }
-                                        exitMediaMultiSelect()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.error
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                                ) {
-                                    Text("删除到回收站 (${selectedMediaUris.size})", fontSize = 13.sp)
-                                }
-                                Spacer(Modifier.width(8.dp))
-                            }
-                        }
-                    }
+                    bottomBar = {},
                 ) { padding ->
                     if (mediaItems.isEmpty()) {
                         Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
@@ -667,6 +636,48 @@ fun MediaGridScreen(
 
             FloatingJumpButton(recyclerView = mediaRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
+            // ── 多选模式浮动按钮（替代 BottomAppBar）──
+            if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
+                FloatingMultiSelectButtons(
+                    selectedCount = selectedMediaUris.size,
+                    onBatchTag = { showMediaBatchTagDialog = true },
+                    onDeleteToTrash = {
+                        val toDelete = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
+                        toDelete.forEach { item -> viewModel.moveToTrash(item) }
+                        exitMediaMultiSelect()
+                    },
+                    onAddToClipboard = {
+                        val items = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
+                        viewModel.addToClipboard(items)
+                        exitMediaMultiSelect()
+                    },
+                    onPickTargetAlbum = {
+                        // 先加入中转站，再弹出选择目标相册对话框
+                        val items = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
+                        viewModel.addToClipboard(items)
+                        exitMediaMultiSelect()
+                        showAlbumPickDialog = true
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp)
+                )
+            }
+
+            // ── 中转站浮动 badge（不在多选模式时显示）──
+            if (!isMediaMultiSelect) {
+                val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
+                if (clipboardItems.isNotEmpty()) {
+                    val recentMoveAlbumDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                    ClipboardBadge(
+                        clipboardCount = clipboardItems.size,
+                        currentAlbumDir = albumDirectoryPath.ifEmpty { null },
+                        onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, albumName) },
+                        onPickTargetAlbum = { showAlbumPickDialog = true },
+                        onClear = { viewModel.clearClipboard() },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 80.dp)
+                    )
+                }
+            }
+
             // ── Preview 全屏覆盖层（不通过 navigation，RecyclerView 保持存活）──
             if (selectedPhotoIndex >= 0) {
                 PreviewScreen(
@@ -761,6 +772,21 @@ fun MediaGridScreen(
                         }
                     },
                     onDismiss = { tagDialogMediaItem = null }
+                )
+            }
+
+            // ── 选择目标相册对话框 ──
+            if (showAlbumPickDialog) {
+                val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
+                val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                AlbumPickDialog(
+                    albums = allAlbums,
+                    recentMoveAlbumDirs = recentDirs,
+                    onDismiss = { showAlbumPickDialog = false },
+                    onAlbumSelected = { targetDir, targetName, mode ->
+                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        viewModel.clearClipboard()
+                    }
                 )
             }
         }

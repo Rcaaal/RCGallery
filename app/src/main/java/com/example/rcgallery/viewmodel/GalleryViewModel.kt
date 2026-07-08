@@ -109,6 +109,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _recentVideos = MutableStateFlow<List<MediaItem>>(emptyList())
     val recentVideos: StateFlow<List<MediaItem>> = _recentVideos.asStateFlow()
 
+    // ── 中转站（复制/移动临时存储）──
+    private val _clipboardItems = MutableStateFlow<List<MediaItem>>(emptyList())
+    val clipboardItems: StateFlow<List<MediaItem>> = _clipboardItems.asStateFlow()
+
+    /** 最近移动过的目标相册路径（最多 10 条，用于对话框排序） */
+    private val _recentMoveAlbumDirs = MutableStateFlow<List<String>>(emptyList())
+    val recentMoveAlbumDirs: StateFlow<List<String>> = _recentMoveAlbumDirs.asStateFlow()
+
     // ── 筛选规则系统 ──
     private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
     val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
@@ -1540,4 +1548,110 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         loadRecentImages()
         loadRecentVideos()
     }
+
+    // ══════════════════════════════════════
+    //  中转站（复制/移动）
+    // ══════════════════════════════════════
+
+    /** 选中图片加入中转站（去重追加） */
+    fun addToClipboard(items: List<MediaItem>) {
+        val existing = _clipboardItems.value.map { it.filePath }.toSet()
+        val newItems = items.filter { it.filePath !in existing }
+        _clipboardItems.value = _clipboardItems.value + newItems
+        AppLogger.d("VM", "addToClipboard: ${newItems.size} items (total ${_clipboardItems.value.size})")
+    }
+
+    /** 清空中转站 */
+    fun clearClipboard() {
+        _clipboardItems.value = emptyList()
+        AppLogger.d("VM", "clearClipboard")
+    }
+
+    /**
+     * 将中转站中的文件复制/移动到目标相册。
+     * @param mode COPY 或 MOVE
+     * @param targetDir 目标相册的目录绝对路径
+     * @param targetName 目标相册名（仅日志用）
+     */
+    fun pasteToAlbum(mode: PasteMode, targetDir: String, targetName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = _clipboardItems.value.toList()
+            var successCount = 0
+            val app = getApplication<Application>()
+            val context = app
+
+            for (item in items) {
+                try {
+                    val srcFile = File(item.filePath)
+                    if (!srcFile.exists()) {
+                        AppLogger.d("Paste", "Source file not found: ${item.filePath}")
+                        continue
+                    }
+                    // 目标路径：targetDir/文件名
+                    var targetFile = File(targetDir, srcFile.name)
+                    var suffix = 1
+                    while (targetFile.exists()) {
+                        val nameWithoutExt = srcFile.nameWithoutExtension
+                        val ext = srcFile.extension
+                        targetFile = File(targetDir, "${nameWithoutExt}($suffix).$ext")
+                        suffix++
+                    }
+                    // 复制文件
+                    srcFile.inputStream().use { input ->
+                        targetFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    // 确认写入完成
+                    targetFile.setLastModified(System.currentTimeMillis())
+
+                    // 让 MediaStore 感知新文件
+                    MediaScannerConnection.scanFile(
+                        app, arrayOf(targetFile.absolutePath), null, null
+                    )
+
+                    // 如果是移动模式：删除源文件
+                    if (mode == PasteMode.MOVE) {
+                        try {
+                            context.contentResolver.delete(item.uri, null, null)
+                        } catch (e: Exception) {
+                            AppLogger.e("Paste", "Failed to delete source: ${item.fileName}", e)
+                        }
+                    }
+                    successCount++
+                } catch (e: Exception) {
+                    AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
+                }
+            }
+
+            // 更新最近移动记录
+            if (successCount > 0) {
+                val recent = _recentMoveAlbumDirs.value.toMutableList()
+                recent.remove(targetDir)
+                recent.add(0, targetDir)
+                _recentMoveAlbumDirs.value = recent.take(10)
+            }
+
+            // 移动模式：清空中转站
+            if (mode == PasteMode.MOVE) {
+                _clipboardItems.value = emptyList()
+            }
+
+            // 刷新相册列表和当前视图
+            if (successCount > 0) {
+                loadAlbums()
+                // 尝试刷新当前相册内容
+                if (_mediaItems.value.isNotEmpty()) {
+                    loadAllMedia()
+                }
+            }
+
+            AppLogger.d("VM", "pasteToAlbum: mode=$mode target=$targetName success=$successCount/${items.size}")
+        }
+    }
+}
+
+/** 粘贴模式：复制或移动 */
+enum class PasteMode {
+    COPY, MOVE
 }

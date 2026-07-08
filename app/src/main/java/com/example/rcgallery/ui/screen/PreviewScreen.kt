@@ -42,6 +42,8 @@ import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
+import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
@@ -148,6 +150,7 @@ fun PreviewScreen(
     val allTags by viewModel.allTags.collectAsStateWithLifecycle()
     var currentMediaTags by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var showMediaTagDialog by remember { mutableStateOf(false) }
+    var showAlbumPickDialog by remember { mutableStateOf(false) }
     var recentTagList by remember { mutableStateOf<List<TagEntity>>(emptyList()) }
     var mediaTagRefreshTrigger by remember { mutableIntStateOf(0) }
     var inheritedTagIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
@@ -570,6 +573,7 @@ fun PreviewScreen(
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
+                            onMoveToAlbum = { showAlbumPickDialog = true },
                             onFileRenamed = { newFileName ->
                                 val pageIdx = pagerState.currentPage
                                 val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
@@ -608,6 +612,7 @@ fun PreviewScreen(
                             albumDisplayName = currentItem?.albumName ?: "未知",
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
+                            onMoveToAlbum = { showAlbumPickDialog = true },
                             onFileRenamed = { newFileName ->
                                 val pageIdx = pagerState.currentPage
                                 val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
@@ -652,6 +657,26 @@ fun PreviewScreen(
                 onDismiss = { showMediaTagDialog = false }
             )
         }
+
+        // ── 选择目标相册对话框（单张图片/视频）──
+        if (showAlbumPickDialog) {
+            val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
+            val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+            val singleItem = currentItem
+            AlbumPickDialog(
+                albums = allAlbums,
+                recentMoveAlbumDirs = recentDirs,
+                onDismiss = { showAlbumPickDialog = false },
+                onAlbumSelected = { targetDir, targetName, mode ->
+                    showAlbumPickDialog = false
+                    if (singleItem != null) {
+                        // 单张图片操作：先加入中转站再执行粘贴
+                        viewModel.addToClipboard(listOf(singleItem))
+                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -672,6 +697,7 @@ private fun InfoCard(
     albumDisplayName: String,
     onAlbumNameClick: () -> Unit,
     onDeleteClick: () -> Unit,
+    onMoveToAlbum: () -> Unit = {},
     onFileRenamed: (String) -> Unit = {},
     mediaTags: List<TagEntity> = emptyList(),
     onManageTags: () -> Unit = {}
@@ -772,13 +798,24 @@ private fun InfoCard(
                 onAddClick = onManageTags,
                 onTagClick = onManageTags
             )
-            // Row 5: 永久删除按钮（右下角）
+            // Row 5: 操作按钮（右下角）
             Spacer(Modifier.height(6.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                IconButton(
+                    onClick = onMoveToAlbum,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_folder),
+                        contentDescription = "移动到相册",
+                        tint = Color(0xFF64B5F6),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
                 IconButton(
                     onClick = onDeleteClick,
                     modifier = Modifier.size(28.dp)

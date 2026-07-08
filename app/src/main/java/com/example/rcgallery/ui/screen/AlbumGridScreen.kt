@@ -53,6 +53,9 @@ import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
+import com.example.rcgallery.ui.component.ClipboardBadge
+import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
 import com.example.rcgallery.ui.component.TagManageDialog
@@ -211,6 +214,7 @@ fun AlbumGridScreen(
     var selectedAlbumId by remember { mutableStateOf<String?>(null) }
     var selectedAlbumName by remember { mutableStateOf("") }
     var selectedAlbumDirectoryPath by remember { mutableStateOf("") }
+    var showAlbumPickDialog by remember { mutableStateOf(false) }
     // albums（来自 ViewModel）变化时联动更新相册名
     // 优先按 bucketId 匹配；如果 bucketId 变了（如改名后 MediaStore 重新扫描），按相册名回退
     LaunchedEffect(albums, selectedAlbumId) {
@@ -491,6 +495,22 @@ fun AlbumGridScreen(
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
+            // ── 中转站浮动 badge（仅当不在 MediaGrid/Trash/Preview overlay 中时显示）──
+            if (selectedAlbumId == null && !showTrash && selectedDatePhotoIndex < 0) {
+                val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
+                if (clipboardItems.isNotEmpty()) {
+                    val recentMoveAlbumDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                    ClipboardBadge(
+                        clipboardCount = clipboardItems.size,
+                        currentAlbumDir = null,  // 不传入当前相册（相册列表模式下没有"当前相册"）
+                        onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, "") },
+                        onPickTargetAlbum = { showAlbumPickDialog = true },
+                        onClear = { viewModel.clearClipboard() },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 80.dp)
+                    )
+                }
+            }
+
             // ── MediaGrid 全屏覆盖层（不通过 navigation，LazyVerticalGrid 保持存活）──
             if (selectedAlbumId != null) {
                 MediaGridScreen(
@@ -547,6 +567,21 @@ fun AlbumGridScreen(
                     ignoredFolderPaths = viewModel.ignoredFolderPaths.collectAsState().value,
                     allAlbums = rawAlbums,
                     onToggleIgnoredFolder = { viewModel.toggleIgnoredFolder(it) }
+                )
+            }
+
+            // ── 选择目标相册对话框 ──
+            if (showAlbumPickDialog) {
+                val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
+                val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                AlbumPickDialog(
+                    albums = allAlbums,
+                    recentMoveAlbumDirs = recentDirs,
+                    onDismiss = { showAlbumPickDialog = false },
+                    onAlbumSelected = { targetDir, targetName, mode ->
+                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        viewModel.clearClipboard()
+                    }
                 )
             }
         }
