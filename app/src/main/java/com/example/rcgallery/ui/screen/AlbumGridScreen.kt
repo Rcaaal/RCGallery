@@ -2052,10 +2052,10 @@ private class DateGroupAdapter(
                 val iv = ImageView(ctx).apply {
                     layoutParams = FrameLayout.LayoutParams(thumbSize, thumbSize)
                     scaleType = ImageView.ScaleType.CENTER_CROP
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                        setCornerRadius((6 * density).toFloat())
-                        setColor(android.graphics.Color.TRANSPARENT)
+                    outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                            outline.setRoundRect(0, 0, view.width, view.height, (6f * density))
+                        }
                     }
                     clipToOutline = true
                 }
@@ -2148,12 +2148,15 @@ private class DateGroupAdapter(
                     setPadding(gapPx, gapPx, gapPx, gapPx)
                 }
                 val iv = ImageView(ctx).apply {
-                    layoutParams = FrameLayout.LayoutParams(side, side)
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
                     scaleType = ImageView.ScaleType.CENTER_CROP
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                        setCornerRadius((6 * density).toFloat())
-                        setColor(android.graphics.Color.TRANSPARENT)
+                    outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                            outline.setRoundRect(0, 0, view.width, view.height, (6f * density))
+                        }
                     }
                     clipToOutline = true
                 }
@@ -2242,10 +2245,19 @@ private class DateGroupAdapter(
                         frame.layoutParams = flp
                     }
                     val iv = frame.getChildAt(0) as ImageView
+                    // IV 用 MATCH_PARENT 自动适应 FrameLayout padding 后的区域
                     val ilp = iv.layoutParams
-                    if (ilp.width != side || ilp.height != side) {
-                        ilp.width = side; ilp.height = side
+                    if (ilp.width != ViewGroup.LayoutParams.MATCH_PARENT || ilp.height != ViewGroup.LayoutParams.MATCH_PARENT) {
+                        ilp.width = ViewGroup.LayoutParams.MATCH_PARENT
+                        ilp.height = ViewGroup.LayoutParams.MATCH_PARENT
                         iv.layoutParams = ilp
+                    }
+                    // 尺寸变化后重设裁剪轮廓
+                    val cornerRadiusPx = (6f * density)
+                    iv.outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                            outline.setRoundRect(0, 0, view.width, view.height, cornerRadiusPx)
+                        }
                     }
                     iv.load(item.item.uri) { crossfade(false) }
                     val checkmark = frame.findViewById<FrameLayout>(android.R.id.checkbox)
