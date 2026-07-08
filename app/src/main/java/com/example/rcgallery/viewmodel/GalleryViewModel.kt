@@ -715,6 +715,38 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         return repository.loadMediaItemsByPaths(filePaths).getOrDefault(emptyList())
     }
 
+    // ── TAG 搜索结果 Flow（支持删除后自动刷新） ──
+    private val _tagSearchTagNames = MutableStateFlow<List<String>>(emptyList())
+    private val _tagSearchResults = MutableStateFlow<List<MediaItem>>(emptyList())
+    val tagSearchResults: StateFlow<List<MediaItem>> = _tagSearchResults.asStateFlow()
+
+    /** 设置搜索 TAG 并执行初次查询 */
+    fun searchMediaByTags(tagNames: List<String>) {
+        _tagSearchTagNames.value = tagNames
+        viewModelScope.launch {
+            _tagSearchResults.value = getMediaByTagNamesExcludeTrash(tagNames)
+        }
+    }
+
+    /** 用当前 TAG 重新查询（PreviewScreen 删除后调用） */
+    fun refreshTagSearch() {
+        val names = _tagSearchTagNames.value
+        if (names.isEmpty()) return
+        viewModelScope.launch {
+            _tagSearchResults.value = getMediaByTagNamesExcludeTrash(names)
+        }
+    }
+
+    /** getMediaByTagNames 并过滤已回收文件 */
+    private suspend fun getMediaByTagNamesExcludeTrash(tagNames: List<String>): List<MediaItem> {
+        val results = getMediaByTagNames(tagNames)
+        if (results.isEmpty()) return results
+        val trashedPaths = withContext(Dispatchers.IO) {
+            trashManager.getAll().map { it.filePath }.toSet()
+        }
+        return results.filter { it.filePath !in trashedPaths }
+    }
+
     // ══════════════════════════════════════
     //  筛选规则系统
     // ══════════════════════════════════════

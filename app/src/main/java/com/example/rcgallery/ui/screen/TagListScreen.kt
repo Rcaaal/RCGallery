@@ -78,8 +78,10 @@ fun TagListScreen(
 
     // ── 搜索结果 ──
     var searchAlbums by remember { mutableStateOf<List<Album>>(emptyList()) }
-    var searchMedia by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    val searchMedia by viewModel.tagSearchResults.collectAsState()
     var isSearching by remember { mutableStateOf(false) }
+    // ── 媒体删除后自动刷新：overlay 关闭重新搜索 ──
+    var hasSearchRun by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // 选中 TAG 变化时自动搜索
@@ -87,14 +89,15 @@ fun TagListScreen(
         val tags = selectedTags.toList()
         if (tags.isEmpty()) {
             searchAlbums = emptyList()
-            searchMedia = emptyList()
+            viewModel.searchMediaByTags(emptyList())
             return@LaunchedEffect
         }
         isSearching = true
         val tagNames = tags.map { it.name }
         searchAlbums = viewModel.getAlbumsByTagNames(tagNames)
-        searchMedia = viewModel.getMediaByTagNames(tagNames)
+        viewModel.searchMediaByTags(tagNames)
         isSearching = false
+        hasSearchRun = true
     }
 
     // ── Overlay 状态 ──
@@ -110,6 +113,14 @@ fun TagListScreen(
     // 通知父层显示/隐藏底部导航栏
     LaunchedEffect(selectedAlbum, selectedMediaIndex) {
         onOverlayChanged(selectedAlbum != null || selectedMediaIndex >= 0)
+    }
+
+    // ── 媒体删除后自动刷新：overlay 关闭重新搜索 ──
+    LaunchedEffect(selectedMediaIndex) {
+        if (hasSearchRun && selectedMediaIndex < 0) {
+            viewModel.refreshTagSearch()
+        }
+        if (selectedMediaIndex >= 0) hasSearchRun = true
     }
 
     // ── 辅助函数 ──
@@ -369,7 +380,7 @@ fun TagListScreen(
                         onClick = {
                             selectedTags.clear()
                             searchAlbums = emptyList()
-                            searchMedia = emptyList()
+                            viewModel.searchMediaByTags(emptyList())
                         }
                     ) {
                         Text(
