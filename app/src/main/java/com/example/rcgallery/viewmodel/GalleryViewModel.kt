@@ -1573,7 +1573,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * @param targetDir 目标相册的目录绝对路径
      * @param targetName 目标相册名（仅日志用）
      */
-    fun pasteToAlbum(mode: PasteMode, targetDir: String, targetName: String) {
+    fun pasteToAlbum(mode: PasteMode, targetDir: String, targetName: String, currentAlbumId: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             val items = _clipboardItems.value.toList()
             var successCount = 0
@@ -1647,6 +1647,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             if (successCount > 0) {
                 loadAlbums()
                 loadAllMedia()
+                // 刷新当前相册的媒体列表（文件移入/移出后立即反映在列表中）
+                if (currentAlbumId != null) {
+                    loadMedia(currentAlbumId)
+                }
             }
 
             AppLogger.d("VM", "pasteToAlbum: mode=$mode target=$targetName success=$successCount/${items.size}")

@@ -677,7 +677,7 @@ fun MediaGridScreen(
                     ClipboardBadge(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = albumDirectoryPath.ifEmpty { null },
-                        onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, albumName) },
+                        onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, albumName, albumId.ifEmpty { null }) },
                         onPickTargetAlbum = { showAlbumPickDialog = true },
                         onClear = { viewModel.clearClipboard() },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 80.dp)
@@ -791,7 +791,7 @@ fun MediaGridScreen(
                     recentMoveAlbumDirs = recentDirs,
                     onDismiss = { showAlbumPickDialog = false },
                     onAlbumSelected = { targetDir, targetName, mode ->
-                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
                     }
                 )
             }
