@@ -13,6 +13,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -234,7 +236,12 @@ fun TagListScreen(
                                                 .clickable { toggleTag(tag) },
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            Text("✕", fontSize = 10.sp, color = Color.White)
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "删除标签",
+                                                modifier = Modifier.size(14.dp),
+                                                tint = Color.White
+                                            )
                                         }
                                     }
                                 }
@@ -313,7 +320,12 @@ fun TagListScreen(
                                                 .clickable { viewModel.deleteTag(tag.id) },
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            Text("✕", fontSize = 10.sp, color = Color.White)
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "删除标签",
+                                                modifier = Modifier.size(14.dp),
+                                                tint = Color.White
+                                            )
                                         }
                                     }
                                 }
