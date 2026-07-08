@@ -95,14 +95,14 @@ class MainActivity : ComponentActivity() {
                                         onClick = { viewModel.switchTab(0) }
                                     )
                                     NavigationBarItem(
-                                        icon = { Text("🌐") },
-                                        label = { Text("网络") },
+                                        icon = { Text("🏷") },
+                                        label = { Text("标签") },
                                         selected = currentTab == 1,
                                         onClick = { viewModel.switchTab(1) }
                                     )
                                     NavigationBarItem(
-                                        icon = { Text("🏷") },
-                                        label = { Text("标签") },
+                                        icon = { Text("🌐") },
+                                        label = { Text("网络") },
                                         selected = currentTab == 2,
                                         onClick = { viewModel.switchTab(2) }
                                     )

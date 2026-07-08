@@ -2052,6 +2052,12 @@ private class DateGroupAdapter(
                 val iv = ImageView(ctx).apply {
                     layoutParams = FrameLayout.LayoutParams(thumbSize, thumbSize)
                     scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((6 * density).toFloat())
+                        setColor(android.graphics.Color.TRANSPARENT)
+                    }
+                    clipToOutline = true
                 }
                 thumbFrame.addView(iv)
                 // 多选对号覆盖层
@@ -2139,11 +2145,17 @@ private class DateGroupAdapter(
                 val rv = parent as RecyclerView
                 val frame = FrameLayout(ctx).apply {
                     layoutParams = ViewGroup.LayoutParams(side, side)
+                    setPadding(gapPx, gapPx, gapPx, gapPx)
                 }
                 val iv = ImageView(ctx).apply {
                     layoutParams = FrameLayout.LayoutParams(side, side)
                     scaleType = ImageView.ScaleType.CENTER_CROP
-                    setPadding(gapPx, gapPx, gapPx, gapPx)
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((6 * density).toFloat())
+                        setColor(android.graphics.Color.TRANSPARENT)
+                    }
+                    clipToOutline = true
                 }
                 frame.addView(iv)
                 // 多选对号（居中半透明绿色圆形 + 白色 ✓）
