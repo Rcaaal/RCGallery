@@ -443,9 +443,8 @@ fun TagListScreen(
                                                 album.bucketName,
                                                 fontSize = 10.sp,
                                                 color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis,
-                                                lineHeight = 12.sp
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
                                                 "${album.count} 项",
