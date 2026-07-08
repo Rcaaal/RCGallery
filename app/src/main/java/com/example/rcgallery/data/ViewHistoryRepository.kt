@@ -44,4 +44,9 @@ class ViewHistoryRepository(context: Context) {
     /** 获取最近浏览的视频 */
     suspend fun getRecentVideos(): List<ViewHistoryEntity> =
         dao.getRecentByType(ViewHistoryEntity.TYPE_VIDEO, MAX_VIDEOS)
+
+    /** 删除指定 targetKey 的记录（文件被删除/改名时清理） */
+    suspend fun deleteByKey(targetKey: String) {
+        dao.deleteByKey(targetKey)
+    }
 }

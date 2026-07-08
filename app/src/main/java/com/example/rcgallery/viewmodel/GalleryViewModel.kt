@@ -336,6 +336,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         tagRepository.updateTargetKey(oldMediaKey, newMediaKey)
                     }
                 }
+                // 迁移浏览历史中的 targetKey（相册 + 内部所有文件）
+                withContext(Dispatchers.IO) {
+                    viewHistoryRepository.deleteByKey("album:$oldDirStr")
+                    viewHistoryRepository.recordView(
+                        targetKey = "album:$newDirStr",
+                        id = bucketId.hashCode().toLong(),
+                        targetType = ViewHistoryEntity.TYPE_ALBUM
+                    )
+                    _mediaItems.value.forEach { item ->
+                        if (item.filePath.startsWith(newDirStr)) {
+                            val oldPath = item.filePath.replace(newDirStr, oldDirStr)
+                            viewHistoryRepository.deleteByKey(oldPath)
+                            viewHistoryRepository.recordView(
+                                targetKey = item.filePath,
+                                id = item.id,
+                                targetType = if (item.isVideo) ViewHistoryEntity.TYPE_VIDEO
+                                             else ViewHistoryEntity.TYPE_IMAGE
+                            )
+                        }
+                    }
+                }
+                refreshRecent()
             }
             onResult(ok)
         }
@@ -377,6 +399,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         AppLogger.d("VM", "moveToTrash: ${item.fileName}")
         // 通知本地相册刷新（TAG 页删除后本地相册同步更新）
         loadAlbums()
+        // 从浏览历史中移除（文件已删除，不再出现在"最近"中）
+        viewModelScope.launch(Dispatchers.IO) {
+            viewHistoryRepository.deleteByKey(item.filePath.ifEmpty { item.uri.toString() })
+        }
+        refreshRecent()
     }
 
     /**
@@ -429,6 +456,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * @param albumId 可选的相册 ID，用于同步更新相册计数
      */
     fun permanentlyDeleteConfirmed(uri: String, albumId: String? = null) {
+        // 先查 filePath 再移除（需要用于清理浏览历史）
+        val filePath = _trashEntries.value.find { it.uri == uri }?.filePath
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
@@ -443,6 +472,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+        // 从浏览历史中移除
+        if (filePath != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                viewHistoryRepository.deleteByKey(filePath)
+            }
+        }
+        refreshRecent()
         AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
     }
 
@@ -466,6 +502,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 批量永久删除确认（物理删除已由调用方通过 IntentSender 完成） */
     fun batchPermanentlyDeleteConfirmed(entries: List<Pair<String, String?>>) {
         val uris = entries.map { it.first }
+        // 先查 filePaths 再移除（需要用于清理浏览历史）
+        val uriSet = uris.toSet()
+        val filePaths = _trashEntries.value.filter { it.uri in uriSet }.map { it.filePath }.filter { it.isNotEmpty() }
         trashManager.removeAll(uris)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
@@ -482,6 +521,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+        // 从浏览历史中移除
+        if (filePaths.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                filePaths.forEach { viewHistoryRepository.deleteByKey(it) }
+            }
+        }
+        refreshRecent()
         AppLogger.d("VM", "batchPermanentlyDeleteConfirmed: ${uris.size} items")
     }
 
