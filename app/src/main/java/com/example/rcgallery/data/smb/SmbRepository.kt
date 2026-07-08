@@ -184,13 +184,13 @@ class SmbRepository {
 
         for (f in all) {
             if (f.isDirectory) {
-                subFolders.add(SmbSubFolder(name = f.name, path = f.path))
+                subFolders.add(SmbSubFolder(name = f.name, path = f.path, lastModified = f.lastModified()))
             } else {
                 val name = f.name
                 val isImg = IMAGE_EXTS.any { name.endsWith(it, ignoreCase = true) }
                 val isVid = VIDEO_EXTS.any { name.endsWith(it, ignoreCase = true) }
                 if (isImg || isVid) {
-                    mediaFiles.add(SmbFileInfo(name = name, path = f.path, size = f.length(), isVideo = isVid))
+                    mediaFiles.add(SmbFileInfo(name = name, path = f.path, size = f.length(), isVideo = isVid, lastModified = f.lastModified()))
                 }
             }
         }
@@ -299,7 +299,7 @@ class SmbRepository {
                     }
                 } catch (_: Exception) { }
                 folderIdx++
-                val folder = SmbSubFolder(name = f.name, path = f.path, coverPath = cover, mediaCount = count)
+                val folder = SmbSubFolder(name = f.name, path = f.path, coverPath = cover, mediaCount = count, lastModified = f.lastModified())
                 subFolders.add(folder)
                 onProgress?.invoke(folderIdx, all.size)
             } else {
@@ -307,7 +307,7 @@ class SmbRepository {
                 val isImg = IMAGE_EXTS.any { name.endsWith(it, ignoreCase = true) }
                 val isVid = VIDEO_EXTS.any { name.endsWith(it, ignoreCase = true) }
                 if (isImg || isVid) {
-                    val info = SmbFileInfo(name = name, path = f.path, size = f.length(), isVideo = isVid)
+                    val info = SmbFileInfo(name = name, path = f.path, size = f.length(), isVideo = isVid, lastModified = f.lastModified())
                     mediaFiles.add(info)
                 }
             }
@@ -349,6 +349,18 @@ class SmbRepository {
      * 用于 [SmbCacheService] 直接构造 SmbFile。
      */
     fun getContextForPathSync(path: String): CIFSContext = getContextForPath(path)
+
+    /**
+     * 删除 SMB 文件（永久删除，不可恢复）。
+     */
+    suspend fun deleteFile(path: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(path)
+            val smbFile = SmbFile(path, ctx)
+            if (!smbFile.exists()) throw IllegalStateException("文件不存在: $path")
+            smbFile.delete()
+        }
+    }
 
     /**
      * 将 SMB 文件完整读入字节数组。

@@ -30,6 +30,7 @@ import com.example.rcgallery.ui.screen.TagListScreen
 import com.example.rcgallery.ui.theme.RCGalleryTheme
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.player.VideoPlayerScreen
+import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 
@@ -68,8 +69,13 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val viewModel: GalleryViewModel = viewModel()
                     val currentTab by viewModel.currentTab.collectAsState()
+                    val smbBrowseState by viewModel.smbBrowseState.collectAsState()
                     var isAlbumActive by remember { mutableStateOf(false) }
-                    val showBottomBar = ((currentTab == 1 && !PipState.isSmbPreviewActive) || !isAlbumActive) && !PipState.isInPip
+                    val showBottomBar = when {
+                        PipState.isInPip -> false
+                        currentTab == 1 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList
+                        else -> !isAlbumActive
+                    }
 
                     fun safeGoBack(navController: androidx.navigation.NavController) {
                         if (navController.currentBackStackEntry?.destination?.route != Route.AlbumGrid.route) {

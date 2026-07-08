@@ -90,6 +90,7 @@ fun NetworkBrowserScreen(
                             }
                         }
                     },
+                    windowInsets = WindowInsets(0, 0, 0, 0),
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface
                     )
@@ -265,6 +266,14 @@ private fun ShareGridContent(
 private const val SM_GRID_COLUMNS = 3
 private const val SM_GAP_DP = 4
 
+/** SMB 文件夹内容排序模式 */
+private enum class SmbSortMode(val label: String) {
+    NAME("名称"),
+    SIZE("大小"),
+    TYPE("类型"),
+    DATE("修改时间")
+}
+
 @Composable
 private fun FolderMixedContent(
     subFolders: List<SmbSubFolder>,
@@ -274,6 +283,10 @@ private fun FolderMixedContent(
 ) {
     val scope = rememberCoroutineScope()
     var isListMode by remember { mutableStateOf(true) } // 默认列表模式
+
+    // ── 排序状态 ──
+    var sortMode by remember { mutableStateOf(SmbSortMode.NAME) }
+    var ascending by remember { mutableStateOf(true) }
 
     if (subFolders.isEmpty() && mediaFiles.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -287,16 +300,45 @@ private fun FolderMixedContent(
     var latestMediaFiles by remember { mutableStateOf(mediaFiles) }
     latestMediaFiles = mediaFiles
 
+    // ── 排序后的列表（文件夹走各自的 sort，不混排）──
+    val sortedSubFolders = remember(subFolders, sortMode, ascending) {
+        val sorted = subFolders.sortedWith(when (sortMode) {
+            SmbSortMode.NAME -> compareBy { it.name.lowercase() }
+            SmbSortMode.SIZE -> compareBy { it.mediaCount }
+            SmbSortMode.TYPE -> compareBy { 0 }
+            SmbSortMode.DATE -> compareByDescending { it.lastModified }
+        })
+        if (ascending) sorted else sorted.reversed()
+    }
+    val sortedMediaFiles = remember(mediaFiles, sortMode, ascending) {
+        val sorted = mediaFiles.sortedWith(when (sortMode) {
+            SmbSortMode.NAME -> compareBy { it.name.lowercase() }
+            SmbSortMode.SIZE -> compareBy { it.size }
+            SmbSortMode.TYPE -> compareBy<SmbFileInfo> { if (it.isVideo) 1 else 0 }
+                .thenBy { it.name.lowercase() }
+            SmbSortMode.DATE -> compareByDescending { it.lastModified }
+        })
+        if (ascending) sorted else sorted.reversed()
+    }
+
+    // latestSortedMediaFiles 跟踪排序后的列表，
+    // 让 remember 内的 onFileClick 读到正确排序后的文件列表
+    var latestSortedMediaFiles by remember { mutableStateOf(sortedMediaFiles) }
+    latestSortedMediaFiles = sortedMediaFiles
+
     val adapter = remember {
         FolderMixedAdapter(
-            subFolders = subFolders,
-            mediaFiles = mediaFiles,
+            subFolders = sortedSubFolders,
+            mediaFiles = sortedMediaFiles,
             onFolderClick = onFolderClick,
-            onFileClick = { idx, _ -> onFileClick(idx, latestMediaFiles) },
+            onFileClick = { idx, _ -> onFileClick(idx, latestSortedMediaFiles) },
             scope = scope,
             isListMode = isListMode
         )
     }
+
+    // ── 排序选择器下拉状态 ──
+    var sortExpanded by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         AndroidView(
@@ -314,7 +356,7 @@ private fun FolderMixedContent(
                     }
                     this.adapter = adapter
                     clipToPadding = false
-                    setPadding(4, 4, 4, 4)
+                    setPadding(4, (48 * resources.displayMetrics.density).toInt(), 4, 4)
                 }
             },
             update = { rv ->
@@ -332,26 +374,101 @@ private fun FolderMixedContent(
                     }
                     adapter.notifyDataSetChanged()
                 }
-                if (adapter.subFolders !== subFolders || adapter.mediaFiles !== mediaFiles) {
-                    adapter.subFolders = subFolders
-                    adapter.mediaFiles = mediaFiles
+                if (adapter.subFolders !== sortedSubFolders || adapter.mediaFiles !== sortedMediaFiles) {
+                    adapter.subFolders = sortedSubFolders
+                    adapter.mediaFiles = sortedMediaFiles
                     adapter.notifyDataSetChanged()
                 }
             }
         )
 
-        // 列表/网格切换按钮
-        TextButton(
-            onClick = { isListMode = !isListMode },
+        // ── 顶部工具栏：排序 + 切换 ──
+        Row(
             modifier = Modifier
-                .align(androidx.compose.ui.Alignment.TopEnd)
-                .padding(8.dp)
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 8.dp, top = 6.dp)
+                .align(Alignment.TopStart),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Text(
-                if (isListMode) "⊞ 网格" else "⊟ 列表",
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 12.sp
-            )
+            // ── 排序模式下拉 ──
+            Box {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 4.dp,
+                    onClick = { sortExpanded = true }
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(sortMode.label, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.labelMedium)
+                        Text(" ▼", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                    }
+                }
+                DropdownMenu(
+                    expanded = sortExpanded,
+                    onDismissRequest = { sortExpanded = false }
+                ) {
+                    SmbSortMode.entries.forEach { mode ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(mode.label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                                    if (mode == sortMode) {
+                                        Text("✓", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                                    }
+                                }
+                            },
+                            onClick = { sortMode = mode; sortExpanded = false }
+                        )
+                    }
+                }
+            }
+
+            // ── 升序/降序切换 ──
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 4.dp,
+                onClick = { ascending = !ascending }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        if (ascending) "↑ 升序" else "↓ 降序",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+
+            Spacer(Modifier.weight(1f))
+
+            // ── 列表/网格切换 ──
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 4.dp,
+                onClick = { isListMode = !isListMode }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        if (isListMode) "⊞ 网格" else "⊟ 列表",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
         }
     }
 }

@@ -24,7 +24,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -89,9 +91,16 @@ fun SmbPreviewScreen(
     }
 
     val safeIndex = initialIndex.coerceIn(0, items.lastIndex)
-    val pagerState = rememberPagerState(pageCount = { items.size }, initialPage = safeIndex)
+
+    // ── 可变列表（支持删除）──
+    var mutableItems by remember { mutableStateOf(items) }
+
+    val pagerState = rememberPagerState(pageCount = { mutableItems.size }, initialPage = safeIndex)
     var pagerScrollEnabled by remember { mutableStateOf(true) }
     val savedPositions = remember { mutableMapOf<Uri, Long>() }
+
+    // ── 删除对话框状态 ──
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     // ── PiP ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
@@ -143,7 +152,7 @@ fun SmbPreviewScreen(
             modifier = Modifier.fillMaxSize(),
             pageSpacing = 0.dp
         ) { page ->
-            val file = items.getOrNull(page) ?: return@HorizontalPager
+            val file = mutableItems.getOrNull(page) ?: return@HorizontalPager
             key(file.path) {
                 if (file.isVideo) {
                     VideoPlayer(
@@ -155,14 +164,15 @@ fun SmbPreviewScreen(
                         onControlZoneActive = { pagerScrollEnabled = !it },
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,
-                        dataSourceFactory = SmbDataSource.Factory()
+                        dataSourceFactory = SmbDataSource.Factory(),
+                        onMoveToTrash = { showDeleteConfirm = true }
                     )
                 } else {
                     SmbZoomableImage(
                         fileInfo = file,
                         onEdgeSwipe = { direction ->
                             val np = pagerState.currentPage + direction
-                            if (np < 0 || np >= items.size) {
+                            if (np < 0 || np >= mutableItems.size) {
                                 Toast.makeText(context,
                                     if (np < 0) "已经是第一张" else "已经是最后一张",
                                     Toast.LENGTH_SHORT).show()
@@ -187,17 +197,51 @@ fun SmbPreviewScreen(
             ) { Text("← 返回", color = Color.White) }
 
             Text(
-                "${pagerState.currentPage + 1}/${items.size}",
+                "${pagerState.currentPage + 1}/${mutableItems.size}",
                 color = Color.White,
                 fontSize = 14.sp,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
             )
         }
+
+        // ── 删除确认对话框 ──
+        if (showDeleteConfirm) {
+            val currentFile = mutableItems.getOrNull(pagerState.currentPage)
+            AlertDialog(
+                onDismissRequest = { showDeleteConfirm = false },
+                title = { Text("确认删除") },
+                text = { Text("确定要永久删除「${currentFile?.name ?: "文件"}」吗？\n此操作不可恢复。") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showDeleteConfirm = false
+                            val file = currentFile ?: return@Button
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    SmbRepository.getInstance().deleteFile(file.path)
+                                }
+                                result.onSuccess {
+                                    val idx = mutableItems.indexOfFirst { it.path == file.path }
+                                    if (idx < 0) return@launch
+                                    val newList = mutableItems.toMutableList().apply { removeAt(idx) }
+                                    mutableItems = newList
+                                    Toast.makeText(context, "已删除", Toast.LENGTH_SHORT).show()
+                                    if (newList.isEmpty()) onDismiss()
+                                }.onFailure { e ->
+                                    Toast.makeText(context, "删除失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) { Text("删除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+                }
+            )
+        }
     }
 }
-
-// ══════════════════════════════════════
-//  SMB 图片查看器（带手势缩放 + 边缘滑动翻页 + 下滑返回）
 // ══════════════════════════════════════
 
 private const val THUMB_MAX_PX = 400

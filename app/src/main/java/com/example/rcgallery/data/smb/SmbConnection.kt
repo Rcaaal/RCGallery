@@ -24,7 +24,8 @@ data class SmbSubFolder(
     val name: String,
     val path: String,
     var coverPath: String = "",   // 该文件夹内第一张图片的路径
-    var mediaCount: Int = 0       // 该文件夹直接包含的媒体文件数（不含递归子目录）
+    var mediaCount: Int = 0,       // 该文件夹直接包含的媒体文件数（不含递归子目录）
+    val lastModified: Long = 0L    // 最后修改时间（毫秒时间戳）
 )
 
 /**
@@ -34,7 +35,8 @@ data class SmbFileInfo(
     val name: String,
     val path: String,
     val size: Long = 0L,
-    val isVideo: Boolean = false
+    val isVideo: Boolean = false,
+    val lastModified: Long = 0L    // 最后修改时间（毫秒时间戳）
 ) {
     val isImage: Boolean get() = !isVideo
 }

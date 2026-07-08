@@ -55,6 +55,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
@@ -103,7 +104,13 @@ fun VideoPlayer(
     val lastTapTime = remember { longArrayOf(0L) }
 
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
+        ExoPlayer.Builder(context)
+            .setRenderersFactory(
+                DefaultRenderersFactory(context).apply {
+                    setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                }
+            )
+            .build().apply {
             val factory = dataSourceFactory ?: DefaultDataSource.Factory(context)
             val mediaSource = ProgressiveMediaSource.Factory(factory)
                 .createMediaSource(MediaItem.fromUri(uri))
@@ -485,7 +492,7 @@ fun VideoPlayer(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .padding(start = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     // 信息按钮（纯图标）
@@ -497,14 +504,14 @@ fun VideoPlayer(
                             .size(24.dp)
                             .clickable { onShowInfoClick() }
                     )
-                    // 小窗按钮（纯图标）
+                    // 小窗按钮（纯图标，90% 大小）
                     if (onRequestPip != null) {
                         Icon(
                             painter = painterResource(com.example.rcgallery.R.drawable.ic_pip),
                             contentDescription = "小窗播放",
                             tint = Color.White,
                             modifier = Modifier
-                                .size(24.dp)
+                                .size(22.dp)
                                 .clickable {
                                     AppLogger.d("VideoPlayer", "PiP button clicked")
                                     onRequestPip()
