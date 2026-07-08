@@ -1,10 +1,17 @@
 package com.example.rcgallery.ui.screen
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
@@ -13,12 +20,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.ui.component.GalleryThumbnail
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
 /** 筛选类型 */
@@ -115,6 +126,21 @@ fun TagListScreen(
     }
 
     // ── 布局 ──
+    // 根据当前筛选类型预先过滤出拍平列表（同时用于分组和预览 overlay 的索引）
+    val flatFilteredMedia = remember(activeFilter, searchMedia) {
+        when (activeFilter) {
+            FilterType.IMAGE -> searchMedia.filter { it.isImage && !it.isGif }
+            FilterType.VIDEO -> searchMedia.filter { it.isVideo }
+            else -> searchMedia
+        }
+    }
+    // 按相册分组
+    val mediaGroups = remember(flatFilteredMedia) {
+        flatFilteredMedia.groupBy { it.albumName ?: "未分类" }
+    }
+    // 每个分组的折叠状态
+    val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             // ═══ ① 搜索栏 ═══
@@ -371,104 +397,83 @@ fun TagListScreen(
                             Text("请选择或搜索 TAG", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                         }
                     }
+                    // ─── 相册筛选：4列网格 ───
                     activeFilter == FilterType.ALBUM -> {
                         if (searchAlbums.isEmpty()) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("无匹配相册", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                             }
                         } else {
-                            LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-                                items(searchAlbums, key = { it.bucketId }) { album ->
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(4),
+                                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                gridItems(searchAlbums, key = { it.bucketId }) { album ->
                                     Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = MaterialTheme.colorScheme.surface,
+                                        shape = RoundedCornerShape(10.dp),
+                                        tonalElevation = 2.dp,
+                                        shadowElevation = 3.dp,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 3.dp)
+                                            .aspectRatio(1f)
                                             .clickable { selectedAlbum = album }
                                     ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(6.dp),
+                                            verticalArrangement = Arrangement.Center,
+                                            horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            Text("📁", fontSize = 16.sp)
-                                            Spacer(Modifier.width(8.dp))
-                                            Column(Modifier.weight(1f)) {
-                                                Text(album.bucketName, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
-                                                Text("${album.count} 项", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
+                                            Text("📁", fontSize = 24.sp)
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                album.bucketName,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                "${album.count} 项",
+                                                fontSize = 9.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                    // ─── 图片/视频筛选：分组卡片 + 4列缩略图网格 + 折叠 ───
                     activeFilter == FilterType.IMAGE -> {
-                        val mediaResults = searchMedia.filter { it.isImage && !it.isGif }
-                        if (mediaResults.isEmpty()) {
+                        if (flatFilteredMedia.isEmpty()) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("无匹配图片", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                             }
                         } else {
-                            LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-                                items(mediaResults, key = { it.id }) { item ->
-                                    val idx = mediaResults.indexOf(item)
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 3.dp)
-                                            .clickable { selectedMediaIndex = idx }
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text("🖼️", fontSize = 16.sp)
-                                            Spacer(Modifier.width(8.dp))
-                                            Column(Modifier.weight(1f)) {
-                                                Text(item.fileName, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
-                                                Text(item.albumName ?: "", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            GroupedMediaList(
+                                groups = mediaGroups,
+                                flatList = flatFilteredMedia,
+                                collapsedGroups = collapsedGroups,
+                                onMediaClick = { idx -> selectedMediaIndex = idx }
+                            )
                         }
                     }
                     activeFilter == FilterType.VIDEO -> {
-                        val videoResults = searchMedia.filter { it.isVideo }
-                        if (videoResults.isEmpty()) {
+                        if (flatFilteredMedia.isEmpty()) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("无匹配视频", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                             }
                         } else {
-                            LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-                                items(videoResults, key = { it.id }) { item ->
-                                    val idx = videoResults.indexOf(item)
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 3.dp)
-                                            .clickable { selectedMediaIndex = idx }
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text("🎬", fontSize = 16.sp)
-                                            Spacer(Modifier.width(8.dp))
-                                            Column(Modifier.weight(1f)) {
-                                                Text(item.fileName, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface, maxLines = 1)
-                                                Text(item.albumName ?: "", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            GroupedMediaList(
+                                groups = mediaGroups,
+                                flatList = flatFilteredMedia,
+                                collapsedGroups = collapsedGroups,
+                                onMediaClick = { idx -> selectedMediaIndex = idx }
+                            )
                         }
                     }
                 }
@@ -490,20 +495,131 @@ fun TagListScreen(
         // 媒体 overlay
         val mediaIdx = selectedMediaIndex
         if (mediaIdx >= 0) {
-            // 根据当前筛选类型决定传入的 items 列表
-            val previewItems = remember(activeFilter, searchMedia) {
-                when (activeFilter) {
-                    FilterType.IMAGE -> searchMedia.filter { it.isImage && !it.isGif }
-                    FilterType.VIDEO -> searchMedia.filter { it.isVideo }
-                    else -> searchMedia
-                }
-            }
             PreviewScreen(
                 initialIndex = mediaIdx,
                 onBackClick = { selectedMediaIndex = -1 },
                 onGoHome = { selectedMediaIndex = -1 },
-                items = previewItems
+                items = flatFilteredMedia
             )
         }
     }
 }
+
+// ═══════════════════════════════════════════════
+// 分组媒体列表（相册卡片 + 4列缩略图 + 折叠）
+// ═══════════════════════════════════════════════
+@Composable
+private fun GroupedMediaList(
+    groups: Map<String, List<MediaItem>>,
+    flatList: List<MediaItem>,
+    collapsedGroups: MutableMap<String, Boolean>,
+    onMediaClick: (Int) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        groups.forEach { (albumName, items) ->
+            item(key = albumName) {
+                val isCollapsed = collapsedGroups[albumName] ?: false
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column {
+                        // ── 卡片头部：相册名 + 展开/折叠 ──
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    collapsedGroups[albumName] = !isCollapsed
+                                },
+                            color = Color.Transparent
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isCollapsed) "▶" else "▼",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    albumName,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    "${items.size} 项",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // ── 4 列缩略图网格 ──
+                        AnimatedVisibility(
+                            visible = !isCollapsed,
+                            enter = expandVertically(),
+                            exit = shrinkVertically()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 6.dp, end = 6.dp, bottom = 6.dp)
+                            ) {
+                                items.chunked(GRID_COLUMNS).forEach { row ->
+                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                        row.forEach { item ->
+                                            val idx = flatList.indexOf(item)
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .aspectRatio(1f)
+                                                    .padding(3.dp)
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(
+                                                        MaterialTheme.colorScheme.surfaceVariant
+                                                            .copy(alpha = 0.4f)
+                                                    )
+                                                    .clickable { onMediaClick(idx) }
+                                            ) {
+                                                GalleryThumbnail(
+                                                    uri = item.uri,
+                                                    contentDescription = item.fileName,
+                                                    targetSize = 150
+                                                )
+                                            }
+                                        }
+                                        // 填充最后一行不足 GRID_COLUMNS 的空位
+                                        repeat(GRID_COLUMNS - row.size) {
+                                            Spacer(Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 网格列数 */
+private const val GRID_COLUMNS = 4
