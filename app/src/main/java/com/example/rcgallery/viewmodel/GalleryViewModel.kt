@@ -11,6 +11,8 @@ import com.example.rcgallery.data.ViewHistoryRepository
 import com.example.rcgallery.data.db.ViewHistoryEntity
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDevice
+import com.example.rcgallery.data.smb.SmbFileInfo
+import com.example.rcgallery.data.smb.SmbFileOperationRecord
 import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.data.db.TargetResult
@@ -37,6 +39,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
@@ -113,6 +117,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _clipboardItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val clipboardItems: StateFlow<List<MediaItem>> = _clipboardItems.asStateFlow()
 
+    /** SMB 中转站（与本地中转站完全独立，存储 SmbFileInfo） */
+    private val _smbClipboardItems = MutableStateFlow<List<SmbFileInfo>>(emptyList())
+    val smbClipboardItems: StateFlow<List<SmbFileInfo>> = _smbClipboardItems.asStateFlow()
+
+    /** SMB 操作历史记录（持久化） */
+    private val _smbOperationHistory = MutableStateFlow<List<SmbFileOperationRecord>>(emptyList())
+    val smbOperationHistory: StateFlow<List<SmbFileOperationRecord>> = _smbOperationHistory.asStateFlow()
+
     /** 最近移动过的目标相册路径（最多 10 条，用于对话框排序） */
     private val _recentMoveAlbumDirs = MutableStateFlow<List<String>>(emptyList())
     val recentMoveAlbumDirs: StateFlow<List<String>> = _recentMoveAlbumDirs.asStateFlow()
@@ -144,6 +156,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _starredMediaUris.value = loadMediaStarredIds()
         // 恢复已保存的 SMB 设备列表
         _smbDevices.value = loadSmbDevices()
+        // 恢复 SMB 操作历史
+        _smbOperationHistory.value = loadSmbOperationHistory()
         refreshTrashCount()
         loadPersistentRules()
         loadIgnoredFolderPaths()
@@ -1457,6 +1471,292 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    // ══════════════════════════════════════
+    //  SMB 中转站（复制/移动）
+    // ══════════════════════════════════════
+
+    /** 选中 SMB 文件加入中转站（去重追加） */
+    fun smbAddToClipboard(items: List<SmbFileInfo>) {
+        val existing = _smbClipboardItems.value.map { it.path }.toSet()
+        val newItems = items.filter { it.path !in existing }
+        _smbClipboardItems.value = _smbClipboardItems.value + newItems
+        AppLogger.d("VM", "smbAddToClipboard: ${newItems.size} items (total ${_smbClipboardItems.value.size})")
+    }
+
+    /** 清空 SMB 中转站 */
+    fun smbClearClipboard() {
+        _smbClipboardItems.value = emptyList()
+        AppLogger.d("VM", "smbClearClipboard")
+    }
+
+    /**
+     * 将 SMB 中转站中的文件复制/移动到目标文件夹（同 IP 内）。
+     *
+     * @param mode COPY 或 MOVE
+     * @param targetDirUrl 目标目录的 smb:// 路径
+     */
+    fun smbPasteToFolder(mode: PasteMode, targetDirUrl: String) {
+        // 在启动 IO 协程前捕获需要的状态，避免竞态
+        val currentState = _smbBrowseState.value
+        val refreshHost = if (currentState is SmbBrowseState.FolderContent) currentState.host else null
+        val refreshPath = if (currentState is SmbBrowseState.FolderContent) currentState.currentPath else null
+        val refreshFolderName = if (currentState is SmbBrowseState.FolderContent) currentState.folderName else null
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = _smbClipboardItems.value.toList()
+            var successCount = 0
+
+            for (item in items) {
+                try {
+                    val result = when (mode) {
+                        PasteMode.COPY -> smbRepository.smbCopyToSmb(item.path, targetDirUrl)
+                        PasteMode.MOVE -> smbRepository.smbMoveToSmb(item.path, targetDirUrl)
+                    }
+                    result.onSuccess {
+                        successCount++
+                        AppLogger.d("SMB-Paste", "OK: ${item.name} -> $targetDirUrl")
+                    }.onFailure { e ->
+                        AppLogger.e("SMB-Paste", "FAIL: ${item.name}", e)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e("SMB-Paste", "FAIL: ${item.name}", e)
+                }
+            }
+
+            AppLogger.d("VM", "smbPasteToFolder: mode=$mode target=$targetDirUrl success=$successCount/${items.size}")
+
+            // 成功后清空中转站 + 提示
+            if (successCount > 0) {
+                _smbClipboardItems.value = emptyList()
+                val modeLabel = if (mode == PasteMode.COPY) "复制" else "移动"
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "${modeLabel}成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            // 记录操作历史
+            if (successCount > 0 && items.isNotEmpty()) {
+                val firstPath = items.first().path
+                val sourcePath = firstPath.substringBeforeLast("/")
+                val sourceHost = sourcePath.removePrefix("smb://").substringBefore("/").substringBefore("\\")
+                val sourceFolderName = sourcePath.substringAfterLast("/")
+                val targetHost = refreshHost ?: sourceHost
+                val targetFolderName = refreshFolderName ?: sourceFolderName
+
+                addSmbOperationRecord(
+                    mode = if (mode == PasteMode.COPY) "COPY" else "MOVE",
+                    sourceHost = sourceHost,
+                    sourcePath = sourcePath,
+                    sourceFolderName = sourceFolderName,
+                    targetHost = targetHost,
+                    targetPath = targetDirUrl,
+                    targetFolderName = targetFolderName,
+                    fileCount = items.size,
+                    successCount = successCount
+                )
+            }
+
+            // 刷新当前文件夹（在同一个 IO 协程内完成，不启动新协程）
+            if (successCount > 0 && refreshHost != null) {
+                smbRepository.quickScanFolderContent(refreshPath!!).onSuccess { result ->
+                    _smbBrowseState.value = SmbBrowseState.FolderContent(
+                        host = refreshHost,
+                        currentPath = refreshPath!!,
+                        folderName = refreshFolderName!!,
+                        subFolders = result.subFolders,
+                        mediaFiles = result.mediaFiles
+                    )
+                    AppLogger.d("SMB", "paste refresh OK: $refreshFolderName (${result.mediaFiles.size} files)")
+                }.onFailure { e ->
+                    AppLogger.e("SMB", "paste refresh FAIL: $refreshPath", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * 刷新当前 SMB 文件夹内容（轻量级：只做 Phase 1 快速扫描）。
+     * 不推入 back stack，直接替换当前状态。
+     */
+    fun smbRefreshCurrentFolder(path: String, folderName: String) {
+        viewModelScope.launch {
+            val currentState = _smbBrowseState.value
+            val host = when (currentState) {
+                is SmbBrowseState.FolderContent -> currentState.host
+                else -> return@launch
+            }
+            smbRepository.quickScanFolderContent(path).onSuccess { result ->
+                _smbBrowseState.value = SmbBrowseState.FolderContent(
+                    host = host,
+                    currentPath = path,
+                    folderName = folderName,
+                    subFolders = result.subFolders,
+                    mediaFiles = result.mediaFiles
+                )
+                AppLogger.d("SMB", "refresh folder OK: $folderName (${result.mediaFiles.size} files)")
+            }.onFailure { e ->
+                AppLogger.e("SMB", "refresh folder FAIL: $path", e)
+            }
+        }
+    }
+
+    // ══════════════════════════════════════
+    //  SMB 操作历史记录（持久化）
+    // ══════════════════════════════════════
+
+    /** 最大保留记录数 */
+    companion object {
+        private const val MAX_HISTORY_RECORDS = 50
+        private const val HISTORY_PREFS_KEY = "smb_operation_history"
+    }
+
+    /** 添加一条操作记录（最新插入，超过上限自动裁剪） */
+    private fun addSmbOperationRecord(
+        mode: String,
+        sourceHost: String,
+        sourcePath: String,
+        sourceFolderName: String,
+        targetHost: String,
+        targetPath: String,
+        targetFolderName: String,
+        fileCount: Int,
+        successCount: Int
+    ) {
+        val record = SmbFileOperationRecord(
+            mode = mode,
+            sourceHost = sourceHost,
+            sourcePath = sourcePath,
+            sourceFolderName = sourceFolderName,
+            targetHost = targetHost,
+            targetPath = targetPath,
+            targetFolderName = targetFolderName,
+            fileCount = fileCount,
+            successCount = successCount
+        )
+        val updated = listOf(record) + _smbOperationHistory.value
+        _smbOperationHistory.value = updated.take(MAX_HISTORY_RECORDS)
+        saveSmbOperationHistory(_smbOperationHistory.value)
+        AppLogger.d("SMB-History", "record added: $mode $sourceFolderName -> $targetFolderName ($successCount/$fileCount)")
+    }
+
+    /** 从 SharedPreferences 加载操作历史 */
+    private fun loadSmbOperationHistory(): List<SmbFileOperationRecord> {
+        return try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_smb_prefs", android.content.Context.MODE_PRIVATE)
+            val json = prefs.getString(HISTORY_PREFS_KEY, "") ?: ""
+            if (json.isEmpty()) return emptyList()
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                SmbFileOperationRecord(
+                    id = obj.optString("id", ""),
+                    timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                    mode = obj.getString("mode"),
+                    sourceHost = obj.optString("sourceHost", ""),
+                    sourcePath = obj.optString("sourcePath", ""),
+                    sourceFolderName = obj.optString("sourceFolderName", ""),
+                    targetPath = obj.optString("targetPath", ""),
+                    targetHost = obj.optString("targetHost", ""),
+                    targetFolderName = obj.optString("targetFolderName", ""),
+                    fileCount = obj.optInt("fileCount", 0),
+                    successCount = obj.optInt("successCount", 0)
+                )
+            }
+        } catch (e: Exception) {
+            AppLogger.e("SMB-History", "load failed", e)
+            emptyList()
+        }
+    }
+
+    /** 保存操作历史到 SharedPreferences */
+    private fun saveSmbOperationHistory(records: List<SmbFileOperationRecord>) {
+        try {
+            val arr = JSONArray()
+            for (r in records) {
+                arr.put(JSONObject().apply {
+                    put("id", r.id)
+                    put("timestamp", r.timestamp)
+                    put("mode", r.mode)
+                    put("sourceHost", r.sourceHost)
+                    put("sourcePath", r.sourcePath)
+                    put("sourceFolderName", r.sourceFolderName)
+                    put("targetPath", r.targetPath)
+                    put("targetHost", r.targetHost)
+                    put("targetFolderName", r.targetFolderName)
+                    put("fileCount", r.fileCount)
+                    put("successCount", r.successCount)
+                })
+            }
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_smb_prefs", android.content.Context.MODE_PRIVATE)
+            prefs.edit().putString(HISTORY_PREFS_KEY, arr.toString()).apply()
+        } catch (e: Exception) {
+            AppLogger.e("SMB-History", "save failed", e)
+        }
+    }
+
+    /**
+     * 导出 SMB 操作历史到缓存目录并触发系统分享。
+     */
+    fun exportSmbOperationHistory(context: android.content.Context) {
+        try {
+            val records = _smbOperationHistory.value
+            if (records.isEmpty()) return
+
+            val dateStr = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            val fileName = "SMB_History_$dateStr.json"
+
+            // 构建导出 JSON
+            val arr = JSONArray()
+            for (r in records) {
+                arr.put(JSONObject().apply {
+                    put("id", r.id)
+                    put("timestamp", r.timestamp)
+                    put("time", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                        .format(java.util.Date(r.timestamp)))
+                    put("mode", r.mode)
+                    put("sourceHost", r.sourceHost)
+                    put("sourcePath", r.sourcePath)
+                    put("sourceFolderName", r.sourceFolderName)
+                    put("targetPath", r.targetPath)
+                    put("targetHost", r.targetHost)
+                    put("targetFolderName", r.targetFolderName)
+                    put("fileCount", r.fileCount)
+                    put("successCount", r.successCount)
+                })
+            }
+            val exportJson = JSONObject().apply {
+                put("exportTime", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date()))
+                put("totalRecords", records.size)
+                put("records", arr)
+            }.toString(2)
+
+            // 写入缓存目录
+            val exportFile = java.io.File(context.cacheDir, fileName)
+            exportFile.writeText(exportJson, java.nio.charset.Charset.forName("UTF-8"))
+
+            // 触发系统分享
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context, "${context.packageName}.fileprovider", exportFile)
+            val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(android.content.Intent.createChooser(shareIntent, "分享 SMB 操作历史"))
+            AppLogger.d("SMB-History", "exported: $fileName (${records.size} records)")
+        } catch (e: Exception) {
+            AppLogger.e("SMB-History", "export failed", e)
         }
     }
 

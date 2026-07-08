@@ -8,15 +8,18 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +38,7 @@ import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.SmbConnectDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import com.example.rcgallery.viewmodel.PasteMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -60,11 +64,34 @@ fun NetworkBrowserScreen(
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
+    // ── SMB 多选状态（与本地 MediaGridScreen 模式一致）──
+    var isSmbMultiSelect by remember { mutableStateOf(false) }
+    var selectedSmbPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
+    fun exitSmbMultiSelect() {
+        isSmbMultiSelect = false
+        selectedSmbPaths = emptySet()
+    }
+    fun toggleSmbSelection(file: SmbFileInfo) {
+        val path = file.path
+        selectedSmbPaths = if (path in selectedSmbPaths) selectedSmbPaths - path else selectedSmbPaths + path
+        if (selectedSmbPaths.isEmpty()) isSmbMultiSelect = false
+    }
+
+    // ── SMB 中转站状态 ──
+    val smbClipboardItems by viewModel.smbClipboardItems.collectAsState()
+
+    // ── SMB 操作历史 ──
+    val smbOperationHistory by viewModel.smbOperationHistory.collectAsState()
+    var showHistoryPage by remember { mutableStateOf(false) }
+
     // 初始化 SMB 缩略图磁盘缓存
     LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
 
-    // 系统侧滑返回 — 不在 DeviceList 时调用 smbGoBack()
-    BackHandler(enabled = smbBrowseState !is SmbBrowseState.DeviceList) {
+    // 系统侧滑返回 — 多选时优先退出多选
+    BackHandler(enabled = isSmbMultiSelect) { exitSmbMultiSelect() }
+    // 系统侧滑返回 — 关闭历史页面或导航上级
+    BackHandler(enabled = !isSmbMultiSelect && showHistoryPage) { showHistoryPage = false }
+    BackHandler(enabled = !isSmbMultiSelect && !showHistoryPage && smbBrowseState !is SmbBrowseState.DeviceList) {
         viewModel.smbGoBack()
     }
 
@@ -74,17 +101,20 @@ fun NetworkBrowserScreen(
             topBar = {
                 TopAppBar(
                     title = {
-                        val title = when (val s = smbBrowseState) {
-                            is SmbBrowseState.DeviceList -> "网络相册"
-                            is SmbBrowseState.Connecting -> s.progressMessage
-                            is SmbBrowseState.Error -> "出错了"
-                            is SmbBrowseState.ShareList -> s.host
-                            is SmbBrowseState.FolderContent -> s.folderName
-                        }
+                        val title = if (isSmbMultiSelect) "已选 ${selectedSmbPaths.size} 项"
+                                    else when (val s = smbBrowseState) {
+                                        is SmbBrowseState.DeviceList -> "网络相册"
+                                        is SmbBrowseState.Connecting -> s.progressMessage
+                                        is SmbBrowseState.Error -> "出错了"
+                                        is SmbBrowseState.ShareList -> s.host
+                                        is SmbBrowseState.FolderContent -> s.folderName
+                                    }
                         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     },
                     navigationIcon = {
-                        if (smbBrowseState !is SmbBrowseState.DeviceList) {
+                        if (isSmbMultiSelect) {
+                            TextButton(onClick = { exitSmbMultiSelect() }) { Text("取消") }
+                        } else if (smbBrowseState !is SmbBrowseState.DeviceList) {
                             TextButton(onClick = { viewModel.smbGoBack() }) {
                                 Text("← ${if (smbBrowseState is SmbBrowseState.FolderContent) "上级" else "返回"}")
                             }
@@ -93,7 +123,14 @@ fun NetworkBrowserScreen(
                     windowInsets = WindowInsets(0, 0, 0, 0),
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface
-                    )
+                    ),
+                    actions = {
+                        if (!isSmbMultiSelect && smbBrowseState is SmbBrowseState.FolderContent) {
+                            TextButton(onClick = { showHistoryPage = true }) {
+                                Text("📋", fontSize = 16.sp)
+                            }
+                        }
+                    }
                 )
             }
         ) { padding ->
@@ -144,16 +181,61 @@ fun NetworkBrowserScreen(
                         )
                     }
                     is SmbBrowseState.FolderContent -> {
-                        FolderMixedContent(
-                            subFolders = s.subFolders,
-                            mediaFiles = s.mediaFiles,
-                            onFolderClick = { folder -> viewModel.smbOpenFolder(folder.path, folder.name) },
-                            onFileClick = { idx, files ->
-                                val file = files.getOrNull(idx)
-                                if (file != null) AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
-                                previewState = idx to files
+                        Box(Modifier.fillMaxSize()) {
+                            FolderMixedContent(
+                                subFolders = s.subFolders,
+                                mediaFiles = s.mediaFiles,
+                                onFolderClick = { folder -> viewModel.smbOpenFolder(folder.path, folder.name) },
+                                onFileClick = { idx, files ->
+                                    val file = files.getOrNull(idx)
+                                    if (isSmbMultiSelect && file != null) {
+                                        toggleSmbSelection(file)
+                                    } else if (file != null) {
+                                        AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
+                                        previewState = idx to files
+                                    }
+                                },
+                                isMultiSelect = isSmbMultiSelect,
+                                selectedPaths = selectedSmbPaths,
+                                onLongPress = { file ->
+                                    if (!isSmbMultiSelect) isSmbMultiSelect = true
+                                    toggleSmbSelection(file)
+                                }
+                            )
+
+                            // ── 多选模式浮动按钮 ──
+                            if (isSmbMultiSelect && selectedSmbPaths.isNotEmpty()) {
+                                val selectedFiles = s.mediaFiles.filter { it.path in selectedSmbPaths }
+                                SmbMultiSelectButton(
+                                    selectedCount = selectedSmbPaths.size,
+                                    onAddToClipboard = {
+                                        viewModel.smbAddToClipboard(selectedFiles)
+                                        exitSmbMultiSelect()
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(end = 12.dp, bottom = 80.dp)
+                                )
                             }
-                        )
+
+                            // ── SMB 中转站 badge ──
+                            if (!isSmbMultiSelect && smbClipboardItems.isNotEmpty()) {
+                                SmbClipboardBadge(
+                                    count = smbClipboardItems.size,
+                                    currentFolderPath = s.currentPath,
+                                    onPasteCopy = {
+                                        viewModel.smbPasteToFolder(PasteMode.COPY, s.currentPath)
+                                    },
+                                    onPasteMove = {
+                                        viewModel.smbPasteToFolder(PasteMode.MOVE, s.currentPath)
+                                    },
+                                    onClear = { viewModel.smbClearClipboard() },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(end = 16.dp, bottom = 16.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -178,6 +260,15 @@ fun NetworkBrowserScreen(
             } else {
                 previewState = null
             }
+        }
+
+        // ── SMB 操作历史页面 overlay ──
+        if (showHistoryPage) {
+            SmbHistoryPage(
+                records = smbOperationHistory,
+                onDismiss = { showHistoryPage = false },
+                onExport = { viewModel.exportSmbOperationHistory(context) }
+            )
         }
     }
 }
@@ -279,7 +370,11 @@ private fun FolderMixedContent(
     subFolders: List<SmbSubFolder>,
     mediaFiles: List<SmbFileInfo>,
     onFolderClick: (SmbSubFolder) -> Unit,
-    onFileClick: (Int, List<SmbFileInfo>) -> Unit
+    onFileClick: (Int, List<SmbFileInfo>) -> Unit,
+    // ── 多选参数 ──
+    isMultiSelect: Boolean = false,
+    selectedPaths: Set<String> = emptySet(),
+    onLongPress: ((SmbFileInfo) -> Unit)? = null
 ) {
     val scope = rememberCoroutineScope()
     var isListMode by remember { mutableStateOf(true) } // 默认列表模式
@@ -331,9 +426,19 @@ private fun FolderMixedContent(
             subFolders = sortedSubFolders,
             mediaFiles = sortedMediaFiles,
             onFolderClick = onFolderClick,
-            onFileClick = { idx, _ -> onFileClick(idx, latestSortedMediaFiles) },
+            onFileClick = { idx, _ ->
+                val file = latestSortedMediaFiles.getOrNull(idx)
+                if (isMultiSelect && file != null) {
+                    // Multi-select toggle handled by onLongPress callback
+                } else {
+                    onFileClick(idx, latestSortedMediaFiles)
+                }
+            },
             scope = scope,
-            isListMode = isListMode
+            isListMode = isListMode,
+            isMultiSelect = isMultiSelect,
+            selectedPaths = selectedPaths,
+            onLongPress = onLongPress
         )
     }
 
@@ -377,6 +482,12 @@ private fun FolderMixedContent(
                 if (adapter.subFolders !== sortedSubFolders || adapter.mediaFiles !== sortedMediaFiles) {
                     adapter.subFolders = sortedSubFolders
                     adapter.mediaFiles = sortedMediaFiles
+                    adapter.notifyDataSetChanged()
+                }
+                // 多选状态更新
+                if (adapter.isMultiSelect != isMultiSelect || adapter.selectedPaths != selectedPaths) {
+                    adapter.isMultiSelect = isMultiSelect
+                    adapter.selectedPaths = selectedPaths
                     adapter.notifyDataSetChanged()
                 }
             }
@@ -483,7 +594,11 @@ private class FolderMixedAdapter(
     private val onFolderClick: (SmbSubFolder) -> Unit,
     private val onFileClick: (Int, SmbFileInfo) -> Unit,
     val scope: CoroutineScope,
-    @Volatile var isListMode: Boolean = true
+    @Volatile var isListMode: Boolean = true,
+    // ── 多选 ──
+    @Volatile var isMultiSelect: Boolean = false,
+    @Volatile var selectedPaths: Set<String> = emptySet(),
+    var onLongPress: ((SmbFileInfo) -> Unit)? = null
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
@@ -510,9 +625,9 @@ private class FolderMixedAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             TYPE_FOLDER_GRID -> FolderVH.create(parent, onFolderClick, scope)
-            TYPE_MEDIA_GRID -> MediaVH.create(parent, onFileClick, scope)
+            TYPE_MEDIA_GRID -> MediaVH.create(parent, onFileClick, scope, onLongPress)
             TYPE_FOLDER_LIST -> FolderListVH.create(parent, onFolderClick)
-            TYPE_MEDIA_LIST -> MediaListVH.create(parent, onFileClick, scope)
+            TYPE_MEDIA_LIST -> MediaListVH.create(parent, onFileClick, scope, onLongPress)
             else -> throw IllegalArgumentException("unknown viewType=$viewType")
         }
     }
@@ -520,9 +635,9 @@ private class FolderMixedAdapter(
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         when (holder) {
             is FolderVH -> holder.bind(subFolders[position], position)
-            is MediaVH -> holder.bind(mediaFiles[position - folderCount], position)
+            is MediaVH -> holder.bind(mediaFiles[position - folderCount], position, isMultiSelect, selectedPaths)
             is FolderListVH -> holder.bind(subFolders[position])
-            is MediaListVH -> holder.bind(mediaFiles[position - folderCount], position - folderCount)
+            is MediaListVH -> holder.bind(mediaFiles[position - folderCount], position - folderCount, isMultiSelect, selectedPaths)
         }
     }
 }
@@ -658,11 +773,13 @@ private class MediaVH private constructor(
     itemView: View,
     private val iv: ImageView,
     private val playIcon: TextView,
+    private val selectedOverlay: FrameLayout,
     private val scope: CoroutineScope,
     private val onFileClick: (Int, SmbFileInfo) -> Unit
 ) : RecyclerView.ViewHolder(itemView) {
 
     private var bindPos: Int = 0
+    private var currentItem: SmbFileInfo? = null
 
     init {
         itemView.setOnClickListener {
@@ -670,10 +787,19 @@ private class MediaVH private constructor(
             AppLogger.d("SMB", "click media: ${file.name} path=${file.path}")
             onFileClick(bindPos, file)
         }
+        itemView.setOnLongClickListener {
+            val file = currentItem ?: return@setOnLongClickListener true
+            (itemView.parent as? RecyclerView)?.adapter?.let { adp ->
+                if (adp is FolderMixedAdapter) {
+                    adp.onLongPress?.invoke(file)
+                }
+            }
+            true
+        }
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope): MediaVH {
+        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope, onLongPress: ((SmbFileInfo) -> Unit)? = null): MediaVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val gapPx = (SM_GAP_DP * d).toInt()
@@ -718,21 +844,66 @@ private class MediaVH private constructor(
             }
             root.addView(playIcon)
 
-            return MediaVH(root, iv, playIcon, scope, onFileClick)
+            // 选中状态覆盖层（绿色渐变背景 + 白色勾 ✓）
+            val selectedOverlay = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                visibility = android.view.View.GONE
+                setBackgroundColor(android.graphics.Color.argb(80, 76, 175, 80)) // green tint
+            }
+            // 勾 ✓ 圆圈
+            val checkmarkContainer = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (36 * d).toInt(), (36 * d).toInt(), Gravity.CENTER
+                )
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                    setColor(android.graphics.Color.argb(220, 76, 175, 80))
+                }
+            }
+            val checkTv = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+                text = "✓"
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 20f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            checkmarkContainer.addView(checkTv)
+            selectedOverlay.addView(checkmarkContainer)
+            root.addView(selectedOverlay)
+
+            return MediaVH(root, iv, playIcon, selectedOverlay, scope, onFileClick)
         }
     }
 
     private var currentPath: String? = null
     private var loadJob: kotlinx.coroutines.Job? = null
 
-    fun bind(file: SmbFileInfo, pos: Int) {
+    fun bind(file: SmbFileInfo, pos: Int, isMultiSelect: Boolean = false, selectedPaths: Set<String> = emptySet()) {
         bindPos = pos
+        currentItem = file
         itemView.tag = file
         val path = file.path
         val isVideo = file.isVideo
 
         AppLogger.d("SMB-THUMB", "bind pos=$pos name=${file.name} isVideo=$isVideo path=$path")
         playIcon.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
+
+        // ── 多选状态 ──
+        if (isMultiSelect) {
+            val isSel = file.path in selectedPaths
+            itemView.alpha = if (isSel) 1.0f else 0.6f
+            selectedOverlay.visibility = if (isSel) android.view.View.VISIBLE else android.view.View.GONE
+        } else {
+            itemView.alpha = 1.0f
+            selectedOverlay.visibility = android.view.View.GONE
+        }
 
         if (path == currentPath) return
 
@@ -837,11 +1008,13 @@ private class MediaListVH private constructor(
     private val nameTv: TextView,
     private val sizeTv: TextView,
     private val playLabel: TextView,
+    private val selectedOverlay: FrameLayout,
     private val scope: CoroutineScope,
     private val onFileClick: (Int, SmbFileInfo) -> Unit
 ) : RecyclerView.ViewHolder(itemView) {
 
     private var bindPos: Int = 0
+    private var currentItem: SmbFileInfo? = null
 
     init {
         itemView.setOnClickListener {
@@ -849,10 +1022,19 @@ private class MediaListVH private constructor(
             AppLogger.d("SMB", "click media: ${file.name} path=${file.path}")
             onFileClick(bindPos, file)
         }
+        itemView.setOnLongClickListener {
+            val file = currentItem ?: return@setOnLongClickListener true
+            (itemView.parent as? RecyclerView)?.adapter?.let { adp ->
+                if (adp is FolderMixedAdapter) {
+                    adp.onLongPress?.invoke(file)
+                }
+            }
+            true
+        }
     }
 
     companion object {
-        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope): MediaListVH {
+        fun create(parent: ViewGroup, onFileClick: (Int, SmbFileInfo) -> Unit, scope: CoroutineScope, onLongPress: ((SmbFileInfo) -> Unit)? = null): MediaListVH {
             val ctx = parent.context
             val d = ctx.resources.displayMetrics.density
             val thumbPx = (56 * d).toInt()
@@ -898,6 +1080,40 @@ private class MediaListVH private constructor(
                 visibility = android.view.View.GONE
             }
             thumbFrame.addView(playLabel)
+
+            // 选中状态覆盖层
+            val selectedOverlay = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                visibility = android.view.View.GONE
+                setBackgroundColor(android.graphics.Color.argb(80, 76, 175, 80))
+            }
+            val checkmarkContainer = FrameLayout(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (28 * d).toInt(), (28 * d).toInt(), Gravity.CENTER
+                )
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                    setColor(android.graphics.Color.argb(220, 76, 175, 80))
+                }
+            }
+            val checkTv = TextView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+                text = "✓"
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 16f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+            checkmarkContainer.addView(checkTv)
+            selectedOverlay.addView(checkmarkContainer)
+            thumbFrame.addView(selectedOverlay)
+
             root.addView(thumbFrame)
 
             // 文件名
@@ -923,15 +1139,16 @@ private class MediaListVH private constructor(
             }
             root.addView(sizeTv)
 
-            return MediaListVH(root, iv, nameTv, sizeTv, playLabel, scope, onFileClick)
+            return MediaListVH(root, iv, nameTv, sizeTv, playLabel, selectedOverlay, scope, onFileClick)
         }
     }
 
     private var currentPath: String? = null
     private var loadJob: kotlinx.coroutines.Job? = null
 
-    fun bind(file: SmbFileInfo, pos: Int = 0) {
+    fun bind(file: SmbFileInfo, pos: Int = 0, isMultiSelect: Boolean = false, selectedPaths: Set<String> = emptySet()) {
         bindPos = pos
+        currentItem = file
         itemView.tag = file
         val path = file.path
         val isVideo = file.isVideo
@@ -939,6 +1156,16 @@ private class MediaListVH private constructor(
         nameTv.text = file.name
         sizeTv.text = formatFileSize(file.size)
         playLabel.visibility = if (isVideo) android.view.View.VISIBLE else android.view.View.GONE
+
+        // ── 多选状态 ──
+        if (isMultiSelect) {
+            val isSel = file.path in selectedPaths
+            itemView.alpha = if (isSel) 1.0f else 0.6f
+            selectedOverlay.visibility = if (isSel) android.view.View.VISIBLE else android.view.View.GONE
+        } else {
+            itemView.alpha = 1.0f
+            selectedOverlay.visibility = android.view.View.GONE
+        }
 
         if (path == currentPath) return
         // 取消上次协程，防止快速滚动时大量协程堆积
@@ -966,5 +1193,107 @@ private class MediaListVH private constructor(
         bytes < 1024 * 1024 -> "${bytes / 1024} KB"
         bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
         else -> "${bytes / (1024 * 1024 * 1024)} GB"
+    }
+}
+
+// ══════════════════════════════════════
+//  SMB 多选 UI 组件
+// ══════════════════════════════════════
+
+/**
+ * SMB 多选模式浮动按钮（"加入中转站"）。
+ */
+@Composable
+private fun SmbMultiSelectButton(
+    selectedCount: Int,
+    onAddToClipboard: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color(0xCCFF9800),
+        onClick = onAddToClipboard,
+        modifier = modifier.height(34.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.fillMaxHeight().padding(horizontal = 10.dp)
+        ) {
+            Text(
+                text = "加入中转站 ($selectedCount)",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * SMB 中转站浮动 badge。
+ * 显示在中转站有内容时，圆形红底白字计数器。
+ * 点击弹出菜单：复制到当前文件夹、移动到当前文件夹、清空。
+ */
+@Composable
+private fun SmbClipboardBadge(
+    count: Int,
+    currentFolderPath: String,
+    onPasteCopy: () -> Unit,
+    onPasteMove: () -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (count <= 0) return
+
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        // 圆形 badge
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .background(Color(0xFFE53935))
+                .clickable { expanded = true },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = count.toString(),
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+
+        // 弹出菜单
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            DropdownMenuItem(
+                text = { Text("粘贴到当前文件夹 (复制)", fontSize = 14.sp) },
+                onClick = {
+                    expanded = false
+                    onPasteCopy()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("粘贴到当前文件夹 (移动)", fontSize = 14.sp) },
+                onClick = {
+                    expanded = false
+                    onPasteMove()
+                }
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("清空中转站", fontSize = 14.sp, color = Color.Gray) },
+                onClick = {
+                    expanded = false
+                    onClear()
+                }
+            )
+        }
     }
 }

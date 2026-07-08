@@ -6,12 +6,14 @@ import jcifs.smb.SmbAuthException
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
 import jcifs.smb.SmbFileInputStream
+import jcifs.smb.SmbFileOutputStream
 import jcifs.smb.SmbRandomAccessFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 
 /**
  * SMB 仓库 — 封装 jcifs-ng 的所有操作。
@@ -451,6 +453,118 @@ class SmbRepository {
                     output.flush()
                 }
             }
+        }
+    }
+
+    // ══════════════════════════════════════
+    //  SMB 文件写入（复制/移动）
+    // ══════════════════════════════════════
+
+    /**
+     * 获取 SMB 文件输出流（写入到 SMB 服务器）。
+     */
+    suspend fun getOutputStream(url: String): Result<OutputStream> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(url)
+            SmbFileOutputStream(SmbFile(url, ctx)) as OutputStream
+        }
+    }
+
+    /**
+     * 在同一 SMB 共享内重命名/移动文件（服务器端瞬间完成，不传输数据）。
+     * 跨共享会失败，由调用方 fallback 到 copy+delete。
+     */
+    suspend fun renameFile(sourcePath: String, destPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(sourcePath)
+            val srcFile = SmbFile(sourcePath, ctx)
+            if (!srcFile.exists()) throw IllegalStateException("源文件不存在: $sourcePath")
+            val destFile = SmbFile(destPath, ctx)
+            srcFile.renameTo(destFile)
+        }
+    }
+
+    /**
+     * 在 SMB 目录中生成唯一的文件名（不覆盖已有文件）。
+     * 不冲突时返回原文件名；冲突时追加 (1)、(2)... 后缀。
+     */
+    private fun generateUniqueSmbName(dirUrl: String, baseName: String, ctx: CIFSContext): String {
+        val dir = SmbFile(ensureTrailingSlash(dirUrl), ctx)
+        val existing = dir.listFiles().map { it.name }.toSet()
+        if (baseName !in existing) return baseName
+        val dotIdx = baseName.lastIndexOf('.')
+        val stem = if (dotIdx > 0) baseName.substring(0, dotIdx) else baseName
+        val ext = if (dotIdx > 0) baseName.substring(dotIdx) else ""
+        var suffix = 1
+        while ("${stem}($suffix)$ext" in existing) { suffix++ }
+        return "${stem}($suffix)$ext"
+    }
+
+    /**
+     * 流式复制 SMB 文件到另一个 SMB 位置。
+     * 自动处理目标文件名冲突（追加 (1)、(2)...）。
+     *
+     * @param sourceUrl 源文件 smb:// 路径
+     * @param destDirUrl 目标目录 smb:// 路径
+     * @return 最终目标文件路径
+     */
+    suspend fun smbCopyToSmb(sourceUrl: String, destDirUrl: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(sourceUrl)
+            val srcFile = SmbFile(sourceUrl, ctx)
+            val baseName = srcFile.name
+            val dirPath = ensureTrailingSlash(destDirUrl)
+            val uniqueName = generateUniqueSmbName(dirPath, baseName, ctx)
+            val destPath = dirPath + uniqueName
+
+            SmbFileInputStream(srcFile).use { input ->
+                SmbFileOutputStream(SmbFile(destPath, ctx)).use { output ->
+                    val buf = ByteArray(256 * 1024)
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read < 0) break
+                        output.write(buf, 0, read)
+                    }
+                    output.flush()
+                }
+            }
+            destPath
+        }
+    }
+
+    /**
+     * 移动 SMB 文件到另一个位置（同 IP 内）。
+     *
+     * ### 策略
+     * 1. 优先尝试 [renameTo]（同一共享内瞬间完成）
+     * 2. 失败则 fallback 到 [smbCopyToSmb] + [deleteFile]（跨共享）
+     *
+     * @param sourceUrl 源文件 smb:// 路径
+     * @param destDirUrl 目标目录 smb:// 路径
+     * @return 最终目标文件路径
+     */
+    suspend fun smbMoveToSmb(sourceUrl: String, destDirUrl: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(sourceUrl)
+            val srcFile = SmbFile(sourceUrl, ctx)
+            val baseName = srcFile.name
+            val dirPath = ensureTrailingSlash(destDirUrl)
+            val uniqueName = generateUniqueSmbName(dirPath, baseName, ctx)
+            val destPath = dirPath + uniqueName
+
+            // 先尝试 renameTo（同共享内瞬时完成）
+            val renameOk = try {
+                srcFile.renameTo(SmbFile(destPath, ctx))
+                true
+            } catch (_: Exception) {
+                false
+            }
+            if (renameOk) return@runCatching destPath
+
+            // Fallback: 流式复制 + 删除源文件（跨共享）
+            smbCopyToSmb(sourceUrl, destDirUrl).getOrThrow()
+            deleteFile(sourceUrl).getOrThrow()
+            destPath
         }
     }
 
