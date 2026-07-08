@@ -167,6 +167,34 @@ fun AlbumGridScreen(
         mutableStateOf(prefs.getBoolean("date_view", false))
     }
     val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
+    val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
+    // 日期视图：按相册筛选规则过滤（被隐藏的相册中的内容也不在日期模式出现）
+    val dateMediaItems = remember(allMediaItems, albums, persistentRules, albumTags, tempFilter) {
+        val hasActiveAlbumRule = persistentRules.any {
+            it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
+        }
+        val hasTemp = tempFilter.isActive
+        if (!hasActiveAlbumRule && !hasTemp) {
+            allMediaItems
+        } else {
+            val hiddenBucketIds = albums.filter { album ->
+                val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
+                val byPersistent = if (hasActiveAlbumRule) viewModel.shouldHideAlbum(album.directoryPath, tagNames) else false
+                val byTemp = if (hasTemp) {
+                    val tagSet = tagNames.toSet()
+                    val tempTags = tempFilter.tagNames.toSet()
+                    val matches = if (tempFilter.logic == com.example.rcgallery.model.FilterLogic.AND) {
+                        tempTags.all { it in tagSet }
+                    } else {
+                        tempTags.any { it in tagSet }
+                    }
+                    if (tempFilter.mode == com.example.rcgallery.model.FilterMode.HIDE) matches else !matches
+                } else false
+                byPersistent || byTemp
+            }.map { it.bucketId }.toSet()
+            allMediaItems.filter { it.albumId !in hiddenBucketIds }
+        }
+    }
     var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
     // 持久化恢复或切换标签回来时，日期视图要加载全量数据
     LaunchedEffect(isDateView) {
@@ -301,8 +329,6 @@ fun AlbumGridScreen(
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val albumRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
-    val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
-
     // ── 筛选规则过滤后的相册列表（持久规则 + 临时筛选叠加）──
     val filteredAlbums = remember(albums, persistentRules, albumTags, tempFilter) {
         val hasActiveAlbumRule = persistentRules.any {
@@ -418,7 +444,7 @@ fun AlbumGridScreen(
                         prefs.edit().putBoolean("date_view", isDateView).apply()
                         if (isDateView) viewModel.loadAllMedia()
                     },
-                    allDateMediaItems = allMediaItems,
+                    allDateMediaItems = dateMediaItems,
                     selectedDatePhotoIndex = selectedDatePhotoIndex,
                     onDatePhotoClick = { idx -> selectedDatePhotoIndex = idx; onAlbumActiveChanged(true) },
                     onDatePhotoBack = { selectedDatePhotoIndex = -1 },
@@ -434,7 +460,7 @@ fun AlbumGridScreen(
                     onBatchAddTagsToAlbums = { dirPath, tagName -> viewModel.addAlbumTag(dirPath, tagName) },
                     onBatchAddTagsToMedia = { filePath, tagName -> viewModel.addMediaTag(filePath, tagName) },
                     onDeleteDateMedia = { paths ->
-                        val toDelete = allMediaItems.filter { it.filePath in paths }
+                        val toDelete = dateMediaItems.filter { it.filePath in paths }
                         toDelete.forEach { viewModel.moveToTrash(it) }
                     },
                     hasActiveFilter = persistentRules.any { it.enabled } || tempFilter.isActive,
@@ -487,12 +513,12 @@ fun AlbumGridScreen(
                 )
             }
             // ── 日期视图 Preview 覆盖层 ──
-            if (isDateView && selectedDatePhotoIndex >= 0 && selectedDatePhotoIndex < allMediaItems.size) {
+            if (isDateView && selectedDatePhotoIndex >= 0 && selectedDatePhotoIndex < dateMediaItems.size) {
                 BackHandler { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) }
                 PreviewScreen(
                     initialIndex = selectedDatePhotoIndex,
                     onBackClick = { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) },
-                    items = allMediaItems
+                    items = dateMediaItems
                 )
             }
             // ── 筛选规则页面（全屏覆盖层）──
@@ -516,7 +542,10 @@ fun AlbumGridScreen(
                     onReset = {
                         viewModel.resetTempFilter()
                         persistentRules.forEach { if (it.enabled) viewModel.toggleRule(it.id) }
-                    }
+                    },
+                    ignoredFolderPaths = viewModel.ignoredFolderPaths.collectAsState().value,
+                    allAlbums = rawAlbums,
+                    onToggleIgnoredFolder = { viewModel.toggleIgnoredFolder(it) }
                 )
             }
         }
@@ -881,8 +910,8 @@ private fun AlbumGridContent(
                 modifier = Modifier.fillMaxSize()
             )
             }  // end if (!isDateView)
-            // ── 日期分组视图 ──
-            if (isDateView && allDateMediaItems.isNotEmpty()) {
+            // ── 日期分组视图（始终渲染，避免首次加载时 RecyclerView 布局异常）
+            if (isDateView) {
                 val columns = when (val mode = displayMode) {
                     is AlbumDisplayMode.Grid -> mode.columns
                     is AlbumDisplayMode.List -> 1
@@ -1964,6 +1993,7 @@ private fun DateGroupRecyclerView(
                 } else {
                     val diff = DiffUtil.calculateDiff(DateGroupDiffCallback(oldItems, items))
                     diff.dispatchUpdatesTo(adapter)
+                    rv.requestLayout()
                 }
             } else if (oldSelectedPaths != selectedPaths) {
                 adapter.notifyItemRangeChanged(0, adapter.itemCount)

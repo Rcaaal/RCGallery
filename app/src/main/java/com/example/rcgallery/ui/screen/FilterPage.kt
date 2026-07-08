@@ -1,5 +1,10 @@
 package com.example.rcgallery.ui.screen
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -15,9 +20,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rcgallery.data.db.TagEntity
+import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.FilterLogic
 import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.model.FilterScope
@@ -25,6 +32,8 @@ import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.findFirstConflict
 import androidx.activity.compose.BackHandler
+import java.io.UnsupportedEncodingException
+import java.net.URLDecoder
 import java.util.UUID
 
 /**
@@ -43,11 +52,18 @@ fun FilterPage(
     onSaveRule: (TagRule) -> String?,  // 返回 null=成功，非 null=冲突规则名
     onDeleteRule: (String) -> Unit,
     onSetTempFilter: (TempFilter) -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    // ── 忽略文件夹 ──
+    ignoredFolderPaths: Set<String> = emptySet(),
+    allAlbums: List<Album> = emptyList(),
+    onToggleIgnoredFolder: (String) -> Unit = {}
 ) {
     var editingRule by remember { mutableStateOf<TagRule?>(null) }
     var showNewRule by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
+    var showIgnoreDialog by remember { mutableStateOf(false) }
+
+    BackHandler(onBack = onBack)
 
     // 如果有编辑或新建，切到编辑子页面
     val currentEdit = editingRule ?: if (showNewRule) TagRule(
@@ -115,6 +131,16 @@ fun FilterPage(
         )
     }
 
+    // ── 忽略文件夹弹窗 ──
+    if (showIgnoreDialog) {
+        IgnoreFolderDialog(
+            ignoredFolderPaths = ignoredFolderPaths,
+            allAlbums = allAlbums,
+            onToggle = onToggleIgnoredFolder,
+            onDismiss = { showIgnoreDialog = false }
+        )
+    }
+
     // ── 主页面 ──
     Scaffold(
         topBar = {
@@ -123,6 +149,17 @@ fun FilterPage(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    TextButton(
+                        onClick = { showIgnoreDialog = true },
+                        modifier = Modifier.height(36.dp)
+                    ) {
+                        Text("忽略文件夹",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelMedium)
                     }
                 }
             )
@@ -509,4 +546,121 @@ private fun RuleEditPage(
             }
         }
     }
+}
+
+// ══════════════════════════════════════
+//  忽略文件夹弹窗
+// ══════════════════════════════════════
+
+/** 从 SAF tree URI 中提取文件系统路径 */
+private fun extractPathFromTreeUri(uri: Uri): String? {
+    val docId = try {
+        DocumentsContract.getTreeDocumentId(uri)
+    } catch (e: Exception) { return null }
+    // docId 格式: "primary:DCIM/Camera" 或 "XXXX-XXXX:path"
+    val colonIdx = docId.indexOf(':')
+    if (colonIdx < 0) return null
+    val path = docId.substring(colonIdx + 1)
+    return if (path.startsWith("/")) path else "/sdcard/$path"
+}
+
+@Composable
+private fun IgnoreFolderDialog(
+    ignoredFolderPaths: Set<String>,
+    allAlbums: List<Album>,
+    onToggle: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // SAF 目录选择器
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val path = extractPathFromTreeUri(uri)
+            if (path != null) {
+                onToggle(path.trimEnd('/'))
+            }
+        }
+    }
+
+    // 已忽略的自定义文件夹（不在已有相册列表中的）
+    val customIgnored = ignoredFolderPaths.filter { path ->
+        allAlbums.none { it.directoryPath == path }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("忽略文件夹") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "勾选的文件夹内的所有文件将完全不在本 App 中显示。",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(16.dp))
+
+                // ═══ ① 自定义路径（放最上面，防止相册太多找不到）═══
+                Text("自定义路径", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+
+                // 已忽略的自定义路径列表
+                if (customIgnored.isNotEmpty()) {
+                    customIgnored.forEach { path ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { onToggle(path) }.padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = true, onCheckedChange = { onToggle(path) })
+                            Spacer(Modifier.width(8.dp))
+                            Text(path, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2)
+                        }
+                    }
+                }
+
+                // 点击选择文件夹（SAF 系统目录选择器）
+                TextButton(
+                    onClick = { folderPickerLauncher.launch(null) }
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("选择文件夹")
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // ═══ ② 已有相册列表 ═══
+                Text("已有相册", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+
+                allAlbums.forEach { album ->
+                    val isIgnored = album.directoryPath in ignoredFolderPaths
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { onToggle(album.directoryPath) }.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isIgnored,
+                            onCheckedChange = { onToggle(album.directoryPath) }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(album.bucketName, fontSize = 14.sp)
+                            Text(album.directoryPath, fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("完成") }
+        }
+    )
 }

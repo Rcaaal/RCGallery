@@ -96,8 +96,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _starredMediaUris = MutableStateFlow<Set<String>>(emptySet())
     val starredMediaUris: StateFlow<Set<String>> = _starredMediaUris.asStateFlow()
 
+    // ── 筛选规则系统 ──
+    private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
+    val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
+
+    private val _tempFilter = MutableStateFlow(TempFilter())
+    val tempFilter: StateFlow<TempFilter> = _tempFilter.asStateFlow()
+
+    // ── 图片筛选状态（纯内存，不持久化，重启即失）──
+    private val _mediaPersistentRules = MutableStateFlow<List<TagRule>>(emptyList())
+    val mediaPersistentRules: StateFlow<List<TagRule>> = _mediaPersistentRules.asStateFlow()
+
+    private val _mediaTempFilter = MutableStateFlow(TempFilter())
+    val mediaTempFilter: StateFlow<TempFilter> = _mediaTempFilter.asStateFlow()
+
     private var loadMediaJob: Job? = null
     private var pendingAlbumId: String? = null
+
+    // ── 忽略文件夹 ──
+    private val _ignoredFolderPaths = MutableStateFlow<Set<String>>(emptySet())
+    val ignoredFolderPaths: StateFlow<Set<String>> = _ignoredFolderPaths.asStateFlow()
 
     init {
         // 从 SharedPreferences 恢复星标状态
@@ -107,6 +125,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbDevices.value = loadSmbDevices()
         refreshTrashCount()
         loadPersistentRules()
+        loadIgnoredFolderPaths()
         viewModelScope.launch {
             observer.observeMediaChanges()
                 .debounce(500)
@@ -137,8 +156,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         if (newCount <= 0) null
                         else album.copy(count = newCount)
                     }
-                    _albums.value = filtered
-                    AppLogger.d("VM", "loadAlbums OK count=${filtered.size} (trashed filtered)")
+                    // 过滤已忽略文件夹中的相册
+                    val ignoredDirs = _ignoredFolderPaths.value
+                    val albumFiltered = if (ignoredDirs.isNotEmpty()) {
+                        filtered.filterNot { album ->
+                            album.directoryPath.isNotEmpty() && ignoredDirs.any { album.directoryPath.startsWith(it) }
+                        }
+                    } else filtered
+                    _albums.value = albumFiltered
+                    AppLogger.d("VM", "loadAlbums OK count=${albumFiltered.size} (trashed+ignored filtered)")
                 }
                 .onFailure {
                     _albums.value = emptyList()
@@ -154,6 +180,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _allMediaItems.value = withContext(Dispatchers.IO) {
                 repository.loadMediaItems(albumId = null, pageSize = 10000)
             }.getOrDefault(emptyList())
+            // 过滤已回收文件（同 loadMedia）
+            val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
+            _allMediaItems.value = _allMediaItems.value.filter { it.uri.toString() !in trashedUris }
+            // 过滤已忽略文件夹中的文件
+            val ignoredDirs = _ignoredFolderPaths.value
+            if (ignoredDirs.isNotEmpty()) {
+                _allMediaItems.value = _allMediaItems.value.filterNot { item ->
+                    ignoredDirs.any { item.filePath.startsWith(it) }
+                }
+            }
             AppLogger.d("VM", "loadAllMedia count=${_allMediaItems.value.size}")
         }
     }
@@ -175,10 +211,17 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         // 过滤已回收文件
                         val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
                         val filtered = it.filter { item -> item.uri.toString() !in trashedUris }
-                        _mediaItems.value = filtered
+                        // 过滤已忽略文件夹中的文件
+                        val ignoredDirs = _ignoredFolderPaths.value
+                        val finalFiltered = if (ignoredDirs.isNotEmpty()) {
+                            filtered.filterNot { item ->
+                                ignoredDirs.any { dir -> item.filePath.startsWith(dir) }
+                            }
+                        } else filtered
+                        _mediaItems.value = finalFiltered
                         // 自动同步相册 TAG 到相册内所有文件（新文件继承相册 TAG）
                         if (albumId != null) {
-                            val dir = filtered.firstOrNull()?.let { item ->
+                            val dir = finalFiltered.firstOrNull()?.let { item ->
                                 item.filePath.substringBeforeLast("/").takeIf { it.isNotEmpty() }
                             }
                             if (dir != null) {
@@ -329,6 +372,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      */
     fun addMediaItemBack(item: MediaItem) {
         _mediaItems.value = (_mediaItems.value + item).sortedByDescending { it.dateAdded }
+        // 同步更新日期视图全量列表（方便撤销后返回日期模式立即看到）
+        _allMediaItems.value = (_allMediaItems.value + item).sortedByDescending { it.dateAdded }
         // 如果相册已被移除（上次 moveToTrash 时 count=0），重新加入
         val existingAlbum = _albums.value.find { it.bucketId == item.albumId }
         _albums.value = if (existingAlbum != null) {
@@ -352,13 +397,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /**
      * 从回收站恢复文件（只清除索引标记，不涉及文件操作）。
-     * ⚠️ 不再调用 refreshCurrentView()，避免异步 loadMedia 与同步过滤产生竞态。
-     * 调用方（TrashScreen/PreviewScreen）根据需要自行调用 loadAlbums()。
+     * 同步刷新日期模式（_allMediaItems）和标签搜索结果，避免显示已删除文件。
      */
     fun restoreFromTrash(uri: String) {
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
+        // 同步刷新日期视图和标签搜索结果（loadAllMedia 含回收站过滤，恢复的条目不会被滤掉）
+        loadAllMedia()
+        refreshTagSearch()
         AppLogger.d("VM", "restoreFromTrash: $uri")
     }
 
@@ -398,6 +445,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         trashManager.removeAll(uris)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
+        loadAllMedia()
+        refreshTagSearch()
         AppLogger.d("VM", "batchRestoreFromTrash: ${uris.size} items")
     }
 
@@ -551,6 +600,67 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             AppLogger.e("VM", "saveMediaStarredIds FAIL", e)
         }
+    }
+
+    // ══════════════════════════════════════
+    //  忽略文件夹
+    // ══════════════════════════════════════
+
+    private fun loadIgnoredFolderPaths() {
+        try {
+            val raw = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .getStringSet("ignored_folders", emptySet()) ?: emptySet()
+            // 迁移旧格式：/sdcard/ → /storage/emulated/0/
+            val migrated = raw.map { it.replace("/sdcard/", "/storage/emulated/0/") }.toSet()
+            if (migrated != raw) {
+                saveIgnoredFolderPaths(migrated)
+            }
+            _ignoredFolderPaths.value = migrated
+        } catch (e: Exception) {
+            _ignoredFolderPaths.value = emptySet()
+        }
+        AppLogger.d("VM", "loadIgnoredFolderPaths: ${_ignoredFolderPaths.value.size} folders")
+    }
+
+    private fun saveIgnoredFolderPaths(paths: Set<String>) {
+        try {
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putStringSet("ignored_folders", paths)
+                .commit()
+            AppLogger.d("VM", "saveIgnoredFolderPaths: ${paths.size} folders")
+        } catch (e: Exception) {
+            AppLogger.e("VM", "saveIgnoredFolderPaths FAIL", e)
+        }
+    }
+
+    /** 切换文件夹忽略状态（添加/移除） */
+    fun toggleIgnoredFolder(folderPath: String) {
+        // 统一路径格式：/sdcard/ → /storage/emulated/0/（MediaStore 使用的格式）
+        val normalized = folderPath.replace("/sdcard/", "/storage/emulated/0/")
+        val current = _ignoredFolderPaths.value.toMutableSet()
+        if (normalized in current) {
+            current.remove(normalized)
+        } else {
+            current.add(normalized)
+        }
+        _ignoredFolderPaths.value = current
+        saveIgnoredFolderPaths(current)
+        // 立即刷新所有视图
+        loadAlbums()
+        loadAllMedia()
+        refreshTagSearch()
+        AppLogger.d("VM", "toggleIgnoredFolder: ${if (normalized in current) "ignored" else "unignored"} $normalized")
+    }
+
+    /** 检查路径是否在忽略列表中 */
+    fun isFolderIgnored(filePath: String): Boolean {
+        val ignored = _ignoredFolderPaths.value
+        if (ignored.isEmpty()) return false
+        val normalized = filePath.replace("/sdcard/", "/storage/emulated/0/")
+        return ignored.any { normalized.startsWith(it) }
     }
 
     // ══════════════════════════════════════
@@ -766,7 +876,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val trashedPaths = withContext(Dispatchers.IO) {
             trashManager.getAll().map { it.filePath }.toSet()
         }
-        return results.filter { it.filePath !in trashedPaths }
+        var filtered = results.filter { it.filePath !in trashedPaths }
+        // ④ 过滤已忽略文件夹
+        val ignoredDirs = _ignoredFolderPaths.value
+        if (ignoredDirs.isNotEmpty()) {
+            filtered = filtered.filterNot { item ->
+                ignoredDirs.any { item.filePath.startsWith(it) }
+            }
+        }
+        return filtered
     }
 
     /**
@@ -798,23 +916,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     //  筛选规则系统
     // ══════════════════════════════════════
 
-    private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
-    val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
-
-    private val _tempFilter = MutableStateFlow(TempFilter())
-    val tempFilter: StateFlow<TempFilter> = _tempFilter.asStateFlow()
-
-    // ── 图片筛选状态（纯内存，不持久化，重启即失）──
-    private val _mediaPersistentRules = MutableStateFlow<List<TagRule>>(emptyList())
-    val mediaPersistentRules: StateFlow<List<TagRule>> = _mediaPersistentRules.asStateFlow()
-
-    private val _mediaTempFilter = MutableStateFlow(TempFilter())
-    val mediaTempFilter: StateFlow<TempFilter> = _mediaTempFilter.asStateFlow()
-
     private fun loadPersistentRules() {
         val jsonStr = getApplication<Application>()
             .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
-            .getString("filter_rules", null) ?: return
+            .getString("filter_rules", null)
+        if (jsonStr == null) {
+            AppLogger.d("VM", "loadPersistentRules: no saved rules found")
+            return
+        }
         try {
             val arr = org.json.JSONArray(jsonStr)
             val rules = mutableListOf<TagRule>()
@@ -837,6 +946,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 ))
             }
             _persistentRules.value = rules
+            AppLogger.d("VM", "loadPersistentRules: loaded ${rules.size} rules, json=${jsonStr}")
         } catch (e: Exception) {
             AppLogger.e("VM", "loadPersistentRules FAIL", e)
         }
@@ -862,7 +972,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
                 .edit()
                 .putString("filter_rules", arr.toString())
-                .apply()
+                .commit()
+            AppLogger.d("VM", "savePersistentRules: saved ${_persistentRules.value.size} rules, json=${arr.toString()}")
         } catch (e: Exception) {
             AppLogger.e("VM", "savePersistentRules FAIL", e)
         }
