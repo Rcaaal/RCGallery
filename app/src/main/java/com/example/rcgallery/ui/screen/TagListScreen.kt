@@ -446,6 +446,7 @@ fun TagListScreen(
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
+                                            Spacer(Modifier.height(2.dp))
                                             Text(
                                                 "${album.count} 项",
                                                 fontSize = 9.sp,

@@ -176,6 +176,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
                         val filtered = it.filter { item -> item.uri.toString() !in trashedUris }
                         _mediaItems.value = filtered
+                        // 自动同步相册 TAG 到相册内所有文件（新文件继承相册 TAG）
+                        if (albumId != null) {
+                            val dir = filtered.firstOrNull()?.let { item ->
+                                item.filePath.substringBeforeLast("/").takeIf { it.isNotEmpty() }
+                            }
+                            if (dir != null) {
+                                syncAlbumTagsToMedia(dir)
+                            }
+                        }
                     }
                 }
                 .onFailure {
@@ -737,14 +746,50 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** getMediaByTagNames 并过滤已回收文件 */
+    /** getMediaByTagNames 并过滤已回收文件，同时自动同步相册 TAG 到文件 */
     private suspend fun getMediaByTagNamesExcludeTrash(tagNames: List<String>): List<MediaItem> {
+        if (tagNames.isEmpty()) return emptyList()
+        // ① 找出拥有所有搜索 TAG 的相册，自动同步其 TAG 到内部文件
+        val targets = tagRepository.findTargetsWithAllTags(tagNames)
+        val albumDirs = targets.filter { it.targetType == TagRepository.TYPE_ALBUM }
+            .map { it.targetKey.removePrefix("album:") }
+            .toSet()
+        for (dir in albumDirs) {
+            syncAlbumTagsToMedia(dir)
+        }
+        // ② 现在重新查询（同步后的文件已被 TAG 关联）
         val results = getMediaByTagNames(tagNames)
         if (results.isEmpty()) return results
+        // ③ 过滤回收站
         val trashedPaths = withContext(Dispatchers.IO) {
             trashManager.getAll().map { it.filePath }.toSet()
         }
         return results.filter { it.filePath !in trashedPaths }
+    }
+
+    /**
+     * 自动同步相册的 TAG 到相册内所有媒体文件。
+     * 仅同步尚未拥有的 TAG（通过 getTagIdsForTarget 做 diff，避免重复写入）。
+     */
+    private suspend fun syncAlbumTagsToMedia(albumDir: String) {
+        val albumKey = tagRepository.albumKey(albumDir)
+        val albumTagIds = tagRepository.getTagIdsForTarget(albumKey)
+        if (albumTagIds.isEmpty()) return
+        val album = _albums.value.find { it.directoryPath == albumDir } ?: return
+        val items = withContext(Dispatchers.IO) {
+            repository.loadMediaItems(albumId = album.bucketId, pageSize = 10000)
+                .getOrDefault(emptyList())
+        }
+        for (item in items) {
+            if (item.filePath.isEmpty()) continue
+            val mediaKey = tagRepository.mediaKey(item.filePath)
+            val existingTagIds = tagRepository.getTagIdsForTarget(mediaKey).toSet()
+            for (tagId in albumTagIds) {
+                if (tagId !in existingTagIds) {
+                    tagRepository.addTagToTarget(tagId, mediaKey, TagRepository.TYPE_MEDIA)
+                }
+            }
+        }
     }
 
     // ══════════════════════════════════════
