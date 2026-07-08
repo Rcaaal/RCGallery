@@ -1865,7 +1865,7 @@ private fun DateGroupRecyclerView(
         factory = { ctx ->
             val density = ctx.resources.displayMetrics.density
             val topPad = (44 * density).toInt()
-            val adapter = DateGroupAdapter(items, columns, onClick).apply {
+            val adapter = DateGroupAdapter(emptyList(), columns, onClick).apply {
                 this.onLongClick = onLongClick
                 this.selectedPaths = selectedPaths
             }
