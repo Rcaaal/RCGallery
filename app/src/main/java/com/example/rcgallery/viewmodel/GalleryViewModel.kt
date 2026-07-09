@@ -1740,7 +1740,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val sourcePath: String,
         val targetPath: String,
         val mimeType: String,
-        val size: Long
+        val size: Long,
+        val dateAdded: Long = 0L
     )
 
     /** 一次移动/复制操作的完整记录 */
@@ -1833,7 +1834,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         sourcePath = fo.getString("sourcePath"),
                         targetPath = fo.getString("targetPath"),
                         mimeType = fo.getString("mimeType"),
-                        size = fo.getLong("size")
+                        size = fo.getLong("size"),
+                        dateAdded = fo.optLong("dateAdded", 0L)
                     )
                 }
                 MoveRecord(
@@ -1870,6 +1872,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         put("targetPath", f.targetPath)
                         put("mimeType", f.mimeType)
                         put("size", f.size)
+                        put("dateAdded", f.dateAdded)
                     })
                 }
                 arr.put(JSONObject().apply {
@@ -2349,7 +2352,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         sourcePath = item.filePath,
                         targetPath = targetFile.absolutePath,
                         mimeType = item.mimeType,
-                        size = item.size
+                        size = item.size,
+                        dateAdded = item.dateAdded
                     ))
                     // 生成缩略图到缓存（非视频文件）
                     if (!item.mimeType.startsWith("video/")) {
@@ -2487,10 +2491,25 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
                         sourceFile.setLastModified(targetFile.lastModified())
-                        // scan 恢复的文件
-                        MediaScannerConnection.scanFile(
-                            app, arrayOf(sourceFile.absolutePath), null, null
-                        )
+                        // scan 恢复的文件 + IS_PENDING hack 写回原始 DATE_ADDED
+                        val newUri = suspendCancellableCoroutine<Uri?> { cont ->
+                            MediaScannerConnection.scanFile(
+                                app, arrayOf(sourceFile.absolutePath), null
+                            ) { _, uri -> cont.resume(uri) }
+                        }
+                        if (newUri != null && entry.dateAdded > 0L) {
+                            try {
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
+                                    null, null)
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, entry.dateAdded) },
+                                    null, null)
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                                    null, null)
+                            } catch (_: Exception) { }
+                        }
                         // 删除目标副本
                         targetFile.delete()
                         // 清理 MediaStore（通过 sourceFile scan 后自动注册新 URI，无需额外操作）
