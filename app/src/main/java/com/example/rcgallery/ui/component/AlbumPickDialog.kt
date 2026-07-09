@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -19,6 +20,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.viewmodel.PasteMode
+import com.example.rcgallery.viewmodel.GalleryViewModel.RecentMoveAlbum
+
+/** 时间文字 */
+private fun timeAgoText(movedAt: Long): String {
+    val minutes = ((System.currentTimeMillis() - movedAt) / 60000).toInt()
+    return when {
+        minutes < 1 -> "刚刚"
+        minutes < 60 -> "${minutes}分钟前"
+        minutes < 1440 -> "${minutes / 60}小时前"
+        else -> "${minutes / 1440}天前"
+    }
+}
 
 /** 相册排序模式 */
 private enum class AlbumSort(val label: String) {
@@ -37,7 +50,7 @@ private enum class AlbumSort(val label: String) {
 @Composable
 fun AlbumPickDialog(
     albums: List<Album>,
-    recentMoveAlbumDirs: List<String>,
+    recentMoveAlbums: List<RecentMoveAlbum>,
     onDismiss: () -> Unit,
     onAlbumSelected: (targetDir: String, targetName: String, mode: PasteMode) -> Unit,
     onCreateFolder: ((folderName: String, onResult: (dirPath: String?) -> Unit) -> Unit)? = null
@@ -47,16 +60,22 @@ fun AlbumPickDialog(
     var searchQuery by remember { mutableStateOf("") }
 
     // ── 排序后和搜索后的相册列表 ──
-    val recentDirs = remember { recentMoveAlbumDirs.toSet() }
-    val sortedAlbums = remember(albums, activeSort, recentMoveAlbumDirs) {
+    val recentDirs = remember(recentMoveAlbums) { recentMoveAlbums.map { it.directoryPath }.toSet() }
+    val recentTimeMap = remember(recentMoveAlbums) { recentMoveAlbums.associate { it.directoryPath to it.movedAt } }
+    val lazyListState = rememberLazyListState()
+    // 排序切换时滚动回顶部
+    LaunchedEffect(activeSort) {
+        lazyListState.scrollToItem(0)
+    }
+    val sortedAlbums = remember(albums, activeSort, recentMoveAlbums) {
         val sorted = when (activeSort) {
             AlbumSort.NAME -> albums.sortedBy { it.bucketName }
             AlbumSort.DATE -> albums.sortedByDescending { it.dateAdded }
             AlbumSort.COUNT -> albums.sortedByDescending { it.count }
             AlbumSort.RECENT -> {
-                // 最近移动过的相册排在前面
-                val recentSet = recentMoveAlbumDirs.toSet()
-                albums.sortedByDescending { it.directoryPath in recentSet }
+                // 仅显示最近移动过的相册
+                val recentSet = recentMoveAlbums.map { it.directoryPath }.toSet()
+                albums.filter { it.directoryPath in recentSet }
             }
         }
         // 星标相册始终排在最前面
@@ -184,28 +203,12 @@ fun AlbumPickDialog(
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("无匹配相册", fontSize = 13.sp, color = Color.Gray)
-                            if (onCreateFolder != null) {
-                                Spacer(Modifier.height(12.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0x10FF9800),
-                                    onClick = { showCreateFolder = true }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("📂", fontSize = 16.sp)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("+ 新建文件夹", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Color(0xCCFF9800))
-                                    }
-                                }
-                            }
                         }
                     }
                 } else {
                     LazyColumn(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
+                        state = lazyListState,
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         items(filteredAlbums, key = { it.bucketId }) { album ->
@@ -256,40 +259,42 @@ fun AlbumPickDialog(
                                             )
                                         }
                                         Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            timeAgoText(recentTimeMap[album.directoryPath] ?: 0L),
+                                            fontSize = 10.sp,
+                                            color = Color(0x99FF9800)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
                                     }
                                     Text("›", fontSize = 16.sp, color = Color.Gray)
                                 }
                             }
                         }
-                        // ── 新建文件夹（作为 LazyColumn 的最后一项）──
-                        if (onCreateFolder != null) {
-                            item {
-                                Spacer(Modifier.height(4.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = Color(0x10FF9800),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { showCreateFolder = true },
-                                    tonalElevation = 0.dp
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 8.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("📂", fontSize = 16.sp)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            "+ 新建文件夹",
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = Color(0xCCFF9800)
-                                        )
-                                    }
-                                }
-                            }
+                    }
+                }
+
+                // ── 新建文件夹（列表外，对话框左下角）──
+                if (onCreateFolder != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0x10FF9800),
+                        onClick = { showCreateFolder = true },
+                        modifier = Modifier.align(Alignment.Start),
+                        tonalElevation = 0.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("📂", fontSize = 16.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "+ 新建文件夹",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xCCFF9800)
+                            )
                         }
                     }
                 }

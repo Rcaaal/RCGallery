@@ -105,6 +105,10 @@ fun MediaGridScreen(
     // ── Grid 模式多选状态 ──
     var isMediaMultiSelect by remember { mutableStateOf(false) }
     var selectedMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 已完成拖拽的选中集（独立于 Compose state，用于拖拽中不触发闪烁）
+    var committedSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 拖拽是否正在进行中（用于隐藏浮动按钮避免挡手势）
+    var isDragInProgress by remember { mutableStateOf(false) }
     var showMediaBatchTagDialog by remember { mutableStateOf(false) }
     var showAlbumPickDialog by remember { mutableStateOf(false) }
     // 暂存"选择目标相册"时选中的文件，确认后才加入中转站
@@ -112,12 +116,15 @@ fun MediaGridScreen(
     fun exitMediaMultiSelect() {
         isMediaMultiSelect = false
         selectedMediaUris = emptySet()
+        committedSelection = emptySet()
+        isDragInProgress = false
     }
     fun toggleMediaSelection(item: com.example.rcgallery.model.MediaItem) {
         val uri = item.uri.toString()
         selectedMediaUris = if (uri in selectedMediaUris) selectedMediaUris - uri
                            else selectedMediaUris + uri
-        if (selectedMediaUris.isEmpty()) isMediaMultiSelect = false
+        // 同步 committedSelection（tap 切换不经过拖拽流程，也需要保持同步）
+        committedSelection = selectedMediaUris
     }
 
     // ── 相册切换时防止旧数据闪烁：加载完成前不展示 RecyclerView ──
@@ -347,6 +354,27 @@ fun MediaGridScreen(
                                         )
                                     }
                                 }
+                                } else {
+                                    // 多选模式：全选/取消全选
+                                    val allSelected = tagFilteredItems.isNotEmpty() &&
+                                        tagFilteredItems.all { it.uri.toString() in selectedMediaUris }
+                                    TextButton(onClick = {
+                                        if (allSelected) {
+                                            // 取消全选
+                                            selectedMediaUris = emptySet()
+                                            committedSelection = emptySet()
+                                        } else {
+                                            // 全选
+                                            val allUris = tagFilteredItems.map { it.uri.toString() }.toSet()
+                                            selectedMediaUris = allUris
+                                            committedSelection = allUris
+                                        }
+                                    }) {
+                                        Text(
+                                            if (allSelected) "取消全选" else "全选",
+                                            fontSize = 13.sp
+                                        )
+                                    }
                                 }   // ← if (!isMediaMultiSelect)
                             }   // ← actions
                         )   // ← TopAppBar(
@@ -380,6 +408,8 @@ fun MediaGridScreen(
                                     var dragStartIdx = -1
                                     var isDragging = false
                                     var longPressConsumed = false  // 长按触发后拦截 click
+                                    var notifyMin = -1             // 本次拖拽通知范围起点
+                                    var notifyMax = -1             // 本次拖拽通知范围终点
                                 }
                                 val handler = android.os.Handler(android.os.Looper.getMainLooper())
                                 val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
@@ -400,10 +430,23 @@ fun MediaGridScreen(
                                                     if (pos < 0) return@postDelayed
                                                     dragState.dragStartIdx = pos
                                                     dragState.isDragging = true
+                                                    dragState.notifyMin = -1
+                                                    dragState.notifyMax = -1
                                                     dragState.longPressConsumed = true
                                                     val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
-                                                    if (!isMediaMultiSelect) isMediaMultiSelect = true
-                                                    toggleMediaSelection(item)
+                                                    if (!isMediaMultiSelect) {
+                                                        isMediaMultiSelect = true
+                                                        committedSelection = emptySet()
+                                                        toggleMediaSelection(item)
+                                                    } else {
+                                                        // 已有多选：确保长按的 item 被选中，但不覆盖已有选择
+                                                        val uri = item.uri.toString()
+                                                        if (uri !in selectedMediaUris) {
+                                                            selectedMediaUris = selectedMediaUris + uri
+                                                            committedSelection = committedSelection + uri
+                                                        }
+                                                    }
+                                                    isDragInProgress = true
                                                 }, longPressMs)
                                                 return false
                                             }
@@ -412,17 +455,19 @@ fun MediaGridScreen(
                                                 if (kotlin.math.abs(e.x - downX) > slop || kotlin.math.abs(e.y - downY) > slop) {
                                                     handler.removeCallbacksAndMessages(null)
                                                 }
-                                                // 拖拽中 → 拦截，让 RecyclerView 进入触摸处理流程
                                                 if (dragState.isDragging) return true
                                                 return false
                                             }
                                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                                                 handler.removeCallbacksAndMessages(null)
                                                 val consumed = dragState.longPressConsumed
-                                                dragState.isDragging = false
-                                                dragState.dragStartIdx = -1
+                                                if (dragState.isDragging) {
+                                                    // 长按后未拖拽就松手：清除拖拽状态（选中已由 toggle 处理）
+                                                    dragState.isDragging = false
+                                                    dragState.dragStartIdx = -1
+                                                    isDragInProgress = false
+                                                }
                                                 dragState.longPressConsumed = false
-                                                // 长按已触发过 → 拦截 ACTION_UP，防止 item click 取消选中
                                                 if (consumed) return true
                                                 return false
                                             }
@@ -434,18 +479,62 @@ fun MediaGridScreen(
                                         if (!dragState.isDragging) return
                                         when (e.actionMasked) {
                                             MotionEvent.ACTION_MOVE -> {
-                                                val child = rv.findChildViewUnder(e.x, e.y)
-                                                val pos = child?.let { rv.getChildAdapterPosition(it) } ?: return
-                                                val minIdx = minOf(dragState.dragStartIdx, pos)
-                                                val maxIdx = maxOf(dragState.dragStartIdx, pos)
-                                                val rangeUris = (minIdx..maxIdx).mapNotNull { i ->
-                                                    tagFilteredItems.getOrNull(i)?.uri?.toString()
-                                                }.toSet()
-                                                selectedMediaUris = rangeUris
+                                                var pos: Int
+                                                // 自动滚动：先于 findChildViewUnder 判断，确保边缘滚动生效
+                                                val edgeThreshold = 80f
+                                                val scrollSpeed = 60
+                                                if (e.y < edgeThreshold) {
+                                                    rv.scrollBy(0, -scrollSpeed)
+                                                    val firstVisible = (rv.layoutManager as? androidx.recyclerview.widget.GridLayoutManager)
+                                                        ?.findFirstVisibleItemPosition() ?: return
+                                                    pos = (firstVisible - 1).coerceAtLeast(0)
+                                                } else if (e.y > rv.height - edgeThreshold) {
+                                                    rv.scrollBy(0, scrollSpeed)
+                                                    val lastVisible = (rv.layoutManager as? androidx.recyclerview.widget.GridLayoutManager)
+                                                        ?.findLastVisibleItemPosition() ?: return
+                                                    pos = (lastVisible + 1).coerceAtMost(tagFilteredItems.size - 1)
+                                                } else {
+                                                    val child = rv.findChildViewUnder(e.x, e.y) ?: return
+                                                    pos = rv.getChildAdapterPosition(child)
+                                                    if (pos < 0) return
+                                                }
+                                                val currentAdapter = rv.adapter as? SimpleGridAdapter ?: return
+                                                val items = currentAdapter.items
+                                                // 按方向计算显示选中集
+                                                val displayUris: Set<String>
+                                                if (pos >= dragState.dragStartIdx) {
+                                                    // 正向：选中 [dragStart, pos]
+                                                    val selectUris = (dragState.dragStartIdx..pos).mapNotNull { i ->
+                                                        items.getOrNull(i)?.uri?.toString()
+                                                    }.toSet()
+                                                    displayUris = committedSelection + selectUris
+                                                } else {
+                                                    // 反向：取消选中 [pos, dragStart]（含 dragStart 本身）
+                                                    val deselectUris = (pos .. dragState.dragStartIdx).mapNotNull { i ->
+                                                        items.getOrNull(i)?.uri?.toString()
+                                                    }.toSet()
+                                                    displayUris = committedSelection - deselectUris
+                                                }
+                                                // 通知范围 = 本次拖拽覆盖过的全部范围
+                                                val curMin = minOf(dragState.dragStartIdx, pos)
+                                                val curMax = maxOf(dragState.dragStartIdx, pos)
+                                                dragState.notifyMin = if (dragState.notifyMin < 0) curMin else minOf(dragState.notifyMin, curMin)
+                                                dragState.notifyMax = if (dragState.notifyMax < 0) curMax else maxOf(dragState.notifyMax, curMax)
+                                                currentAdapter.selectedUris = displayUris
+                                                currentAdapter.notifyItemRangeChanged(dragState.notifyMin, dragState.notifyMax - dragState.notifyMin + 1)
                                             }
                                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                // 提交本次拖拽结果：读取 adapter 当前选中集
+                                                val currentAdapter = rv.adapter as? SimpleGridAdapter
+                                                if (currentAdapter != null) {
+                                                    committedSelection = currentAdapter.selectedUris
+                                                }
+                                                selectedMediaUris = committedSelection
                                                 dragState.isDragging = false
                                                 dragState.dragStartIdx = -1
+                                                dragState.notifyMin = -1
+                                                dragState.notifyMax = -1
+                                                isDragInProgress = false
                                             }
                                         }
                                     }
@@ -491,6 +580,7 @@ fun MediaGridScreen(
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
                                 adapter.selectedUris = selectedMediaUris
+                                adapter.isMultiSelectMode = isMediaMultiSelect
                                 adapter.notifyDataSetChanged()
                                 scroller.refresh()
                                 // 之后不再重复 notify — 上面的调用已是全量刷新
@@ -649,7 +739,7 @@ fun MediaGridScreen(
             FloatingJumpButton(recyclerView = mediaRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
 
             // ── 多选模式浮动按钮（替代 BottomAppBar）──
-            if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
+            if (isMediaMultiSelect && selectedMediaUris.isNotEmpty() && !isDragInProgress) {
                 FloatingMultiSelectButtons(
                     selectedCount = selectedMediaUris.size,
                     onBatchTag = { showMediaBatchTagDialog = true },
@@ -677,7 +767,6 @@ fun MediaGridScreen(
             if (!isMediaMultiSelect) {
                 val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
                 if (clipboardItems.isNotEmpty()) {
-                    val recentMoveAlbumDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
                     ClipboardBadge(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = albumDirectoryPath.ifEmpty { null },
@@ -790,14 +879,14 @@ fun MediaGridScreen(
             val folderCreateScope = rememberCoroutineScope()
             if (showAlbumPickDialog) {
                 val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
-                val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                val recentDirs by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
                 // 排除当前相册本身，不允许"移动到自身"
                 val filteredAlbums = if (albumDirectoryPath.isNotEmpty()) {
                     allAlbums.filter { it.directoryPath != albumDirectoryPath }
                 } else allAlbums
                 AlbumPickDialog(
                     albums = filteredAlbums,
-                    recentMoveAlbumDirs = recentDirs,
+                    recentMoveAlbums = recentDirs,
                     onDismiss = {
                         showAlbumPickDialog = false
                         // pendingPickItems 由 onAlbumSelected 或重组时清理
@@ -956,6 +1045,7 @@ private class SimpleGridAdapter(
     var currentMode: MediaDisplayMode = MediaDisplayMode.Grid(DEFAULT_MEDIA_GRID_COLUMNS)
     var mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()
     var selectedUris: Set<String> = emptySet()
+    var isMultiSelectMode: Boolean = false
 
     init { setHasStableIds(true) }
 
@@ -982,8 +1072,8 @@ private class SimpleGridAdapter(
             is MediaDisplayMode.List -> 1
         }
         when (holder) {
-            is GridVH -> holder.bind(item, position, starredUris, selectedUris, columns)
-            is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap, selectedUris)
+            is GridVH -> holder.bind(item, position, starredUris, selectedUris, columns, isMultiSelectMode)
+            is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap, selectedUris, isMultiSelectMode)
         }
     }
 
@@ -1128,7 +1218,7 @@ private class SimpleGridAdapter(
             }
         }
 
-        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, selectedUris: Set<String> = emptySet(), columns: Int = DEFAULT_MEDIA_GRID_COLUMNS) {
+        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, selectedUris: Set<String> = emptySet(), columns: Int = DEFAULT_MEDIA_GRID_COLUMNS, isMultiSelectMode: Boolean = false) {
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -1151,8 +1241,8 @@ private class SimpleGridAdapter(
                 tv.visibility = android.view.View.VISIBLE
             } else { tv.visibility = android.view.View.GONE }
             updateStarSize(columns)
-            // 多选模式：隐藏星标，显示对号
-            val inMultiSelect = selectedUris.isNotEmpty()
+            // 多选模式（含 0 已选但模式开启中）：隐藏星标，显示对号
+            val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
             starContainer.visibility = if (inMultiSelect) android.view.View.GONE else android.view.View.VISIBLE
             val checkmark = itemView.findViewById<FrameLayout>(android.R.id.checkbox)
@@ -1416,7 +1506,7 @@ private class SimpleGridAdapter(
             }
         }
 
-        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap(), selectedUris: Set<String> = emptySet()) {
+        fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap(), selectedUris: Set<String> = emptySet(), isMultiSelectMode: Boolean = false) {
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -1425,8 +1515,8 @@ private class SimpleGridAdapter(
                 if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
-            // 多选模式：选中标记（覆盖层 + 对号 + 行背景）
-            val inMultiSelect = selectedUris.isNotEmpty()
+            // 多选模式（含 0 已选但模式开启中）：隐藏星标
+            val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
             if (inMultiSelect) {
                 selectedOverlay.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE

@@ -1,5 +1,6 @@
 package com.example.rcgallery.viewmodel
 
+import android.net.Uri
 import android.app.Application
 import android.media.MediaScannerConnection
 import androidx.lifecycle.AndroidViewModel
@@ -31,7 +32,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +44,8 @@ import kotlinx.coroutines.flow.debounce
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
+import android.content.ContentValues
+import android.provider.MediaStore
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
@@ -125,9 +130,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _smbOperationHistory = MutableStateFlow<List<SmbFileOperationRecord>>(emptyList())
     val smbOperationHistory: StateFlow<List<SmbFileOperationRecord>> = _smbOperationHistory.asStateFlow()
 
-    /** 最近移动过的目标相册路径（最多 10 条，用于对话框排序） */
-    private val _recentMoveAlbumDirs = MutableStateFlow<List<String>>(emptyList())
-    val recentMoveAlbumDirs: StateFlow<List<String>> = _recentMoveAlbumDirs.asStateFlow()
+    /** 最近移动过的目标相册（最多 20 条，持久化，用于对话框排序和后续"最近"Tab） */
+    private val _recentMoveAlbums = MutableStateFlow<List<RecentMoveAlbum>>(emptyList())
+    val recentMoveAlbums: StateFlow<List<RecentMoveAlbum>> = _recentMoveAlbums.asStateFlow()
 
     /** 粘贴操作进度（非 null 表示进行中，用于 UI 显示进度条） */
     data class PasteProgress(
@@ -175,6 +180,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbDevices.value = loadSmbDevices()
         // 恢复 SMB 操作历史
         _smbOperationHistory.value = loadSmbOperationHistory()
+        // 恢复最近移动相册记录
+        _recentMoveAlbums.value = loadRecentMoveAlbums()
         refreshTrashCount()
         loadPersistentRules()
         loadIgnoredFolderPaths()
@@ -1707,6 +1714,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** 最近移动过的相册 */
+    data class RecentMoveAlbum(
+        val directoryPath: String,
+        val movedAt: Long
+    )
+
     // ══════════════════════════════════════
     //  SMB 操作历史记录（持久化）
     // ══════════════════════════════════════
@@ -1715,6 +1728,46 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     companion object {
         private const val MAX_HISTORY_RECORDS = 50
         private const val HISTORY_PREFS_KEY = "smb_operation_history"
+        private const val RECENT_ALBUMS_PREFS_KEY = "recent_move_albums"
+    }
+
+    /** 从 SharedPreferences 加载最近移动相册记录 */
+    private fun loadRecentMoveAlbums(): List<RecentMoveAlbum> {
+        return try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            val json = prefs.getString(RECENT_ALBUMS_PREFS_KEY, "") ?: ""
+            if (json.isEmpty()) return emptyList()
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                RecentMoveAlbum(
+                    directoryPath = obj.getString("directoryPath"),
+                    movedAt = obj.getLong("movedAt")
+                )
+            }
+        } catch (e: Exception) {
+            AppLogger.e("VM", "loadRecentMoveAlbums failed", e)
+            emptyList()
+        }
+    }
+
+    /** 保存最近移动相册记录到 SharedPreferences */
+    private fun saveRecentMoveAlbums(records: List<RecentMoveAlbum>) {
+        try {
+            val arr = JSONArray()
+            for (r in records) {
+                arr.put(JSONObject().apply {
+                    put("directoryPath", r.directoryPath)
+                    put("movedAt", r.movedAt)
+                })
+            }
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            prefs.edit().putString(RECENT_ALBUMS_PREFS_KEY, arr.toString()).apply()
+        } catch (e: Exception) {
+            AppLogger.e("VM", "saveRecentMoveAlbums failed", e)
+        }
     }
 
     /** 添加一条操作记录（最新插入，超过上限自动裁剪） */
@@ -2008,12 +2061,47 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             input.copyTo(output)
                         }
                     }
-                    targetFile.setLastModified(System.currentTimeMillis())
-
-                    // 让 MediaStore 感知新文件
-                    MediaScannerConnection.scanFile(
-                        app, arrayOf(targetFile.absolutePath), null, null
+                    targetFile.setLastModified(
+                        if (mode == PasteMode.MOVE) srcFile.lastModified() else System.currentTimeMillis()
                     )
+
+                    // MOVE: scanFile 等待完成后，IS_PENDING 解锁 DATE_ADDED 并修正
+                    if (mode == PasteMode.MOVE) {
+                        val newUri = suspendCancellableCoroutine<Uri?> { cont ->
+                            MediaScannerConnection.scanFile(
+                                app, arrayOf(targetFile.absolutePath), null
+                            ) { _, uri ->
+                                cont.resume(uri)
+                            }
+                        }
+                        // IS_PENDING hack: API 30+ DATE_ADDED 只读，但 IS_PENDING=1 时解锁所有列
+                        if (newUri != null) {
+                            try {
+                                // 1. 标记为待处理，解锁只读列
+                                context.contentResolver.update(
+                                    newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
+                                    null, null
+                                )
+                                // 2. 修回原始 DATE_ADDED（现在可写）
+                                context.contentResolver.update(
+                                    newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded) },
+                                    null, null
+                                )
+                                // 3. 发布
+                                context.contentResolver.update(
+                                    newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                                    null, null
+                                )
+                            } catch (_: Exception) { }
+                        }
+                    } else {
+                        MediaScannerConnection.scanFile(
+                            app, arrayOf(targetFile.absolutePath), null, null
+                        )
+                    }
 
                     // 如果是移动模式：先物理删除，成功后再清 MediaStore
                     if (mode == PasteMode.MOVE) {
@@ -2041,12 +2129,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _moveRollbackCount.value = items.size - successCount
             }
 
-            // 更新最近移动记录
+            // 更新最近移动记录（持久化）
             if (successCount > 0) {
-                val recent = _recentMoveAlbumDirs.value.toMutableList()
-                recent.remove(targetDir)
-                recent.add(0, targetDir)
-                _recentMoveAlbumDirs.value = recent.take(10)
+                val recent = _recentMoveAlbums.value.toMutableList()
+                recent.removeAll { it.directoryPath == targetDir }
+                recent.add(0, RecentMoveAlbum(
+                    directoryPath = targetDir,
+                    movedAt = System.currentTimeMillis()
+                ))
+                _recentMoveAlbums.value = recent.take(20)
+                saveRecentMoveAlbums(_recentMoveAlbums.value)
             }
 
             // 移动模式：全部成功后才清空中转站（否则失败的文件留在中转站可重试）
@@ -2061,6 +2153,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 // 刷新当前相册的媒体列表（文件移入/移出后立即反映在列表中）
                 if (currentAlbumId != null) {
                     loadMedia(currentAlbumId)
+                }
+                // 成功提示
+                val modeLabel = if (mode == PasteMode.COPY) "复制" else "移动"
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "${modeLabel}成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
 

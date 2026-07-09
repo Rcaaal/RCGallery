@@ -499,7 +499,6 @@ fun AlbumGridScreen(
             if (selectedAlbumId == null && !showTrash && selectedDatePhotoIndex < 0) {
                 val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
                 if (clipboardItems.isNotEmpty()) {
-                    val recentMoveAlbumDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
                     ClipboardBadge(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = null,  // 不传入当前相册（相册列表模式下没有"当前相册"）
@@ -573,10 +572,10 @@ fun AlbumGridScreen(
             // ── 选择目标相册对话框 ──
             if (showAlbumPickDialog) {
                 val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
-                val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                val recentDirs by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
                 AlbumPickDialog(
                     albums = allAlbums,
-                    recentMoveAlbumDirs = recentDirs,
+                    recentMoveAlbums = recentDirs,
                     onDismiss = { showAlbumPickDialog = false },
                     onAlbumSelected = { targetDir, targetName, mode ->
                         viewModel.pasteToAlbum(mode, targetDir, targetName)

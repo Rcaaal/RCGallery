@@ -661,11 +661,11 @@ fun PreviewScreen(
         // ── 选择目标相册对话框（单张图片/视频）──
         if (showAlbumPickDialog) {
             val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
-            val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+            val recentDirs by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
             val singleItem = currentItem
             AlbumPickDialog(
                 albums = allAlbums,
-                recentMoveAlbumDirs = recentDirs,
+                recentMoveAlbums = recentDirs,
                 onDismiss = { showAlbumPickDialog = false },
                 onAlbumSelected = { targetDir, targetName, mode ->
                     showAlbumPickDialog = false
