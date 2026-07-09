@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -376,15 +377,20 @@ private fun DeviceListContent(
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         if (devices.isEmpty()) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("还没有添加网络设备", style = MaterialTheme.typography.bodyLarge)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("还没有添加网络设备", style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center)
                     Spacer(Modifier.height(8.dp))
                     Text("点击下方按钮，添加局域网内共享的电脑", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center)
                 }
             }
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
                 items(devices, key = { it.id }) { device ->
                     Card(
                         modifier = Modifier.fillMaxWidth().clickable { onDeviceClick(device) },

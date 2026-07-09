@@ -62,6 +62,9 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 
 /**
  * 相册显示模式。
@@ -110,7 +113,8 @@ private enum class AlbumSortMode(val label: String) {
     NAME("相册名"),
     SIZE("相册大小"),
     IMAGE_COUNT("图片数量"),
-    VIDEO_COUNT("视频数量")
+    VIDEO_COUNT("视频数量"),
+    RECENT_ACCESS("近期访问")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -126,6 +130,7 @@ fun AlbumGridScreen(
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
     val persistentRules by viewModel.persistentRules.collectAsStateWithLifecycle()
+    val recentAccessMap by viewModel.recentAccessMap.collectAsStateWithLifecycle()
 
     // ── 相册显示模式 & 排序模式（持久化，需在 remember(albums) 之前声明）──
     val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -147,12 +152,37 @@ fun AlbumGridScreen(
             "size" -> AlbumSortMode.SIZE
             "image_count" -> AlbumSortMode.IMAGE_COUNT
             "video_count" -> AlbumSortMode.VIDEO_COUNT
+            "recent" -> AlbumSortMode.RECENT_ACCESS
             else -> AlbumSortMode.DATE
         })
     }
 
+    // ── 搜索状态 ──
+    var isSearchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    /** 退出搜索模式 */
+    fun exitSearch() {
+        searchQuery = ""
+        isSearchActive = false
+        keyboardController?.hide()
+    }
+
+    // 下拉菜单显隐：点击建议填充后收起，用户重新输入时再显示
+    var showSuggestions by remember { mutableStateOf(true) }
+
+    // 进入搜索模式时自动聚焦并弹出输入法
+    LaunchedEffect(isSearchActive) {
+        if (isSearchActive) {
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+
     // 本地排序：星标相册永久置顶，再按当前排序模式排列
-    val albums = remember(rawAlbums, starredIds, albumSortMode) {
+    val albums = remember(rawAlbums, starredIds, albumSortMode, recentAccessMap) {
         rawAlbums.sortedWith(
             compareByDescending<Album> { it.bucketId in starredIds }
                 .then(when (albumSortMode) {
@@ -161,8 +191,17 @@ fun AlbumGridScreen(
                     AlbumSortMode.SIZE -> compareByDescending { it.totalSize }
                     AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
                     AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
+                    AlbumSortMode.RECENT_ACCESS ->
+                        compareByDescending<Album> { recentAccessMap[it.directoryPath] }
+                            .then(compareByDescending { it.dateAdded })
                 })
         )
+    }
+
+    // 搜索建议：取 albums（排序后原始列表）中匹配的相册名，最多 8 条供下拉展示
+    val searchSuggestions = remember(albums, searchQuery) {
+        if (searchQuery.isBlank()) emptyList()
+        else albums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }.take(8)
     }
 
     // ── 日期分组视图状态（持久化）──
@@ -366,6 +405,12 @@ fun AlbumGridScreen(
         }
     }
 
+    // ── 搜索过滤（基于已筛选的相册列表再做名称匹配）──
+    val displayAlbums = remember(filteredAlbums, searchQuery) {
+        if (searchQuery.isBlank()) filteredAlbums
+        else filteredAlbums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }
+    }
+
     var showFilterPage by remember { mutableStateOf(false) }
 
     // ── 权限请求 launcher ──
@@ -405,9 +450,16 @@ fun AlbumGridScreen(
                 val allTags by viewModel.allTags.collectAsStateWithLifecycle()
 
                 AlbumGridContent(
-                    albums = filteredAlbums,
+                    albums = displayAlbums,
                     starredIds = starredIds,
                     albumTags = albumTags,
+                    isSearchActive = isSearchActive,
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it; showSuggestions = true },
+                    onActivateSearch = { isSearchActive = true },
+                    onExitSearch = { exitSearch() },
+                    searchSuggestions = searchSuggestions,
+                    searchFocusRequester = searchFocusRequester,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
                         viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
@@ -442,6 +494,7 @@ fun AlbumGridScreen(
                             AlbumSortMode.SIZE -> "size"
                             AlbumSortMode.IMAGE_COUNT -> "image_count"
                             AlbumSortMode.VIDEO_COUNT -> "video_count"
+                            AlbumSortMode.RECENT_ACCESS -> "recent"
                         }).apply()
                     },
                     isDateView = isDateView,
@@ -492,6 +545,20 @@ fun AlbumGridScreen(
                         onDismiss = { tagDialogAlbum = null }
                     )
                 }
+            }
+            // ── 搜索建议（在 content 中渲染，不走 Popup，避免抢输入法焦点）──
+            if (isSearchActive && searchSuggestions.isNotEmpty() && showSuggestions) {
+                SearchSuggestionsDropdown(
+                    suggestions = searchSuggestions,
+                    searchQuery = searchQuery,
+                    onSuggestionClick = { album ->
+                        searchQuery = album.bucketName
+                        showSuggestions = false
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 12.dp, end = 12.dp, top = 56.dp)
+                )
             }
             FpsMonitor(enabled = FpsMonitorEnabled, modifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 8.dp))
             FloatingJumpButton(recyclerView = albumRvRef.value, modifier = Modifier.align(Alignment.BottomStart))
@@ -684,6 +751,14 @@ private fun AlbumGridContent(
     onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
     onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
     onDeleteDateMedia: (List<String>) -> Unit = {},
+    // ── 搜索参数 ──
+    isSearchActive: Boolean = false,
+    searchQuery: String = "",
+    onSearchQueryChange: (String) -> Unit = {},
+    onActivateSearch: () -> Unit = {},
+    onExitSearch: () -> Unit = {},
+    searchSuggestions: List<Album> = emptyList(),
+    searchFocusRequester: FocusRequester = FocusRequester(),
     // ── 日期分组视图参数 ──
     isDateView: Boolean = false,
     onToggleDateView: () -> Unit = {},
@@ -750,20 +825,115 @@ private fun AlbumGridContent(
         topBar = {
             TopAppBar(
                 title = {
+                    if (isSearchActive) {
+                        Box {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                // 关闭搜索按钮（← 箭头，始终可见）
+                                IconButton(
+                                    onClick = { onExitSearch() },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    painter = painterResource(com.example.rcgallery.R.drawable.ic_arrow_back),
+                                    contentDescription = "关闭搜索",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            // 搜索输入框（无边框，与 TopAppBar 背景融合）
+                            TextField(
+                                value = searchQuery,
+                                onValueChange = onSearchQueryChange,
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyLarge,
+                                placeholder = {
+                                    Text(
+                                        "搜索相册...",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (searchQuery.isNotEmpty()) {
+                                        IconButton(
+                                            onClick = { onSearchQueryChange("") },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(
+                                                painter = painterResource(com.example.rcgallery.R.drawable.ic_close),
+                                                contentDescription = "清空",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                colors = TextFieldDefaults.colors(
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .focusRequester(searchFocusRequester)
+                            )
+                        }
+                    }
+                } else {
                     Text(
                         if (isAlbumMultiSelect) "已选 ${selectedAlbumIds.size} 项"
                         else if (isDateMultiSelect) "已选 ${selectedDateMediaPaths.size} 项"
                         else "RCGallery"
                     )
+                }
                 },
                 navigationIcon = {
-                    if (isAlbumMultiSelect) {
-                        TextButton(onClick = { exitAlbumMultiSelect() }) {
-                            Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                    if (isAlbumMultiSelect || isDateMultiSelect) {
+                        if (isAlbumMultiSelect) {
+                            TextButton(onClick = { exitAlbumMultiSelect() }) {
+                                Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        } else {
+                            TextButton(onClick = { exitDateMultiSelect() }) {
+                                Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                            }
                         }
-                    } else if (isDateMultiSelect) {
-                        TextButton(onClick = { exitDateMultiSelect() }) {
-                            Text("取消", color = MaterialTheme.colorScheme.onSurface)
+                    } else {
+                        // ── 齿轮菜单按钮（测试入口，永久放在最左边）──
+                        var showGearMenu by remember { mutableStateOf(false) }
+                        Box(modifier = Modifier.padding(start = 4.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xCCFF9800))
+                                    .clickable { showGearMenu = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                                    contentDescription = "设置",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showGearMenu,
+                                onDismissRequest = { showGearMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("设置") },
+                                    onClick = { showGearMenu = false; onOpenSettings() }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("日志") },
+                                    onClick = { showGearMenu = false; onOpenLog() }
+                                )
+                            }
                         }
                     }
                 },
@@ -773,48 +943,29 @@ private fun AlbumGridContent(
                 ),
                 actions = {
                     if (!isAlbumMultiSelect && !isDateMultiSelect) {
-                    // ── 齿轮菜单按钮 ──
-                    var showGearMenu by remember { mutableStateOf(false) }
-                    Box(modifier = Modifier.padding(end = 4.dp)) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xCCFF9800))
-                                .clickable { showGearMenu = true },
-                            contentAlignment = Alignment.Center
-                        ) {
+                        if (isSearchActive) {
+                            // 搜索模式下 actions 为空（搜索 UI 在 title 中）
+                        } else {
+                            // ── 搜索按钮 ──
                             Icon(
-                                painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                                contentDescription = "设置",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_search),
+                                contentDescription = "搜索",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clickable { onActivateSearch() }
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            // ── 回收站按钮 ──
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                                contentDescription = "回收站",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clickable { onOpenTrash() }
                             )
                         }
-                        DropdownMenu(
-                            expanded = showGearMenu,
-                            onDismissRequest = { showGearMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("设置") },
-                                onClick = { showGearMenu = false; onOpenSettings() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("日志") },
-                                onClick = { showGearMenu = false; onOpenLog() }
-                            )
-                        }
-                    }
-
-                    // ── 回收站按钮 ──
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "回收站",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clickable { onOpenTrash() }
-                    )
                     }   // ← if (!isAlbumMultiSelect)
                 }
             )
@@ -1615,6 +1766,57 @@ private class ListVH private constructor(
 }
 
 // ── 显示模式选择器
+
+/**
+ * 搜索建议下拉菜单，显示匹配的相册名称供用户点击填充输入框。
+ */
+@Composable
+private fun SearchSuggestionsDropdown(
+    suggestions: List<Album>,
+    searchQuery: String,
+    onSuggestionClick: (Album) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp),
+        shadowElevation = 4.dp,
+        tonalElevation = 1.dp,
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+            suggestions.forEach { album ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSuggestionClick(album) }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_folder),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = album.bucketName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1
+                        )
+                    }
+                    Text(
+                        text = "${album.count} 项",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

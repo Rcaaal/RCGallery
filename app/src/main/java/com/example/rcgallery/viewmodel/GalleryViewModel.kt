@@ -121,6 +121,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _recentVideos = MutableStateFlow<List<MediaItem>>(emptyList())
     val recentVideos: StateFlow<List<MediaItem>> = _recentVideos.asStateFlow()
 
+    /** directoryPath → viewedAt 映射，供 AlbumGridScreen 近期访问排序使用 */
+    private val _recentAccessMap = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val recentAccessMap: StateFlow<Map<String, Long>> = _recentAccessMap.asStateFlow()
+
     // ── 中转站（复制/移动临时存储）──
     private val _clipboardItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val clipboardItems: StateFlow<List<MediaItem>> = _clipboardItems.asStateFlow()
@@ -199,6 +203,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refreshTrashCount()
         loadPersistentRules()
         loadIgnoredFolderPaths()
+        loadRecentAccessTimestamps()
         viewModelScope.launch {
             observer.observeMediaChanges()
                 .debounce(500)
@@ -2169,6 +2174,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 id = bucketId.hashCode().toLong(),
                 targetType = ViewHistoryEntity.TYPE_ALBUM
             )
+            // 同步更新 recentAccessMap，使近期访问排序立即生效
+            val now = System.currentTimeMillis()
+            _recentAccessMap.value = _recentAccessMap.value + (directoryPath to now)
             AppLogger.d("VM", "recordAlbumView: $albumName")
         }
     }
@@ -2185,6 +2193,17 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             _recentAlbums.value = result
             AppLogger.d("VM", "loadRecentAlbums: ${result.size}")
+        }
+    }
+
+    /** 加载近期访问时间戳映射，供 AlbumGridScreen 排序使用 */
+    fun loadRecentAccessTimestamps() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val recent = viewHistoryRepository.getRecentAlbums()
+            _recentAccessMap.value = recent.associate {
+                it.targetKey.removePrefix("album:") to it.viewedAt
+            }
+            AppLogger.d("VM", "loadRecentAccessTimestamps: ${_recentAccessMap.value.size}")
         }
     }
 
