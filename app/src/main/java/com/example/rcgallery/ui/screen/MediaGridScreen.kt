@@ -62,8 +62,11 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -784,6 +787,7 @@ fun MediaGridScreen(
             }
 
             // ── 选择目标相册对话框 ──
+            val folderCreateScope = rememberCoroutineScope()
             if (showAlbumPickDialog) {
                 val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
                 val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
@@ -807,6 +811,16 @@ fun MediaGridScreen(
                         }
                         // 来自中转站 badge：中转站已有内容，直接粘贴
                         viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
+                    },
+                    onCreateFolder = { name, onResult ->
+                        folderCreateScope.launch(Dispatchers.IO) {
+                            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                            val dir = File(dcim, name)
+                            val path = if (dir.mkdirs() || dir.exists()) {
+                                dir.absolutePath
+                            } else null
+                            onResult(path)
+                        }
                     }
                 )
             }

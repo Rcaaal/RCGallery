@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.component
 
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -38,7 +39,8 @@ fun AlbumPickDialog(
     albums: List<Album>,
     recentMoveAlbumDirs: List<String>,
     onDismiss: () -> Unit,
-    onAlbumSelected: (targetDir: String, targetName: String, mode: PasteMode) -> Unit
+    onAlbumSelected: (targetDir: String, targetName: String, mode: PasteMode) -> Unit,
+    onCreateFolder: ((folderName: String, onResult: (dirPath: String?) -> Unit) -> Unit)? = null
 ) {
     // ── 排序状态 ──
     var activeSort by remember { mutableStateOf(AlbumSort.NAME) }
@@ -69,6 +71,9 @@ fun AlbumPickDialog(
         if (searchQuery.isBlank()) sortedAlbums
         else sortedAlbums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }
     }
+
+    // ── 新建文件夹状态 ──
+    var showCreateFolder by remember { mutableStateOf(false) }
 
     // ── 确认对话框 ──
     if (confirmTarget != null) {
@@ -239,6 +244,35 @@ fun AlbumPickDialog(
                         }
                     }
                 }
+
+                // ── 新建文件夹 ──
+                if (onCreateFolder != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0x10FF9800),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showCreateFolder = true },
+                        tonalElevation = 0.dp
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("📂", fontSize = 16.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "+ 新建文件夹",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xCCFF9800)
+                            )
+                        }
+                    }
+                }
             }
         },
         confirmButton = {},
@@ -248,4 +282,49 @@ fun AlbumPickDialog(
             }
         }
     )
+
+    // ── 新建文件夹对话框 ──
+    if (showCreateFolder) {
+        var folderName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showCreateFolder = false },
+            title = { Text("新建文件夹", fontWeight = FontWeight.Medium) },
+            text = {
+                Column {
+                    Text("输入新文件夹名称：", fontSize = 13.sp, color = Color.Gray)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = folderName,
+                        onValueChange = { folderName = it },
+                        singleLine = true,
+                        placeholder = { Text("文件夹名称", fontSize = 13.sp) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val name = folderName.trim()
+                        if (name.isEmpty()) return@Button
+                        showCreateFolder = false
+                        onCreateFolder?.invoke(name) { dirPath ->
+                            if (dirPath != null) {
+                                confirmTarget = Album(
+                                    bucketId = "new_${dirPath.hashCode()}",
+                                    bucketName = name,
+                                    coverUri = Uri.EMPTY,
+                                    count = 0,
+                                    directoryPath = dirPath
+                                )
+                            }
+                        }
+                    }
+                ) { Text("创建") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateFolder = false }) { Text("取消") }
+            }
+        )
+    }
 }
