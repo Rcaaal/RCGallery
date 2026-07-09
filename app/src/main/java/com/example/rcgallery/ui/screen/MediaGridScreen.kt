@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -15,6 +16,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -171,6 +173,29 @@ fun MediaGridScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { _ ->
         Toast.makeText(renameContext, "授权成功，请重新点击标题进行改名", Toast.LENGTH_SHORT).show()
+    }
+
+    // ── MOVE 物理删除 launcher（API 30+ createDeleteRequest）──
+    val moveDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) {
+        // 无论结果如何都确认完成（全盘权限下不弹对话框，立即 RESULT_OK）
+        viewModel.confirmMoveDelete()
+    }
+    val pendingMoveDeletions by viewModel.pendingMoveDeletions.collectAsStateWithLifecycle()
+    val moveDeleteContext = LocalContext.current
+    LaunchedEffect(pendingMoveDeletions) {
+        if (pendingMoveDeletions.isNotEmpty()) {
+            try {
+                val pending = MediaStore.createDeleteRequest(moveDeleteContext.contentResolver, pendingMoveDeletions)
+                moveDeleteLauncher.launch(
+                    IntentSenderRequest.Builder(pending.intentSender).build()
+                )
+            } catch (e: Exception) {
+                AppLogger.e("Paste", "createDeleteRequest failed", e)
+                viewModel.confirmMoveDelete()
+            }
+        }
     }
     if (showAlbumRenameDialog && albumId.isNotEmpty()) {
         val currentName = albumName.ifEmpty { "未知" }

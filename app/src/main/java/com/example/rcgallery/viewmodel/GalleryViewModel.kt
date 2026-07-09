@@ -2,6 +2,8 @@ package com.example.rcgallery.viewmodel
 
 import android.app.Application
 import android.media.MediaScannerConnection
+import android.net.Uri
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
@@ -116,6 +118,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ── 中转站（复制/移动临时存储）──
     private val _clipboardItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val clipboardItems: StateFlow<List<MediaItem>> = _clipboardItems.asStateFlow()
+
+    // ── 本地 MOVE 待删除文件（API 30+ 通过 createDeleteRequest 异步删除）──
+    private val _pendingMoveDeletions = MutableStateFlow<List<Uri>>(emptyList())
+    val pendingMoveDeletions: StateFlow<List<Uri>> = _pendingMoveDeletions.asStateFlow()
+    private var _pendingMoveAlbumId: String? = null
 
     /** SMB 中转站（与本地中转站完全独立，存储 SmbFileInfo） */
     private val _smbClipboardItems = MutableStateFlow<List<SmbFileInfo>>(emptyList())
@@ -1954,6 +1961,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             var successCount = 0
             val app = getApplication<Application>()
             val context = app
+            // API 30+ 使用 createDeleteRequest 异步删除，收集 URI 由 UI 层发起
+            val pendingUris = mutableListOf<Uri>()
 
             for (item in items) {
                 try {
@@ -1986,17 +1995,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
                     // 如果是移动模式：删除源文件
                     if (mode == PasteMode.MOVE) {
-                        // 先尝试 ContentResolver 删除（使 MediaStore 生效）
-                        try {
-                            context.contentResolver.delete(item.uri, null, null)
-                        } catch (_: Exception) { }
-                        // 再尝试文件级删除（Android 11+ 有 MANAGE_EXTERNAL_STORAGE 时生效）
-                        try {
-                            srcFile.delete()
-                        } catch (_: Exception) { }
-                        // 如果源文件还存在，记录日志
-                        if (srcFile.exists()) {
-                            AppLogger.d("Paste", "Source file still exists after delete: ${item.fileName}")
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            // API 30+ 通过 createDeleteRequest 物理删除（需 UI 层发起）
+                            pendingUris.add(item.uri)
+                        } else {
+                            // API 29 以下：直接删除（contentResolver.delete 同时会删除物理文件）
+                            try {
+                                context.contentResolver.delete(item.uri, null, null)
+                            } catch (_: Exception) { }
+                            try {
+                                srcFile.delete()
+                            } catch (_: Exception) { }
+                            if (srcFile.exists()) {
+                                AppLogger.d("Paste", "Source file still exists after delete: ${item.fileName}")
+                            }
                         }
                     }
                     successCount++
@@ -2011,6 +2023,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 recent.remove(targetDir)
                 recent.add(0, targetDir)
                 _recentMoveAlbumDirs.value = recent.take(10)
+            }
+
+            // API 30+ MOVE 模式：由 UI 层通过 createDeleteRequest 完成物理删除后再做后续处理
+            if (mode == PasteMode.MOVE && Build.VERSION.SDK_INT >= 30 && pendingUris.isNotEmpty()) {
+                _pendingMoveAlbumId = currentAlbumId
+                _pendingMoveDeletions.value = pendingUris
+                AppLogger.d("VM", "pasteToAlbum: MOVE pending deletion for ${pendingUris.size} items")
+                return@launch
             }
 
             // 移动模式：清空中转站
@@ -2030,6 +2050,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
             AppLogger.d("VM", "pasteToAlbum: mode=$mode target=$targetName success=$successCount/${items.size}")
         }
+    }
+
+    /**
+     * 确认物理删除完成（API 30+ MOVE 的第二步）。
+     * 由 UI 层在 createDeleteRequest 成功回调后调用。
+     */
+    fun confirmMoveDelete() {
+        val needRefreshAlbumId = _pendingMoveAlbumId
+        _pendingMoveAlbumId = null
+        _pendingMoveDeletions.value = emptyList()
+
+        if (_clipboardItems.value.isEmpty()) return
+
+        _clipboardItems.value = emptyList()
+        loadAlbums()
+        loadAllMedia()
+        if (needRefreshAlbumId != null) {
+            loadMedia(needRefreshAlbumId)
+        }
+        AppLogger.d("VM", "confirmMoveDelete: clipboard cleared + albums refreshed")
     }
 }
 
