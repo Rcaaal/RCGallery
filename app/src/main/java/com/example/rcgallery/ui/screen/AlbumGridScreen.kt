@@ -199,6 +199,7 @@ fun AlbumGridScreen(
         }
     }
     var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
+    var dateViewVolumeEnabled by remember { mutableStateOf(false) }
     // 持久化恢复或切换标签回来时，日期视图要加载全量数据
     LaunchedEffect(isDateView) {
         if (isDateView) {
@@ -538,6 +539,8 @@ fun AlbumGridScreen(
                 PreviewScreen(
                     initialIndex = selectedDatePhotoIndex,
                     onBackClick = { selectedDatePhotoIndex = -1; onAlbumActiveChanged(false) },
+                    volumeEnabled = dateViewVolumeEnabled,
+                    onVolumeToggle = { dateViewVolumeEnabled = !dateViewVolumeEnabled },
                     items = dateMediaItems
                 )
             }

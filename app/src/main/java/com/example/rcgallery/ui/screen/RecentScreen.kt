@@ -84,6 +84,8 @@ fun RecentScreen(
         flatItems.withIndex().associate { (idx, item) -> item to idx }
     }
 
+    var volumeEnabled by remember { mutableStateOf(false) }
+
     if (selectedAlbum != null) BackHandler { selectedAlbum = null; onOverlayChanged(false) }
     if (selectedMediaIndex >= 0) BackHandler { selectedMediaIndex = -1; onOverlayChanged(false) }
 
@@ -355,6 +357,8 @@ fun RecentScreen(
             initialIndex = mediaIdx,
             onBackClick = { selectedMediaIndex = -1 },
             onGoHome = { selectedMediaIndex = -1 },
+            volumeEnabled = volumeEnabled,
+            onVolumeToggle = { volumeEnabled = !volumeEnabled },
             items = flatItems
         )
     }

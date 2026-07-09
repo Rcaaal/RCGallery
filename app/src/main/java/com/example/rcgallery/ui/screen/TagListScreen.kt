@@ -102,6 +102,7 @@ fun TagListScreen(
     // ── Overlay 状态 ──
     var selectedAlbum by remember { mutableStateOf<Album?>(null) }
     var selectedMediaIndex by remember { mutableIntStateOf(-1) }
+    var volumeEnabled by remember { mutableStateOf(false) }
     if (selectedAlbum != null) {
         BackHandler { selectedAlbum = null }
     }
@@ -531,6 +532,8 @@ fun TagListScreen(
                 initialIndex = mediaIdx,
                 onBackClick = { selectedMediaIndex = -1 },
                 onGoHome = { selectedMediaIndex = -1 },
+                volumeEnabled = volumeEnabled,
+                onVolumeToggle = { volumeEnabled = !volumeEnabled },
                 items = flatFilteredMedia
             )
         }
