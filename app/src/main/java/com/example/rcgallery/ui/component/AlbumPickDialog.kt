@@ -179,14 +179,33 @@ fun AlbumPickDialog(
                 // 相册列表
                 if (filteredAlbums.isEmpty()) {
                     Box(
-                        modifier = Modifier.fillMaxWidth().height(120.dp),
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("无匹配相册", fontSize = 13.sp, color = Color.Gray)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("无匹配相册", fontSize = 13.sp, color = Color.Gray)
+                            if (onCreateFolder != null) {
+                                Spacer(Modifier.height(12.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0x10FF9800),
+                                    onClick = { showCreateFolder = true }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📂", fontSize = 16.sp)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("+ 新建文件夹", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Color(0xCCFF9800))
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     LazyColumn(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         items(filteredAlbums, key = { it.bucketId }) { album ->
@@ -242,34 +261,35 @@ fun AlbumPickDialog(
                                 }
                             }
                         }
-                    }
-                }
-
-                // ── 新建文件夹 ──
-                if (onCreateFolder != null) {
-                    Spacer(Modifier.height(4.dp))
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0x10FF9800),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showCreateFolder = true },
-                        tonalElevation = 0.dp
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("📂", fontSize = 16.sp)
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "+ 新建文件夹",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = Color(0xCCFF9800)
-                            )
+                        // ── 新建文件夹（作为 LazyColumn 的最后一项）──
+                        if (onCreateFolder != null) {
+                            item {
+                                Spacer(Modifier.height(4.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0x10FF9800),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { showCreateFolder = true },
+                                    tonalElevation = 0.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📂", fontSize = 16.sp)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            "+ 新建文件夹",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Color(0xCCFF9800)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
