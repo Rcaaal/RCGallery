@@ -39,6 +39,7 @@ import com.example.rcgallery.ui.component.SmbConnectDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import com.example.rcgallery.viewmodel.PasteMode
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -309,6 +310,54 @@ fun NetworkBrowserScreen(
                     TextButton(onClick = { showSmbDeleteConfirm = false }) { Text("取消") }
                 }
             )
+        }
+
+        // ── 粘贴进度覆盖层 ──
+        val smbPasteProgress by viewModel.pasteProgress.collectAsStateWithLifecycle()
+        if (smbPasteProgress != null) {
+            val progress = smbPasteProgress ?: return@Box
+            SmbPasteProgressOverlay(progress)
+        }
+    }
+}
+
+/** 粘贴进度覆盖层（SMB） */
+@Composable
+private fun SmbPasteProgressOverlay(progress: com.example.rcgallery.viewmodel.GalleryViewModel.PasteProgress) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color(0x99000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                val label = if (progress.mode == PasteMode.MOVE) "移动" else "复制"
+                Text(
+                    text = "${label}中 ${progress.current}/${progress.total}",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = progress.fileName,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { progress.current.toFloat() / progress.total.toFloat() },
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                )
+            }
         }
     }
 }

@@ -810,6 +810,53 @@ fun MediaGridScreen(
                     }
                 )
             }
+
+            // ── 粘贴进度覆盖层 ──
+            val pasteProgress by viewModel.pasteProgress.collectAsStateWithLifecycle()
+            if (pasteProgress != null) {
+                PasteProgressOverlay(pasteProgress!!)
+            }
+        }
+    }
+}
+
+/** 粘贴进度覆盖层 */
+@Composable
+private fun PasteProgressOverlay(progress: com.example.rcgallery.viewmodel.GalleryViewModel.PasteProgress) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color(0x99000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                val label = if (progress.mode == com.example.rcgallery.viewmodel.PasteMode.MOVE) "移动" else "复制"
+                Text(
+                    text = "${label}中 ${progress.current}/${progress.total}",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = progress.fileName,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { progress.current.toFloat() / progress.total.toFloat() },
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                )
+            }
         }
     }
 }

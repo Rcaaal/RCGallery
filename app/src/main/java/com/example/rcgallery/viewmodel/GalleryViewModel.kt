@@ -129,6 +129,17 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _recentMoveAlbumDirs = MutableStateFlow<List<String>>(emptyList())
     val recentMoveAlbumDirs: StateFlow<List<String>> = _recentMoveAlbumDirs.asStateFlow()
 
+    /** 粘贴操作进度（非 null 表示进行中，用于 UI 显示进度条） */
+    data class PasteProgress(
+        val current: Int,
+        val total: Int,
+        val fileName: String,
+        val mode: PasteMode
+    )
+
+    private val _pasteProgress = MutableStateFlow<PasteProgress?>(null)
+    val pasteProgress: StateFlow<PasteProgress?> = _pasteProgress.asStateFlow()
+
     // ── 筛选规则系统 ──
     private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
     val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
@@ -1585,7 +1596,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             var successCount = 0
 
             for (item in items) {
-                try {
+                    _pasteProgress.value = PasteProgress(
+                        current = items.indexOf(item) + 1,
+                        total = items.size,
+                        fileName = item.name,
+                        mode = mode
+                    )
+                    try {
                     val result = when (mode) {
                         PasteMode.COPY -> smbRepository.smbCopyToSmb(item.path, targetDirUrl)
                         PasteMode.MOVE -> smbRepository.smbMoveToSmb(item.path, targetDirUrl)
@@ -1600,6 +1617,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     AppLogger.e("SMB-Paste", "FAIL: ${item.name}", e)
                 }
             }
+
+            _pasteProgress.value = null
 
             AppLogger.d("VM", "smbPasteToFolder: mode=$mode target=$targetDirUrl success=$successCount/${items.size}")
 
@@ -1956,7 +1975,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val context = app
 
             for (item in items) {
-                try {
+                    _pasteProgress.value = PasteProgress(
+                        current = items.indexOf(item) + 1,
+                        total = items.size,
+                        fileName = item.fileName,
+                        mode = mode
+                    )
+                    try {
                     val srcFile = File(item.filePath)
                     if (!srcFile.exists()) {
                         AppLogger.d("Paste", "Source file not found: ${item.filePath}")
@@ -2002,6 +2027,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
                 }
             }
+
+            _pasteProgress.value = null
 
             // ── MOVE 回滚提示 ──
             if (mode == PasteMode.MOVE && successCount < items.size) {
