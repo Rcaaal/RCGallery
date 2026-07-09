@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import java.io.File
+import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ContentValues
@@ -134,6 +135,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _recentMoveAlbums = MutableStateFlow<List<RecentMoveAlbum>>(emptyList())
     val recentMoveAlbums: StateFlow<List<RecentMoveAlbum>> = _recentMoveAlbums.asStateFlow()
 
+    /** 最近移动/复制操作记录（最多 50 条，持久化，用于"最近移动"Tab） */
+    private val _moveRecords = MutableStateFlow<List<MoveRecord>>(emptyList())
+    val moveRecords: StateFlow<List<MoveRecord>> = _moveRecords.asStateFlow()
+
     /** 粘贴操作进度（非 null 表示进行中，用于 UI 显示进度条） */
     data class PasteProgress(
         val current: Int,
@@ -182,6 +187,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbOperationHistory.value = loadSmbOperationHistory()
         // 恢复最近移动相册记录
         _recentMoveAlbums.value = loadRecentMoveAlbums()
+        // 恢复最近移动/复制操作记录
+        _moveRecords.value = loadMoveRecords()
         refreshTrashCount()
         loadPersistentRules()
         loadIgnoredFolderPaths()
@@ -1720,6 +1727,31 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val movedAt: Long
     )
 
+    /** 单条移动/复制记录中的文件条目 */
+    data class MoveFileEntry(
+        val fileName: String,
+        val sourcePath: String,
+        val targetPath: String,
+        val mimeType: String,
+        val size: Long
+    )
+
+    /** 一次移动/复制操作的完整记录 */
+    data class MoveRecord(
+        val id: String = UUID.randomUUID().toString().take(8),
+        val timestamp: Long = System.currentTimeMillis(),
+        val mode: String,                    // "COPY" 或 "MOVE"
+        val files: List<MoveFileEntry>,
+        val sourceDir: String,
+        val targetDir: String,
+        val sourceAlbumName: String,
+        val targetAlbumName: String,
+        val successCount: Int,
+        val totalCount: Int,
+        val isUndoRecord: Boolean = false,
+        val undoneRecordId: String? = null
+    )
+
     // ══════════════════════════════════════
     //  SMB 操作历史记录（持久化）
     // ══════════════════════════════════════
@@ -1729,6 +1761,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         private const val MAX_HISTORY_RECORDS = 50
         private const val HISTORY_PREFS_KEY = "smb_operation_history"
         private const val RECENT_ALBUMS_PREFS_KEY = "recent_move_albums"
+        private const val MOVE_RECORDS_PREFS_KEY = "move_records"
+        internal const val MAX_MOVE_RECORDS = 50
     }
 
     /** 从 SharedPreferences 加载最近移动相册记录 */
@@ -1770,6 +1804,90 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // ══════════════════════════════════════
+    //  最近移动/复制记录（持久化）
+    // ══════════════════════════════════════
+
+    /** 从 SharedPreferences 加载操作记录 */
+    private fun loadMoveRecords(): List<MoveRecord> {
+        return try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            val json = prefs.getString(MOVE_RECORDS_PREFS_KEY, "") ?: ""
+            if (json.isEmpty()) return emptyList()
+            val arr = JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                val filesArr = obj.getJSONArray("files")
+                val files = (0 until filesArr.length()).map { fi ->
+                    val fo = filesArr.getJSONObject(fi)
+                    MoveFileEntry(
+                        fileName = fo.getString("fileName"),
+                        sourcePath = fo.getString("sourcePath"),
+                        targetPath = fo.getString("targetPath"),
+                        mimeType = fo.getString("mimeType"),
+                        size = fo.getLong("size")
+                    )
+                }
+                MoveRecord(
+                    id = obj.getString("id"),
+                    timestamp = obj.getLong("timestamp"),
+                    mode = obj.getString("mode"),
+                    files = files,
+                    sourceDir = obj.getString("sourceDir"),
+                    targetDir = obj.getString("targetDir"),
+                    sourceAlbumName = obj.getString("sourceAlbumName"),
+                    targetAlbumName = obj.getString("targetAlbumName"),
+                    successCount = obj.getInt("successCount"),
+                    totalCount = obj.getInt("totalCount"),
+                    isUndoRecord = obj.optBoolean("isUndoRecord", false),
+                    undoneRecordId = obj.optString("undoneRecordId", "").ifBlank { null }
+                )
+            }
+        } catch (e: Exception) {
+            AppLogger.e("VM", "loadMoveRecords failed", e)
+            emptyList()
+        }
+    }
+
+    /** 保存操作记录到 SharedPreferences */
+    private fun saveMoveRecords(records: List<MoveRecord>) {
+        try {
+            val arr = JSONArray()
+            for (r in records) {
+                val filesArr = JSONArray()
+                for (f in r.files) {
+                    filesArr.put(JSONObject().apply {
+                        put("fileName", f.fileName)
+                        put("sourcePath", f.sourcePath)
+                        put("targetPath", f.targetPath)
+                        put("mimeType", f.mimeType)
+                        put("size", f.size)
+                    })
+                }
+                arr.put(JSONObject().apply {
+                    put("id", r.id)
+                    put("timestamp", r.timestamp)
+                    put("mode", r.mode)
+                    put("files", filesArr)
+                    put("sourceDir", r.sourceDir)
+                    put("targetDir", r.targetDir)
+                    put("sourceAlbumName", r.sourceAlbumName)
+                    put("targetAlbumName", r.targetAlbumName)
+                    put("successCount", r.successCount)
+                    put("totalCount", r.totalCount)
+                    put("isUndoRecord", r.isUndoRecord)
+                    put("undoneRecordId", r.undoneRecordId ?: "")
+                })
+            }
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            prefs.edit().putString(MOVE_RECORDS_PREFS_KEY, arr.toString()).apply()
+        } catch (e: Exception) {
+            AppLogger.e("VM", "saveMoveRecords failed", e)
+        }
+    }
+
     /** 添加一条操作记录（最新插入，超过上限自动裁剪） */
     private fun addSmbOperationRecord(
         mode: String,
@@ -1797,6 +1915,37 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbOperationHistory.value = updated.take(MAX_HISTORY_RECORDS)
         saveSmbOperationHistory(_smbOperationHistory.value)
         AppLogger.d("SMB-History", "record added: $mode $sourceFolderName -> $targetFolderName ($successCount/$fileCount)")
+    }
+
+    /** 添加一条移动/复制操作记录（最新插入，超过上限自动裁剪） */
+    private fun saveMoveRecord(
+        mode: String,
+        files: List<MoveFileEntry>,
+        sourceDir: String,
+        targetDir: String,
+        sourceAlbumName: String,
+        targetAlbumName: String,
+        successCount: Int,
+        totalCount: Int,
+        isUndoRecord: Boolean = false,
+        undoneRecordId: String? = null
+    ) {
+        val record = MoveRecord(
+            mode = mode,
+            files = files,
+            sourceDir = sourceDir,
+            targetDir = targetDir,
+            sourceAlbumName = sourceAlbumName,
+            targetAlbumName = targetAlbumName,
+            successCount = successCount,
+            totalCount = totalCount,
+            isUndoRecord = isUndoRecord,
+            undoneRecordId = undoneRecordId
+        )
+        val updated = listOf(record) + _moveRecords.value
+        _moveRecords.value = updated.take(MAX_MOVE_RECORDS)
+        saveMoveRecords(_moveRecords.value)
+        AppLogger.d("VM", "MoveRecord added: $mode $sourceAlbumName -> $targetAlbumName ($successCount/$totalCount)")
     }
 
     /** 从 SharedPreferences 加载操作历史 */
@@ -2030,6 +2179,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             val items = _clipboardItems.value.toList()
             var successCount = 0
+            val completedEntries = mutableListOf<MoveFileEntry>()
             val app = getApplication<Application>()
             val context = app
 
@@ -2117,6 +2267,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     successCount++
+                    completedEntries.add(MoveFileEntry(
+                        fileName = targetFile.name,
+                        sourcePath = item.filePath,
+                        targetPath = targetFile.absolutePath,
+                        mimeType = item.mimeType,
+                        size = item.size
+                    ))
                 } catch (e: Exception) {
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
                 }
@@ -2139,6 +2296,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 ))
                 _recentMoveAlbums.value = recent.take(20)
                 saveRecentMoveAlbums(_recentMoveAlbums.value)
+            }
+
+            // 记录移动/复制操作
+            if (successCount > 0 && completedEntries.isNotEmpty()) {
+                val firstItem = items.firstOrNull()
+                val srcDir = firstItem?.filePath?.let { File(it).parent } ?: ""
+                val srcAlbumName = firstItem?.albumName
+                    ?: if (srcDir.isNotEmpty()) File(srcDir).name else ""
+                val tgtAlbumName = if (targetName.isNotBlank()) targetName
+                    else File(targetDir).name
+                saveMoveRecord(
+                    mode = mode.name,
+                    files = completedEntries,
+                    sourceDir = srcDir,
+                    targetDir = targetDir,
+                    sourceAlbumName = srcAlbumName,
+                    targetAlbumName = tgtAlbumName,
+                    successCount = successCount,
+                    totalCount = items.size
+                )
             }
 
             // 移动模式：全部成功后才清空中转站（否则失败的文件留在中转站可重试）
@@ -2166,6 +2343,133 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
 
             AppLogger.d("VM", "pasteToAlbum: mode=$mode target=$targetName success=$successCount/${items.size}")
+        }
+    }
+
+    // ══════════════════════════════════════
+    //  撤销移动/复制操作
+    // ══════════════════════════════════════
+
+    /**
+     * 撤销一次移动/复制操作。
+     * - MOVE：将文件从 targetPath 复制回 sourcePath → 删除 targetPath → scanFile
+     * - COPY：直接删除 targetPath 的文件（仅限 sourcePath 仍存在时）
+     * 撤销完成后生成一条 isUndoRecord=true 的新记录。
+     */
+    fun undoMoveRecord(record: MoveRecord) {
+        if (record.isUndoRecord) return
+        viewModelScope.launch(Dispatchers.IO) {
+            var successCount = 0
+            val app = getApplication<Application>()
+            val context = app
+
+            for (entry in record.files) {
+                try {
+                    val targetFile = File(entry.targetPath)
+                    if (!targetFile.exists()) continue
+
+                    if (record.mode == PasteMode.MOVE.name) {
+                        // MOVE 撤销：复制回 source → 删除 target
+                        val sourceFile = File(entry.sourcePath)
+                        sourceFile.parentFile?.mkdirs()
+                        targetFile.inputStream().use { input ->
+                            sourceFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        sourceFile.setLastModified(targetFile.lastModified())
+                        // scan 恢复的文件
+                        MediaScannerConnection.scanFile(
+                            app, arrayOf(sourceFile.absolutePath), null, null
+                        )
+                        // 删除目标副本
+                        targetFile.delete()
+                        // 清理 MediaStore（通过 sourceFile scan 后自动注册新 URI，无需额外操作）
+                        // 删除目标 MediaStore 条目
+                        try {
+                            // 查找目标 URI 并删除
+                            context.contentResolver.delete(
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                "${MediaStore.MediaColumns.DATA} = ?",
+                                arrayOf(targetFile.absolutePath)
+                            )
+                        } catch (_: Exception) { }
+                        try {
+                            context.contentResolver.delete(
+                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                                "${MediaStore.MediaColumns.DATA} = ?",
+                                arrayOf(targetFile.absolutePath)
+                            )
+                        } catch (_: Exception) { }
+                    } else {
+                        // COPY 撤销：仅当源文件仍存在时才删除副本
+                        val sourceFile = File(entry.sourcePath)
+                        if (!sourceFile.exists()) continue
+                        targetFile.delete()
+                        // 清理目标 MediaStore
+                        try {
+                            context.contentResolver.delete(
+                                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                "${MediaStore.MediaColumns.DATA} = ?",
+                                arrayOf(targetFile.absolutePath)
+                            )
+                        } catch (_: Exception) { }
+                        try {
+                            context.contentResolver.delete(
+                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                                "${MediaStore.MediaColumns.DATA} = ?",
+                                arrayOf(targetFile.absolutePath)
+                            )
+                        } catch (_: Exception) { }
+                    }
+                    successCount++
+                } catch (e: Exception) {
+                    AppLogger.e("VM", "Undo failed for ${entry.fileName}", e)
+                }
+            }
+
+            // 刷新数据
+            if (successCount > 0) {
+                loadAlbums()
+                loadAllMedia()
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "撤销${record.mode}成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            // 记录撤销操作本身
+            saveMoveRecord(
+                mode = "UNDO_${record.mode}",
+                files = record.files,
+                sourceDir = record.targetDir,
+                targetDir = record.sourceDir,
+                sourceAlbumName = record.targetAlbumName,
+                targetAlbumName = record.sourceAlbumName,
+                successCount = successCount,
+                totalCount = record.files.size,
+                isUndoRecord = true,
+                undoneRecordId = record.id
+            )
+
+            AppLogger.d("VM", "Undo ${record.mode}: ${record.sourceAlbumName} <- ${record.targetAlbumName} ($successCount/${record.files.size})")
+        }
+    }
+
+    /**
+     * 检查某条记录是否可撤销。
+     * - MOVE：目标位置文件（targetPath）需仍存在
+     * - COPY：源文件（sourcePath）需仍存在（否则副本是唯一备份，不应删除）
+     */
+    fun isMoveRecordUndoable(record: MoveRecord): Boolean {
+        if (record.isUndoRecord) return false
+        return if (record.mode == PasteMode.MOVE.name) {
+            record.files.all { File(it.targetPath).exists() }
+        } else {
+            record.files.all { File(it.sourcePath).exists() }
         }
     }
 }

@@ -1,13 +1,17 @@
 package com.example.rcgallery.ui.screen
 
 import androidx.activity.compose.BackHandler
+import android.net.Uri
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,6 +29,15 @@ import com.example.rcgallery.model.MediaItem
 import com.example.rcgallery.ui.component.GalleryThumbnail
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import com.example.rcgallery.viewmodel.GalleryViewModel.MoveFileEntry
+import com.example.rcgallery.viewmodel.GalleryViewModel.MoveRecord
+import com.example.rcgallery.viewmodel.PasteMode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** 筛选类型 */
 private enum class RecentFilter(val label: String) {
@@ -35,8 +48,8 @@ private val RECENT_FILTERS = RecentFilter.entries.toList()
 private const val GRID_COLUMNS = 4
 
 /**
- * 最近浏览页面——查看最近查看过的相册/图片/视频。
- * 顶部 [最近浏览] [最近新增] 切换（最近新增暂不实现）。
+ * 最近浏览页面——查看最近查看过的相册/图片/视频及最近移动/复制记录。
+ * 顶部 [最近浏览] [最近新增] [最近移动] 切换（最近新增暂不实现）。
  * 三种内容切换参考标签页的 [相册] [图片] [视频] chips。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,13 +61,17 @@ fun RecentScreen(
     val recentAlbums by viewModel.recentAlbums.collectAsStateWithLifecycle()
     val recentImages by viewModel.recentImages.collectAsStateWithLifecycle()
     val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
+    val moveRecords by viewModel.moveRecords.collectAsStateWithLifecycle()
 
-    var activeTab by remember { mutableIntStateOf(0) }  // 0=最近浏览, 1=最近新增
+    var activeTab by remember { mutableIntStateOf(0) }  // 0=最近浏览, 1=最近新增, 2=最近移动
     var activeFilter by remember { mutableStateOf(RecentFilter.ALBUM) }
 
     // ── Overlay 状态 ──
     var selectedAlbum by remember { mutableStateOf<Album?>(null) }
     var selectedMediaIndex by remember { mutableIntStateOf(-1) }
+    // ── 撤销确认对话框 ──
+    var confirmUndoRecord by remember { mutableStateOf<MoveRecord?>(null) }
+    var undoingIds by remember { mutableStateOf(setOf<String>()) }
     // 拍平列表供 PreviewScreen 快照
     val flatItems = remember(activeFilter, recentImages, recentVideos) {
         when (activeFilter) {
@@ -89,7 +106,7 @@ fun RecentScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                val tabs = listOf("最近浏览", "最近新增")
+                val tabs = listOf("最近浏览", "最近新增", "最近移动")
                 tabs.forEachIndexed { idx, label ->
                     val selected = activeTab == idx
                     Surface(
@@ -111,32 +128,32 @@ fun RecentScreen(
             }
         }
 
-        // ═══ ② 筛选器 chips [相册] [图片] [视频] ═══
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            RECENT_FILTERS.forEach { type ->
-                val selected = activeFilter == type
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (selected) MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surface,
-                    tonalElevation = if (selected) 0.dp else 3.dp,
-                    onClick = { activeFilter = type }
-                ) {
-                    Text(
-                        text = type.label,
-                        color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
-                                else MaterialTheme.colorScheme.onSurface,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+        // ═══ ② 筛选器 chips [相册] [图片] [视频]（仅最近浏览显示）═══
+        if (activeTab != 2) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                RECENT_FILTERS.forEach { type ->
+                    val selected = activeFilter == type
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surface,
+                        tonalElevation = if (selected) 0.dp else 3.dp,
+                        onClick = { activeFilter = type }
+                    ) {
+                        Text(
+                            text = type.label,
+                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                                    else MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
         }
-
-        HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp))
 
         // ═══ ③ 内容区域 ═══
         // 当 overlay 显示时隐藏滚动内容，防止 Compose 手势拦截 VideoPlayer seek 拖拽
@@ -149,6 +166,16 @@ fun RecentScreen(
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("即将推出", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                 }
+                return@Box
+            } else if (activeTab == 2) {
+                MoveRecordList(
+                    records = moveRecords,
+                    undoingIds = undoingIds,
+                    onUndo = { record ->
+                        if (record.id in undoingIds) return@MoveRecordList
+                        confirmUndoRecord = record
+                    }
+                )
                 return@Box
             }
 
@@ -284,6 +311,30 @@ fun RecentScreen(
         }
     }
 
+    // ═══ 撤销确认对话框 ═══
+    confirmUndoRecord?.let { record ->
+        val actionLabel = if (record.mode == PasteMode.MOVE.name) "移回" else "删除"
+        AlertDialog(
+            onDismissRequest = { confirmUndoRecord = null },
+            title = { Text("撤销操作") },
+            text = {
+                val recordType = if (record.mode == PasteMode.MOVE.name) "移动" else "复制"
+                Text("确定要${actionLabel} ${record.successCount}/${record.totalCount} 个文件吗？\n这将撤销此次${recordType}操作。")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val id = record.id
+                    confirmUndoRecord = null
+                    undoingIds = undoingIds + id
+                    viewModel.undoMoveRecord(record)
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmUndoRecord = null }) { Text("取消") }
+            }
+        )
+    }
+
     // ═══ ④ Overlays ═══
     // 相册 overlay
     val album = selectedAlbum
@@ -319,4 +370,292 @@ private fun formatVideoDuration(durationMs: Long): String {
     val min = totalSec / 60
     val sec = totalSec % 60
     return "%02d:%02d".format(min, sec)
+}
+
+// ═══════════════════════════════════════════════
+//  最近移动记录列表
+// ═══════════════════════════════════════════════
+
+@Composable
+private fun MoveRecordList(
+    records: List<MoveRecord>,
+    undoingIds: Set<String>,
+    onUndo: (MoveRecord) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (records.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("暂无移动记录", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+        }
+        return
+    }
+
+    val expandedIds = remember { mutableStateMapOf<String, Boolean>() }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize().padding(horizontal = 12.dp),
+        contentPadding = PaddingValues(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        items(records, key = { it.id }) { record ->
+            MoveRecordCard(
+                record = record,
+                isExpanded = expandedIds[record.id] ?: false,
+                isUndoing = record.id in undoingIds,
+                onToggle = { expandedIds[record.id] = !(expandedIds[record.id] ?: false) },
+                onUndo = { onUndo(record) }
+            )
+        }
+        item { Spacer(Modifier.height(16.dp)) }
+    }
+}
+
+/** 格式化文件大小 */
+private fun formatFileSize(bytes: Long): String {
+    return when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        bytes < 1024 * 1024 * 1024 -> "${"%.1f".format(bytes.toDouble() / (1024 * 1024))} MB"
+        else -> "${"%.2f".format(bytes.toDouble() / (1024 * 1024 * 1024))} GB"
+    }
+}
+
+/** 相对时间文字 */
+private fun timeAgoText(timestamp: Long): String {
+    val minutes = ((System.currentTimeMillis() - timestamp) / 60000).toInt()
+    return when {
+        minutes < 1 -> "刚刚"
+        minutes < 60 -> "${minutes}分钟前"
+        minutes < 1440 -> "${minutes / 60}小时前"
+        else -> "${minutes / 1440}天前"
+    }
+}
+
+/** 格式化为完整日期时间 */
+private fun formatDateTime(timestamp: Long): String {
+    val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    return sdf.format(Date(timestamp))
+}
+
+/** 单条移动/复制记录卡片 */
+@Composable
+private fun MoveRecordCard(
+    record: MoveRecord,
+    isExpanded: Boolean,
+    isUndoing: Boolean,
+    onToggle: () -> Unit,
+    onUndo: () -> Unit
+) {
+    val isMoved = record.mode == PasteMode.MOVE.name
+    val isUndoRecord = record.isUndoRecord
+
+    // 异步检查可撤销性
+    var isUndoable by remember(record.id, record.timestamp) { mutableStateOf(false) }
+    LaunchedEffect(record.id, record.timestamp) {
+        isUndoable = withContext(Dispatchers.IO) {
+            if (record.isUndoRecord) false
+            else if (isMoved) record.files.all { File(it.targetPath).exists() }
+            else record.files.all { File(it.sourcePath).exists() }
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        tonalElevation = if (isUndoRecord) 0.dp else 1.dp,
+        color = if (isUndoRecord) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                else MaterialTheme.colorScheme.surface
+    ) {
+        Column {
+            // ── Header ──
+            Surface(
+                shape = RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp),
+                tonalElevation = if (isExpanded) 0.dp else 1.dp,
+                modifier = Modifier.fillMaxWidth().clickable { onToggle() },
+                color = Color.Transparent
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 操作标签
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = if (isUndoRecord) Color.Gray
+                                else if (isMoved) Color(0xCCFF9800)
+                                else Color(0xFF4CAF50)
+                    ) {
+                        Text(
+                            text = if (isUndoRecord) "撤销" else if (isMoved) "MOVE" else "COPY",
+                            fontSize = 9.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    // 目标相册名
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = record.targetAlbumName,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = timeAgoText(record.timestamp),
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // 撤销按钮
+                    if (!isUndoRecord) {
+                        Button(
+                            onClick = onUndo,
+                            enabled = isUndoable && !isUndoing,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isMoved) Color(0xCCFF9800) else Color(0xFF4CAF50),
+                                disabledContainerColor = Color.Gray.copy(alpha = 0.3f)
+                            ),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text(
+                                if (isUndoing) "..." else "撤销",
+                                fontSize = 11.sp,
+                                color = if (isUndoable && !isUndoing) Color.White
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = if (isExpanded) "▲" else "▼",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // ── 展开详情 ──
+            if (isExpanded) {
+                Surface(
+                    shape = RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp),
+                    tonalElevation = 0.dp,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.15f)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        // 来源 → 目标
+                        Row {
+                            Text(
+                                text = "来源: ${record.sourceAlbumName}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Row {
+                            Text(
+                                text = "目标: ${record.targetAlbumName}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        // 成功数
+                        val stateColor = if (record.successCount == record.totalCount) Color(0xFF4CAF50) else Color(0xCCFF9800)
+                        Text(
+                            text = "成功 ${record.successCount}/${record.totalCount} 个文件",
+                            fontSize = 10.sp,
+                            color = stateColor
+                        )
+                        // 时间
+                        Text(
+                            text = formatDateTime(record.timestamp),
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(4.dp))
+
+                        // 分隔线
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                        Spacer(Modifier.height(4.dp))
+
+                        // 分离图片和视频
+                        val imageFiles = record.files.filter { !it.mimeType.startsWith("video") }
+                        val videoFiles = record.files.filter { it.mimeType.startsWith("video") }
+
+                        // ── 图片缩略图网格 ──
+                        if (imageFiles.isNotEmpty()) {
+                            Text(
+                                text = "图片（${imageFiles.size}）",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            val imageRows = imageFiles.chunked(4)
+                            imageRows.forEach { row ->
+                                Row(modifier = Modifier.fillMaxWidth()) {
+                                    row.forEach { entry ->
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .aspectRatio(1f)
+                                                .padding(2.dp)
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                        ) {
+                                            GalleryThumbnail(
+                                                uri = Uri.fromFile(java.io.File(entry.targetPath)),
+                                                contentDescription = entry.fileName,
+                                                targetSize = 120
+                                            )
+                                        }
+                                    }
+                                    repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                        }
+
+                        // ── 视频列表 ──
+                        if (videoFiles.isNotEmpty()) {
+                            Text(
+                                text = "视频（${videoFiles.size}）",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            videoFiles.forEach { entry ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("📹", fontSize = 12.sp)
+                                    Spacer(Modifier.width(6.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            text = entry.fileName,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = formatFileSize(entry.size),
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
