@@ -796,15 +796,16 @@ fun MediaGridScreen(
                     recentMoveAlbumDirs = recentDirs,
                     onDismiss = {
                         showAlbumPickDialog = false
-                        pendingPickItems = emptyList()  // 取消选择，不加入中转站
+                        // pendingPickItems 由 onAlbumSelected 或重组时清理
                     },
                     onAlbumSelected = { targetDir, targetName, mode ->
                         showAlbumPickDialog = false
-                        // 把选中的文件加入中转站，再执行粘贴
+                        // 来自多选"选择目标相册"：先加入中转站再粘贴
                         if (pendingPickItems.isNotEmpty()) {
                             viewModel.addToClipboard(pendingPickItems)
                             pendingPickItems = emptyList()
                         }
+                        // 来自中转站 badge：中转站已有内容，直接粘贴
                         viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
                     }
                 )
