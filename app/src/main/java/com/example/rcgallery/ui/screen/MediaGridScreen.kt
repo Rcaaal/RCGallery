@@ -104,6 +104,8 @@ fun MediaGridScreen(
     var selectedMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showMediaBatchTagDialog by remember { mutableStateOf(false) }
     var showAlbumPickDialog by remember { mutableStateOf(false) }
+    // 暂存"选择目标相册"时选中的文件，确认后才加入中转站
+    var pendingPickItems by remember { mutableStateOf<List<com.example.rcgallery.model.MediaItem>>(emptyList()) }
     fun exitMediaMultiSelect() {
         isMediaMultiSelect = false
         selectedMediaUris = emptySet()
@@ -659,9 +661,8 @@ fun MediaGridScreen(
                         exitMediaMultiSelect()
                     },
                     onPickTargetAlbum = {
-                        // 先加入中转站，再弹出选择目标相册对话框
-                        val items = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
-                        viewModel.addToClipboard(items)
+                        // 暂存选中文件，等用户真正选择目标后再加入中转站
+                        pendingPickItems = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
                         exitMediaMultiSelect()
                         showAlbumPickDialog = true
                     },
@@ -793,8 +794,17 @@ fun MediaGridScreen(
                 AlbumPickDialog(
                     albums = filteredAlbums,
                     recentMoveAlbumDirs = recentDirs,
-                    onDismiss = { showAlbumPickDialog = false },
+                    onDismiss = {
+                        showAlbumPickDialog = false
+                        pendingPickItems = emptyList()  // 取消选择，不加入中转站
+                    },
                     onAlbumSelected = { targetDir, targetName, mode ->
+                        showAlbumPickDialog = false
+                        // 把选中的文件加入中转站，再执行粘贴
+                        if (pendingPickItems.isNotEmpty()) {
+                            viewModel.addToClipboard(pendingPickItems)
+                            pendingPickItems = emptyList()
+                        }
                         viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
                     }
                 )
