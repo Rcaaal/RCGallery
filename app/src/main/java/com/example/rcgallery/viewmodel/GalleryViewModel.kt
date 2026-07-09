@@ -1984,23 +1984,30 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         app, arrayOf(targetFile.absolutePath), null, null
                     )
 
-                    // 如果是移动模式：删除源文件
+                    // 如果是移动模式：先物理删除，成功后再清 MediaStore
                     if (mode == PasteMode.MOVE) {
-                        // 先尝试 ContentResolver 删除（删除 MediaStore 记录）
-                        try {
-                            context.contentResolver.delete(item.uri, null, null)
-                        } catch (_: Exception) { }
-                        // MANAGE_EXTERNAL_STORAGE 已开启时 File.delete() 可物理删除
-                        try {
-                            srcFile.delete()
-                        } catch (_: Exception) { }
-                        if (srcFile.exists()) {
-                            AppLogger.d("Paste", "Source file still exists after delete: ${item.fileName}")
+                        val fileDeleted = try { srcFile.delete() } catch (_: Exception) { false }
+                        if (fileDeleted) {
+                            // 物理删除成功，再清理 MediaStore 记录
+                            try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
+                        } else {
+                            // 物理删除失败 → 原子回滚：删除刚复制过去的文件
+                            try { targetFile.delete() } catch (_: Exception) { }
+                            AppLogger.e("Paste", "MOVE rollback: deleted target ${targetFile.name} (source delete failed)")
+                            continue  // 跳过本次循环，不记 successCount
                         }
                     }
                     successCount++
                 } catch (e: Exception) {
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
+                }
+            }
+
+            // ── MOVE 回滚提示 ──
+            if (mode == PasteMode.MOVE && successCount < items.size) {
+                val failedCount = items.size - successCount
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(app, "无法删除 $failedCount 个源文件，已回滚（需要开启全盘权限）", android.widget.Toast.LENGTH_LONG).show()
                 }
             }
 
@@ -2012,8 +2019,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _recentMoveAlbumDirs.value = recent.take(10)
             }
 
-            // 移动模式：清空中转站
-            if (mode == PasteMode.MOVE) {
+            // 移动模式：全部成功后才清空中转站（否则失败的文件留在中转站可重试）
+            if (mode == PasteMode.MOVE && successCount == items.size) {
                 _clipboardItems.value = emptyList()
             }
 
