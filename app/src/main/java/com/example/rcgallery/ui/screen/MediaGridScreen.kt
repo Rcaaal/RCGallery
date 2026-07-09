@@ -825,6 +825,32 @@ fun MediaGridScreen(
                 )
             }
 
+            // ── 全盘权限引导对话框 ──
+            val rollbackCount by viewModel.moveRollbackCount.collectAsStateWithLifecycle()
+            if (rollbackCount > 0) {
+                AlertDialog(
+                    onDismissRequest = { viewModel.clearMoveRollbackCount() },
+                    title = { Text("需要全盘访问权限") },
+                    text = {
+                        Text("移动 $rollbackCount 个文件时无法删除源文件。请开启「所有文件访问权限」后重试。")
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            viewModel.clearMoveRollbackCount()
+                            try {
+                                val intent = android.content.Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = android.net.Uri.parse("package:${activity.packageName}")
+                                }
+                                activity.startActivity(intent)
+                            } catch (_: Exception) { }
+                        }) { Text("去开启") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.clearMoveRollbackCount() }) { Text("知道了") }
+                    }
+                )
+            }
+
             // ── 粘贴进度覆盖层 ──
             val pasteProgress by viewModel.pasteProgress.collectAsStateWithLifecycle()
             if (pasteProgress != null) {

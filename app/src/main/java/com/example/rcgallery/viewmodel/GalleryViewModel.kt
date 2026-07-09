@@ -140,6 +140,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _pasteProgress = MutableStateFlow<PasteProgress?>(null)
     val pasteProgress: StateFlow<PasteProgress?> = _pasteProgress.asStateFlow()
 
+    /** MOVE 回滚失败计数（非 0 表示需要引导用户开启全盘权限） */
+    private val _moveRollbackCount = MutableStateFlow(0)
+    val moveRollbackCount: StateFlow<Int> = _moveRollbackCount.asStateFlow()
+
+    fun clearMoveRollbackCount() { _moveRollbackCount.value = 0 }
+
     // ── 筛选规则系统 ──
     private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
     val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
@@ -2030,12 +2036,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
             _pasteProgress.value = null
 
-            // ── MOVE 回滚提示 ──
+            // ── MOVE 回滚提示（UI 层消费 moveRollbackCount 弹对话框）──
             if (mode == PasteMode.MOVE && successCount < items.size) {
-                val failedCount = items.size - successCount
-                withContext(Dispatchers.Main) {
-                    android.widget.Toast.makeText(app, "无法删除 $failedCount 个源文件，已回滚（需要开启全盘权限）", android.widget.Toast.LENGTH_LONG).show()
-                }
+                _moveRollbackCount.value = items.size - successCount
             }
 
             // 更新最近移动记录
