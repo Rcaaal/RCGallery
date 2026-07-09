@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,8 +33,6 @@ import com.example.rcgallery.viewmodel.GalleryViewModel
 import com.example.rcgallery.viewmodel.GalleryViewModel.MoveFileEntry
 import com.example.rcgallery.viewmodel.GalleryViewModel.MoveRecord
 import com.example.rcgallery.viewmodel.PasteMode
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -62,6 +61,7 @@ fun RecentScreen(
     val recentImages by viewModel.recentImages.collectAsStateWithLifecycle()
     val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
     val moveRecords by viewModel.moveRecords.collectAsStateWithLifecycle()
+    val recordUndoableMap by viewModel.recordUndoableMap.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableIntStateOf(0) }  // 0=最近浏览, 1=最近新增, 2=最近移动
     var activeFilter by remember { mutableStateOf(RecentFilter.ALBUM) }
@@ -170,6 +170,7 @@ fun RecentScreen(
             } else if (activeTab == 2) {
                 MoveRecordList(
                     records = moveRecords,
+                    undoableMap = recordUndoableMap,
                     undoingIds = undoingIds,
                     onUndo = { record ->
                         if (record.id in undoingIds) return@MoveRecordList
@@ -379,6 +380,7 @@ private fun formatVideoDuration(durationMs: Long): String {
 @Composable
 private fun MoveRecordList(
     records: List<MoveRecord>,
+    undoableMap: Map<String, Boolean>,
     undoingIds: Set<String>,
     onUndo: (MoveRecord) -> Unit,
     modifier: Modifier = Modifier
@@ -400,6 +402,7 @@ private fun MoveRecordList(
         items(records, key = { it.id }) { record ->
             MoveRecordCard(
                 record = record,
+                isUndoable = undoableMap[record.id] ?: false,
                 isExpanded = expandedIds[record.id] ?: false,
                 isUndoing = record.id in undoingIds,
                 onToggle = { expandedIds[record.id] = !(expandedIds[record.id] ?: false) },
@@ -441,6 +444,7 @@ private fun formatDateTime(timestamp: Long): String {
 @Composable
 private fun MoveRecordCard(
     record: MoveRecord,
+    isUndoable: Boolean,
     isExpanded: Boolean,
     isUndoing: Boolean,
     onToggle: () -> Unit,
@@ -448,16 +452,7 @@ private fun MoveRecordCard(
 ) {
     val isMoved = record.mode == PasteMode.MOVE.name
     val isUndoRecord = record.isUndoRecord
-
-    // 异步检查可撤销性
-    var isUndoable by remember(record.id, record.timestamp) { mutableStateOf(false) }
-    LaunchedEffect(record.id, record.timestamp) {
-        isUndoable = withContext(Dispatchers.IO) {
-            if (record.isUndoRecord) false
-            else if (isMoved) record.files.all { File(it.targetPath).exists() }
-            else record.files.all { File(it.sourcePath).exists() }
-        }
-    }
+    val context = LocalContext.current
 
     Surface(
         shape = RoundedCornerShape(10.dp),
@@ -493,18 +488,35 @@ private fun MoveRecordCard(
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    // 目标相册名
+                    // 源 → 目标 路径
                     Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = record.sourceAlbumName,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Text(
+                                text = " → ",
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = record.targetAlbumName,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
                         Text(
-                            text = record.targetAlbumName,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = timeAgoText(record.timestamp),
+                            text = "${timeAgoText(record.timestamp)} · ${record.successCount}/${record.totalCount} 文件",
                             fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -607,8 +619,14 @@ private fun MoveRecordCard(
                                                 .clip(RoundedCornerShape(4.dp))
                                                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
                                         ) {
+                                            // 优先读缓存缩略图，miss 回退到 targetPath
+                                            val thumbFile = File(context.cacheDir, "move_thumbnails/${record.id}/${entry.fileName}")
+                                            val thumbUri = remember(entry, record.id) {
+                                                if (thumbFile.exists()) Uri.fromFile(thumbFile)
+                                                else Uri.fromFile(File(entry.targetPath))
+                                            }
                                             GalleryThumbnail(
-                                                uri = Uri.fromFile(java.io.File(entry.targetPath)),
+                                                uri = thumbUri,
                                                 contentDescription = entry.fileName,
                                                 targetSize = 120
                                             )

@@ -46,6 +46,8 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.provider.MediaStore
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -139,6 +141,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _moveRecords = MutableStateFlow<List<MoveRecord>>(emptyList())
     val moveRecords: StateFlow<List<MoveRecord>> = _moveRecords.asStateFlow()
 
+    /** 各记录是否可撤销（集中计算，避免每个卡片独立 File.exists） */
+    private val _recordUndoableMap = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val recordUndoableMap: StateFlow<Map<String, Boolean>> = _recordUndoableMap.asStateFlow()
+
     /** 粘贴操作进度（非 null 表示进行中，用于 UI 显示进度条） */
     data class PasteProgress(
         val current: Int,
@@ -189,6 +195,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _recentMoveAlbums.value = loadRecentMoveAlbums()
         // 恢复最近移动/复制操作记录
         _moveRecords.value = loadMoveRecords()
+        refreshRecordUndoability()
         refreshTrashCount()
         loadPersistentRules()
         loadIgnoredFolderPaths()
@@ -1928,9 +1935,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         successCount: Int,
         totalCount: Int,
         isUndoRecord: Boolean = false,
-        undoneRecordId: String? = null
+        undoneRecordId: String? = null,
+        recordId: String? = null          // 预生成 ID（pasteToAlbum 中提前生成以保存缩略图）
     ) {
         val record = MoveRecord(
+            id = recordId ?: UUID.randomUUID().toString().take(8),
             mode = mode,
             files = files,
             sourceDir = sourceDir,
@@ -1942,10 +1951,76 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             isUndoRecord = isUndoRecord,
             undoneRecordId = undoneRecordId
         )
+        // 被淘汰的记录清理缩略图
         val updated = listOf(record) + _moveRecords.value
+        val evicted = if (updated.size > MAX_MOVE_RECORDS) updated.drop(MAX_MOVE_RECORDS) else emptyList()
+        evicted.forEach { cleanupMoveRecordThumbnails(it.id) }
         _moveRecords.value = updated.take(MAX_MOVE_RECORDS)
         saveMoveRecords(_moveRecords.value)
+        refreshRecordUndoability()
         AppLogger.d("VM", "MoveRecord added: $mode $sourceAlbumName -> $targetAlbumName ($successCount/$totalCount)")
+    }
+
+    // ══════════════════════════════════════
+    //  可撤销性集中计算 + 缩略图缓存
+    // ══════════════════════════════════════
+
+    /** 刷新所有记录的可撤销性状态 */
+    private fun refreshRecordUndoability() {
+        val map = mutableMapOf<String, Boolean>()
+        for (r in _moveRecords.value) {
+            if (r.isUndoRecord) {
+                map[r.id] = false
+                continue
+            }
+            map[r.id] = if (r.mode == PasteMode.MOVE.name) {
+                r.files.all { File(it.targetPath).exists() }
+            } else {
+                r.files.all { File(it.sourcePath).exists() }
+            }
+        }
+        _recordUndoableMap.value = map
+    }
+
+    /** 获取缩略图缓存目录 */
+    private fun getMoveRecordThumbDir(context: android.content.Context, recordId: String): File {
+        return File(context.cacheDir, "move_thumbnails/$recordId")
+    }
+
+    /** 保存单张缩略图（120px JPEG Q70），跳过视频 */
+    private fun saveThumbnail(context: android.content.Context, recordId: String, filePath: String) {
+        if (filePath.isBlank()) return
+        try {
+            val srcFile = File(filePath)
+            if (!srcFile.exists()) return
+
+            val thumbDir = getMoveRecordThumbDir(context, recordId)
+            thumbDir.mkdirs()
+            val thumbFile = File(thumbDir, srcFile.name)
+            if (thumbFile.exists()) return
+
+            // 先读尺寸，算 inSampleSize
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(filePath, opts)
+            if (opts.outWidth <= 0 || opts.outHeight <= 0) return
+
+            val scale = maxOf(opts.outWidth / 120, opts.outHeight / 120, 1)
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = scale }
+            val bitmap = BitmapFactory.decodeFile(filePath, decodeOpts) ?: return
+
+            thumbFile.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 70, out)
+            }
+            bitmap.recycle()
+        } catch (_: Exception) { }
+    }
+
+    /** 清理某条记录的缩略图缓存 */
+    private fun cleanupMoveRecordThumbnails(recordId: String) {
+        try {
+            val dir = File(getApplication<Application>().cacheDir, "move_thumbnails/$recordId")
+            if (dir.exists()) dir.deleteRecursively()
+        } catch (_: Exception) { }
     }
 
     /** 从 SharedPreferences 加载操作历史 */
@@ -2180,6 +2255,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val items = _clipboardItems.value.toList()
             var successCount = 0
             val completedEntries = mutableListOf<MoveFileEntry>()
+            // 提前生成 recordId，用于缩略图缓存目录
+            val thumbRecordId = UUID.randomUUID().toString().take(8)
             val app = getApplication<Application>()
             val context = app
 
@@ -2274,6 +2351,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         mimeType = item.mimeType,
                         size = item.size
                     ))
+                    // 生成缩略图到缓存（非视频文件）
+                    if (!item.mimeType.startsWith("video/")) {
+                        saveThumbnail(context, thumbRecordId, targetFile.absolutePath)
+                    }
                 } catch (e: Exception) {
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
                 }
@@ -2314,7 +2395,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     sourceAlbumName = srcAlbumName,
                     targetAlbumName = tgtAlbumName,
                     successCount = successCount,
-                    totalCount = items.size
+                    totalCount = items.size,
+                    recordId = thumbRecordId
                 )
             }
 
