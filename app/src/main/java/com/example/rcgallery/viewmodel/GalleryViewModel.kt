@@ -2355,6 +2355,33 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     if (!item.mimeType.startsWith("video/")) {
                         saveThumbnail(context, thumbRecordId, targetFile.absolutePath)
                     }
+
+                    // ── TAG 迁移：保留图片级 TAG，丢弃相册级继承 TAG ──
+                    try {
+                        val oldMediaKey = tagRepository.mediaKey(item.filePath)
+                        val newMediaKey = tagRepository.mediaKey(targetFile.absolutePath)
+                        // 获取源文件的相册级 TAG ID（继承来的）
+                        val albumInfo = item.albumId?.let { aid ->
+                            _albums.value.find { it.bucketId == aid }
+                        }
+                        val inheritedTagIds = if (albumInfo != null)
+                            (_albumTags.value[albumInfo.directoryPath] ?: emptyList()).map { it.id }.toSet()
+                        else emptySet()
+
+                        if (mode == PasteMode.MOVE) {
+                            // MOVE: updateTargetKey 整体迁移 → 再逐条删继承 TAG
+                            tagRepository.updateTargetKey(oldMediaKey, newMediaKey)
+                            inheritedTagIds.forEach { tagId ->
+                                tagRepository.removeTagFromTarget(tagId, newMediaKey)
+                            }
+                        } else {
+                            // COPY: 只复制用户手动添加的 TAG（非继承）
+                            val allTagIds = tagRepository.getTagIdsForTarget(oldMediaKey)
+                            (allTagIds.toSet() - inheritedTagIds).forEach { tagId ->
+                                tagRepository.addTagToTarget(tagId, newMediaKey, TagRepository.TYPE_MEDIA)
+                            }
+                        }
+                    } catch (_: Exception) { }
                 } catch (e: Exception) {
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
                 }
@@ -2483,6 +2510,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 arrayOf(targetFile.absolutePath)
                             )
                         } catch (_: Exception) { }
+                        // TAG 迁移回源路径
+                        try {
+                            tagRepository.updateTargetKey(
+                                tagRepository.mediaKey(targetFile.absolutePath),
+                                tagRepository.mediaKey(sourceFile.absolutePath)
+                            )
+                        } catch (_: Exception) { }
                     } else {
                         // COPY 撤销：仅当源文件仍存在时才删除副本
                         val sourceFile = File(entry.sourcePath)
@@ -2502,6 +2536,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 "${MediaStore.MediaColumns.DATA} = ?",
                                 arrayOf(targetFile.absolutePath)
                             )
+                        } catch (_: Exception) { }
+                        // 清理 TAG 关联（文件已删除，TAG 不应残留）
+                        try {
+                            val targetMediaKey = tagRepository.mediaKey(targetFile.absolutePath)
+                            val tagIds = tagRepository.getTagIdsForTarget(targetMediaKey)
+                            tagIds.forEach { tagId ->
+                                tagRepository.removeTagFromTarget(tagId, targetMediaKey)
+                            }
                         } catch (_: Exception) { }
                     }
                     successCount++
