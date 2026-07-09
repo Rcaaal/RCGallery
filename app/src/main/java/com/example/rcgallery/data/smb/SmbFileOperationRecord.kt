@@ -3,8 +3,11 @@ package com.example.rcgallery.data.smb
 /**
  * SMB 文件操作历史记录。
  *
- * 每次在 SMB 文件中执行 COPY/MOVE 后生成一条记录，
+ * 每次在 SMB 中执行 COPY / MOVE / DELETE 后生成一条记录，
  * 用于在"操作历史"页面展示，并支持导出。
+ *
+ * - COPY/MOVE 时记录源和目标路径
+ * - DELETE 时 source* 记录删除位置，target* 留空
  */
 data class SmbFileOperationRecord(
     /** 唯一标识（UUID 前 8 位） */

@@ -67,6 +67,7 @@ fun NetworkBrowserScreen(
     // ── SMB 多选状态（与本地 MediaGridScreen 模式一致）──
     var isSmbMultiSelect by remember { mutableStateOf(false) }
     var selectedSmbPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showSmbDeleteConfirm by remember { mutableStateOf(false) }
     fun exitSmbMultiSelect() {
         isSmbMultiSelect = false
         selectedSmbPaths = emptySet()
@@ -203,19 +204,32 @@ fun NetworkBrowserScreen(
                                 }
                             )
 
-                            // ── 多选模式浮动按钮 ──
+                            // ── 多选模式浮动按钮（竖排两按钮：加入中转站 + 删除）──
                             if (isSmbMultiSelect && selectedSmbPaths.isNotEmpty()) {
                                 val selectedFiles = s.mediaFiles.filter { it.path in selectedSmbPaths }
-                                SmbMultiSelectButton(
-                                    selectedCount = selectedSmbPaths.size,
-                                    onAddToClipboard = {
-                                        viewModel.smbAddToClipboard(selectedFiles)
-                                        exitSmbMultiSelect()
-                                    },
+                                Column(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .padding(end = 12.dp, bottom = 80.dp)
-                                )
+                                        .padding(end = 12.dp, bottom = 80.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    horizontalAlignment = Alignment.End
+                                ) {
+                                    // ── 加入中转站 ──
+                                    SmbActionButton(
+                                        text = "加入中转站 (${selectedSmbPaths.size})",
+                                        containerColor = Color(0xCCFF9800),
+                                        onClick = {
+                                            viewModel.smbAddToClipboard(selectedFiles)
+                                            exitSmbMultiSelect()
+                                        }
+                                    )
+                                    // ── 批量删除 ──
+                                    SmbActionButton(
+                                        text = "删除 (${selectedSmbPaths.size})",
+                                        containerColor = MaterialTheme.colorScheme.error,
+                                        onClick = { showSmbDeleteConfirm = true }
+                                    )
+                                }
                             }
 
                             // ── SMB 中转站 badge ──
@@ -268,6 +282,32 @@ fun NetworkBrowserScreen(
                 records = smbOperationHistory,
                 onDismiss = { showHistoryPage = false },
                 onExport = { viewModel.exportSmbOperationHistory(context) }
+            )
+        }
+
+        // ── 删除确认对话框 ──
+        if (showSmbDeleteConfirm) {
+            val selectedFiles = remember(selectedSmbPaths) {
+                val s = smbBrowseState
+                if (s is SmbBrowseState.FolderContent) s.mediaFiles.filter { it.path in selectedSmbPaths }
+                else emptyList()
+            }
+            AlertDialog(
+                onDismissRequest = { showSmbDeleteConfirm = false },
+                title = { Text("确认删除") },
+                text = { Text("确定删除选中的 ${selectedSmbPaths.size} 个文件？\n此操作不可恢复。") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showSmbDeleteConfirm = false
+                            viewModel.smbDeleteSelected(selectedFiles)
+                            exitSmbMultiSelect()
+                        }
+                    ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSmbDeleteConfirm = false }) { Text("取消") }
+                }
             )
         }
     }
@@ -1201,26 +1241,27 @@ private class MediaListVH private constructor(
 // ══════════════════════════════════════
 
 /**
- * SMB 多选模式浮动按钮（"加入中转站"）。
+ * SMB 多选模式单个悬浮操作按钮。
+ * 与本地 MediaGridScreen 的 ActionButton 风格一致。
  */
 @Composable
-private fun SmbMultiSelectButton(
-    selectedCount: Int,
-    onAddToClipboard: () -> Unit,
-    modifier: Modifier = Modifier
+private fun SmbActionButton(
+    text: String,
+    containerColor: Color,
+    onClick: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(8.dp),
-        color = Color(0xCCFF9800),
-        onClick = onAddToClipboard,
-        modifier = modifier.height(34.dp)
+        color = containerColor,
+        onClick = onClick,
+        modifier = Modifier.height(34.dp)
     ) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier.fillMaxHeight().padding(horizontal = 10.dp)
         ) {
             Text(
-                text = "加入中转站 ($selectedCount)",
+                text = text,
                 color = Color.White,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,

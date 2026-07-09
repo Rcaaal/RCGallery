@@ -786,8 +786,12 @@ fun MediaGridScreen(
             if (showAlbumPickDialog) {
                 val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
                 val recentDirs by viewModel.recentMoveAlbumDirs.collectAsStateWithLifecycle()
+                // 排除当前相册本身，不允许"移动到自身"
+                val filteredAlbums = if (albumDirectoryPath.isNotEmpty()) {
+                    allAlbums.filter { it.directoryPath != albumDirectoryPath }
+                } else allAlbums
                 AlbumPickDialog(
-                    albums = allAlbums,
+                    albums = filteredAlbums,
                     recentMoveAlbumDirs = recentDirs,
                     onDismiss = { showAlbumPickDialog = false },
                     onAlbumSelected = { targetDir, targetName, mode ->

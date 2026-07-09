@@ -1493,6 +1493,81 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
+     * 批量删除 SMB 文件（永久删除，不可恢复）。
+     * 同协程内完成删除 + 记录历史 + 刷新文件夹。
+     */
+    fun smbDeleteSelected(files: List<SmbFileInfo>) {
+        val currentState = _smbBrowseState.value
+        val refreshHost = if (currentState is SmbBrowseState.FolderContent) currentState.host else null
+        val refreshPath = if (currentState is SmbBrowseState.FolderContent) currentState.currentPath else null
+        val refreshFolderName = if (currentState is SmbBrowseState.FolderContent) currentState.folderName else null
+
+        viewModelScope.launch(Dispatchers.IO) {
+            var successCount = 0
+
+            for (file in files) {
+                try {
+                    smbRepository.deleteFile(file.path).onSuccess {
+                        successCount++
+                        AppLogger.d("SMB-Delete", "OK: ${file.name}")
+                    }.onFailure { e ->
+                        AppLogger.e("SMB-Delete", "FAIL: ${file.name}", e)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.e("SMB-Delete", "FAIL: ${file.name}", e)
+                }
+            }
+
+            AppLogger.d("VM", "smbDeleteSelected: success=$successCount/${files.size}")
+
+            if (successCount > 0) {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "删除成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            // 记录操作历史
+            if (successCount > 0 && files.isNotEmpty()) {
+                val firstPath = files.first().path
+                val sourcePath = firstPath.substringBeforeLast("/")
+                val sourceHost = sourcePath.removePrefix("smb://").substringBefore("/").substringBefore("\\")
+                val sourceFolderName = sourcePath.substringAfterLast("/")
+                addSmbOperationRecord(
+                    mode = "DELETE",
+                    sourceHost = sourceHost,
+                    sourcePath = sourcePath,
+                    sourceFolderName = sourceFolderName,
+                    targetHost = "",
+                    targetPath = "",
+                    targetFolderName = "",
+                    fileCount = files.size,
+                    successCount = successCount
+                )
+            }
+
+            // 刷新当前文件夹（同协程内）
+            if (successCount > 0 && refreshHost != null) {
+                smbRepository.quickScanFolderContent(refreshPath!!).onSuccess { result ->
+                    _smbBrowseState.value = SmbBrowseState.FolderContent(
+                        host = refreshHost,
+                        currentPath = refreshPath!!,
+                        folderName = refreshFolderName!!,
+                        subFolders = result.subFolders,
+                        mediaFiles = result.mediaFiles
+                    )
+                    AppLogger.d("SMB", "delete refresh OK: $refreshFolderName (${result.mediaFiles.size} files)")
+                }.onFailure { e ->
+                    AppLogger.e("SMB", "delete refresh FAIL: $refreshPath", e)
+                }
+            }
+        }
+    }
+
+    /**
      * 将 SMB 中转站中的文件复制/移动到目标文件夹（同 IP 内）。
      *
      * @param mode COPY 或 MOVE
