@@ -770,35 +770,11 @@ private fun GroupedMediaList(
         return -1
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged { size ->
-                if (size.width > 0f) {
-                    cellWidth = (size.width - with(density) { 32.dp.toPx() }) / GRID_COLUMNS.toFloat()
-                }
-            }
-            .pointerInput(allItems) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        if (isMultiSelectMode) {
-                            dragStartFlatIdx = findFlatIndex(offset)
-                        }
-                    },
-                    onDrag = { change, _ ->
-                        if (isMultiSelectMode && dragStartFlatIdx >= 0) {
-                            change.consume()
-                            val idx = findFlatIndex(change.position)
-                            if (idx >= 0) {
-                                onDragSelectRange?.invoke(dragStartFlatIdx, idx)
-                            }
-                        }
-                    },
-                    onDragEnd = { dragStartFlatIdx = -1 },
-                    onDragCancel = { dragStartFlatIdx = -1 }
-                )
-                }
-    ) {
+    Box(Modifier.fillMaxSize().onSizeChanged { size ->
+        if (size.width > 0f) {
+            cellWidth = (size.width - with(density) { 32.dp.toPx() }) / GRID_COLUMNS.toFloat()
+        }
+    }) {
         LazyColumn(
             state = lazyListState,
             modifier = Modifier
@@ -926,6 +902,29 @@ private fun GroupedMediaList(
 
         // 底部留白
         item { Spacer(Modifier.height(16.dp)) }
+        }
+        // ── 多选模式拖拽覆盖层 ──
+        if (isMultiSelectMode) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .pointerInput(allItems) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                dragStartFlatIdx = findFlatIndex(offset)
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                val idx = findFlatIndex(change.position)
+                                if (idx >= 0 && dragStartFlatIdx >= 0) {
+                                    onDragSelectRange?.invoke(dragStartFlatIdx, idx)
+                                }
+                            },
+                            onDragEnd = { dragStartFlatIdx = -1 },
+                            onDragCancel = { dragStartFlatIdx = -1 }
+                        )
+                    }
+            )
         }
     }
 }
