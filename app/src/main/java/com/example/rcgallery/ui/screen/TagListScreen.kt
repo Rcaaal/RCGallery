@@ -5,12 +5,14 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
@@ -23,7 +25,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -573,6 +579,13 @@ fun TagListScreen(
                                 },
                                 onMediaTapInMultiSelect = { item ->
                                     toggleTagMediaSelection(item)
+                                },
+                                onDragSelectRange = { startIdx, endIdx ->
+                                    val minIdx = minOf(startIdx, endIdx).coerceAtLeast(0)
+                                    val maxIdx = maxOf(startIdx, endIdx).coerceAtMost(flatFilteredMedia.lastIndex)
+                                    if (minIdx in flatFilteredMedia.indices && maxIdx in flatFilteredMedia.indices) {
+                                        tagSelectedMediaUris = (minIdx..maxIdx).map { flatFilteredMedia[it].uri.toString() }.toSet()
+                                    }
                                 }
                             )
                         }
@@ -600,6 +613,13 @@ fun TagListScreen(
                                 },
                                 onMediaTapInMultiSelect = { item ->
                                     toggleTagMediaSelection(item)
+                                },
+                                onDragSelectRange = { startIdx, endIdx ->
+                                    val minIdx = minOf(startIdx, endIdx).coerceAtLeast(0)
+                                    val maxIdx = maxOf(startIdx, endIdx).coerceAtMost(flatFilteredMedia.lastIndex)
+                                    if (minIdx in flatFilteredMedia.indices && maxIdx in flatFilteredMedia.indices) {
+                                        tagSelectedMediaUris = (minIdx..maxIdx).map { flatFilteredMedia[it].uri.toString() }.toSet()
+                                    }
                                 }
                             )
                         }
@@ -709,15 +729,84 @@ private fun GroupedMediaList(
     isMultiSelectMode: Boolean = false,
     selectedUris: Set<String> = emptySet(),
     onMediaLongClick: ((MediaItem) -> Unit)? = null,
-    onMediaTapInMultiSelect: ((MediaItem) -> Unit)? = null
+    onMediaTapInMultiSelect: ((MediaItem) -> Unit)? = null,
+    onDragSelectRange: ((startIdx: Int, endIdx: Int) -> Unit)? = null
 ) {
-    LazyColumn(
+    val allItems = remember(groups) { groups.values.flatten() }
+    val lazyListState = rememberLazyListState()
+    var dragStartFlatIdx by remember { mutableIntStateOf(-1) }
+    var cellWidth by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    val headerHeightPx = with(density) { 52.dp.toPx() }
+    val rowPaddingPx = with(density) { 8.dp.toPx() }
+    val startXPx = with(density) { 14.dp.toPx() }
+
+    fun findFlatIndex(offset: Offset): Int {
+        if (cellWidth <= 0f) return -1
+        val rowH = cellWidth + rowPaddingPx
+        val firstVisible = lazyListState.layoutInfo.visibleItemsInfo.firstOrNull() ?: return -1
+        val contentY = offset.y + firstVisible.offset
+        var currentY = 0f
+        var flatIdx = 0
+        for ((albumName, items) in groups) {
+            val isCollapsed = collapsedGroups[albumName] ?: false
+            currentY += headerHeightPx
+            if (contentY < currentY) return -1
+            if (!isCollapsed) {
+                val rows = items.chunked(GRID_COLUMNS)
+                for ((_, row) in rows.withIndex()) {
+                    currentY += rowH
+                    if (contentY < currentY) {
+                        val col = ((offset.x - startXPx) / cellWidth).toInt()
+                            .coerceIn(0, row.size - 1)
+                        return flatIdx + col
+                    }
+                    flatIdx += GRID_COLUMNS
+                }
+            } else {
+                flatIdx += items.size
+            }
+        }
+        return -1
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 12.dp),
-        contentPadding = PaddingValues(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(0.dp)
+            .onSizeChanged { size ->
+                if (size.width > 0f) {
+                    cellWidth = (size.width - with(density) { 32.dp.toPx() }) / GRID_COLUMNS.toFloat()
+                }
+            }
+            .pointerInput(allItems) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        if (isMultiSelectMode) {
+                            dragStartFlatIdx = findFlatIndex(offset)
+                        }
+                    },
+                    onDrag = { change, _ ->
+                        if (isMultiSelectMode && dragStartFlatIdx >= 0) {
+                            change.consume()
+                            val idx = findFlatIndex(change.position)
+                            if (idx >= 0) {
+                                onDragSelectRange?.invoke(dragStartFlatIdx, idx)
+                            }
+                        }
+                    },
+                    onDragEnd = { dragStartFlatIdx = -1 },
+                    onDragCancel = { dragStartFlatIdx = -1 }
+                )
+                }
     ) {
+        LazyColumn(
+            state = lazyListState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp),
+            contentPadding = PaddingValues(top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp)
+        ) {
         groups.forEach { (albumName, items) ->
             val isCollapsed = collapsedGroups[albumName] ?: false
             val rows = if (isCollapsed) emptyList() else items.chunked(GRID_COLUMNS)
@@ -780,24 +869,27 @@ private fun GroupedMediaList(
                         Row(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
                             row.forEach { item ->
                                 val isSelected = item.uri.toString() in selectedUris
-                                val cellModifier = Modifier
-                                    .weight(1f)
-                                    .aspectRatio(1f)
-                                    .padding(2.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(
-                                        if (isSelected) Color(0xFF448AFF).copy(alpha = 0.15f)
-                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                    )
-                                val finalModifier = if (isMultiSelectMode) {
-                                    cellModifier.clickable { onMediaTapInMultiSelect?.invoke(item) }
-                                } else {
-                                    cellModifier.combinedClickable(
-                                        onClick = { onMediaClick(item) },
-                                        onLongClick = { onMediaLongClick?.invoke(item) }
-                                    )
-                                }
-                                Box(modifier = finalModifier) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .aspectRatio(1f)
+                                        .padding(2.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(
+                                            if (isSelected) Color(0xFF448AFF).copy(alpha = 0.15f)
+                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                        )
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (isMultiSelectMode) {
+                                                    onMediaTapInMultiSelect?.invoke(item)
+                                                } else {
+                                                    onMediaClick(item)
+                                                }
+                                            },
+                                            onLongClick = { onMediaLongClick?.invoke(item) }
+                                        )
+                                ) {
                                     Box(modifier = Modifier.matchParentSize()) {
                                         GalleryThumbnail(
                                             uri = item.uri,
@@ -834,6 +926,7 @@ private fun GroupedMediaList(
 
         // 底部留白
         item { Spacer(Modifier.height(16.dp)) }
+        }
     }
 }
 
