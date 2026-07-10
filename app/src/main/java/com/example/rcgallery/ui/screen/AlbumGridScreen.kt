@@ -63,8 +63,17 @@ import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+
+// 跨闭包信号：设为 true 时触发搜索建议关闭 + 输入框失焦
+// 用模块级变量而非 composable 局部变量，解决 Kotlin 2.1 Compose 编译器对普通 lambda 捕获限制
+private val _dismissSearchSuggestions = mutableStateOf(false)
 
 /**
  * 相册显示模式。
@@ -162,6 +171,20 @@ fun AlbumGridScreen(
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // 下拉菜单显隐：放在 LaunchedEffect 前，确保 suspend lambda 可捕获
+    var showSuggestions by remember { mutableStateOf(true) }
+
+    // 收到顶层信号后执行实际关闭操作（在 composable 作用域内，可访问局部变量）
+    LaunchedEffect(_dismissSearchSuggestions.value) {
+        if (_dismissSearchSuggestions.value) {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            showSuggestions = false
+            _dismissSearchSuggestions.value = false
+        }
+    }
 
     /** 退出搜索模式 */
     fun exitSearch() {
@@ -169,10 +192,6 @@ fun AlbumGridScreen(
         isSearchActive = false
         keyboardController?.hide()
     }
-
-    // 下拉菜单显隐：点击建议填充后收起，用户重新输入时再显示
-    var showSuggestions by remember { mutableStateOf(true) }
-
     // 进入搜索模式时自动聚焦并弹出输入法
     LaunchedEffect(isSearchActive) {
         if (isSearchActive) {
@@ -903,6 +922,10 @@ private fun AlbumGridContent(
                                 value = searchQuery,
                                 onValueChange = onSearchQueryChange,
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(
+                                    onSearch = { _dismissSearchSuggestions.value = true }
+                                ),
                                 textStyle = MaterialTheme.typography.bodyLarge,
                                 placeholder = {
                                     Text(
@@ -934,6 +957,7 @@ private fun AlbumGridContent(
                                 modifier = Modifier
                                     .weight(1f)
                                     .focusRequester(searchFocusRequester)
+                                    .onFocusChanged { if (!it.isFocused) _dismissSearchSuggestions.value = true }
                             )
                         }
                     }
@@ -1114,6 +1138,14 @@ private fun AlbumGridContent(
                         addItemDecoration(AlbumGridSpacing(ctx))
                         clipToPadding = false
                         setPadding(0, (44 * ctx.resources.displayMetrics.density).toInt(), 0, 0)
+                        // 滑动时关闭搜索框焦点和下拉建议
+                        addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                            override fun onScrollStateChanged(rv: RecyclerView, newState: Int) {
+                                if (newState != RecyclerView.SCROLL_STATE_IDLE) {
+                                    _dismissSearchSuggestions.value = true
+                                }
+                            }
+                        })
                     }
                     albumRvRef.value = rv
                     val scroller = FastScrollerView(ctx, rv)
