@@ -2572,8 +2572,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val context = app
             // 重置冲突状态（每次粘贴开始时）
             resetConflictState()
-            // 收集快路径和 COPY 的目标路径，最后统一 batch scan
-            val pendingScanPaths = mutableListOf<String>()
 
             for (item in items) {
                     _pasteProgress.value = PasteProgress(
@@ -2628,9 +2626,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     }
                     if (moveByRename) {
                         AppLogger.d("Paste", "MOVE fast path OK: ${item.fileName} -> ${targetFile.absolutePath}")
-                        // 快路径成功：文件无 I/O 开销，清理旧 MediaStore 防路径残留
+                        // 清理旧 MediaStore 记录（防路径残留）
                         try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
-                        pendingScanPaths.add(targetFile.absolutePath)
+                        // per-file scanFile 等回调，确保 MediaStore 注册完成
+                        val newUri = suspendCancellableCoroutine<Uri?> { cont ->
+                            MediaScannerConnection.scanFile(
+                                app, arrayOf(targetFile.absolutePath), null
+                            ) { _, uri -> cont.resume(uri) }
+                        }
+                        // IS_PENDING hack 修正 DATE_ADDED
+                        if (newUri != null) {
+                            try {
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
+                                    null, null)
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded) },
+                                    null, null)
+                                context.contentResolver.update(newUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                                    null, null)
+                            } catch (_: Exception) { }
+                        }
                     } else {
                         if (mode == PasteMode.MOVE) {
                             AppLogger.d("Paste", "MOVE fast path FAIL, fallback COPY+DELETE: ${item.fileName}")
@@ -2667,8 +2684,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 } catch (_: Exception) { }
                             }
                         } else {
-                            // COPY: 记入批量 scan（不需要 URI 回调）
-                            pendingScanPaths.add(targetFile.absolutePath)
+                            // COPY: per-file scanFile 确保 MediaStore 注册
+                            suspendCancellableCoroutine<Unit?> { cont ->
+                                MediaScannerConnection.scanFile(
+                                    app, arrayOf(targetFile.absolutePath), null
+                                ) { _, _ -> cont.resume(Unit) }
+                            }
                         }
 
                         // 移动模式：物理删除源文件
@@ -2726,17 +2747,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 } catch (e: Exception) {
                     AppLogger.e("Paste", "Failed to paste: ${item.fileName}", e)
                 }
-            }
-
-            // ── 批量 MediaScanner scan（快路径和 COPY 累积的路径，统一一次扫完）──
-            if (pendingScanPaths.isNotEmpty()) {
-                AppLogger.d("Paste", "MOVE batch scan count=${pendingScanPaths.size}")
-                pendingScanPaths.take(3).forEachIndexed { i, p ->
-                    AppLogger.d("Paste", "MOVE scan[$i]=$p")
-                }
-                MediaScannerConnection.scanFile(
-                    app, pendingScanPaths.toTypedArray(), null, null
-                )
             }
 
             _pasteProgress.value = null
@@ -2825,7 +2835,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             var successCount = 0
             val app = getApplication<Application>()
             val context = app
-            val pendingScanPaths = mutableListOf<String>()
 
             for (entry in record.files) {
                 try {
@@ -2855,7 +2864,26 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                     arrayOf(targetFile.absolutePath)
                                 )
                             } catch (_: Exception) { }
-                            pendingScanPaths.add(sourceFile.absolutePath)
+                            // per-file scanFile 等回调，确保 MediaStore 注册
+                            val undoNewUri = suspendCancellableCoroutine<Uri?> { cont ->
+                                MediaScannerConnection.scanFile(
+                                    app, arrayOf(sourceFile.absolutePath), null
+                                ) { _, uri -> cont.resume(uri) }
+                            }
+                            // IS_PENDING hack 修正 DATE_ADDED
+                            if (undoNewUri != null && entry.dateAdded > 0L) {
+                                try {
+                                    context.contentResolver.update(undoNewUri,
+                                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
+                                        null, null)
+                                    context.contentResolver.update(undoNewUri,
+                                        ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, entry.dateAdded) },
+                                        null, null)
+                                    context.contentResolver.update(undoNewUri,
+                                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                                        null, null)
+                                } catch (_: Exception) { }
+                            }
                         } else {
                             AppLogger.d("Undo", "MOVE undo fast path FAIL, fallback COPY+DELETE: ${entry.fileName}")
                             // ── fallback：复制回 source → 删除 target ──
@@ -2942,17 +2970,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 } catch (e: Exception) {
                     AppLogger.e("VM", "Undo failed for ${entry.fileName}", e)
                 }
-            }
-
-            // ── 批量 scan（快路径累积的源路径）──
-            if (pendingScanPaths.isNotEmpty()) {
-                AppLogger.d("Undo", "MOVE undo batch scan count=${pendingScanPaths.size}")
-                pendingScanPaths.take(3).forEachIndexed { i, p ->
-                    AppLogger.d("Undo", "MOVE undo scan[$i]=$p")
-                }
-                MediaScannerConnection.scanFile(
-                    app, pendingScanPaths.toTypedArray(), null, null
-                )
             }
 
             // 刷新数据
