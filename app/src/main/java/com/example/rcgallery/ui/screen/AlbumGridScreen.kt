@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
@@ -1312,32 +1313,25 @@ private fun AlbumGridContent(
                         if (isSearchActive) {
                             // 搜索模式下 actions 为空（搜索 UI 在 title 中）
                         } else {
-                            // ── 创建层级相册按钮 ──
-                            IconButton(
-                                onClick = { showCreateParentDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Text("📁", fontSize = 16.sp)
-                            }
-                            Spacer(Modifier.width(4.dp))
+                            // ── 创建父级相册按钮 ──
+                            TopBarActionButton(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_new_folder),
+                                contentDescription = "创建父级相册",
+                                onClick = { showCreateParentDialog = true }
+                            )
+                            Spacer(Modifier.width(12.dp))
                             // ── 搜索按钮 ──
-                            Icon(
+                            TopBarActionButton(
                                 painter = painterResource(com.example.rcgallery.R.drawable.ic_search),
                                 contentDescription = "搜索",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .size(22.dp)
-                                    .clickable { onActivateSearch() }
+                                onClick = { onActivateSearch() }
                             )
                             Spacer(Modifier.width(12.dp))
                             // ── 回收站按钮 ──
-                            Icon(
+                            TopBarActionButton(
                                 painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
                                 contentDescription = "回收站",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .size(22.dp)
-                                    .clickable { onOpenTrash() }
+                                onClick = { onOpenTrash() }
                             )
                         }
                     }   // ← if (!isAlbumMultiSelect)
@@ -1683,6 +1677,35 @@ private fun BatchTagDialog(
         onRemoveTag = { _ -> },
         onDismiss = onDismiss
     )
+}
+
+// ══════════════════════════════════════
+//  统一 TopBar Action 按钮组件
+// ══════════════════════════════════════
+
+/**
+ * TopAppBar actions 统一按钮：36dp 圆形容器 + 22dp 图标 + onSurfaceVariant 色调
+ */
+@Composable
+private fun TopBarActionButton(
+    painter: Painter,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            painter = painter,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp)
+        )
+    }
 }
 
 // ══════════════════════════════════════
@@ -2375,14 +2398,14 @@ private class ParentHeaderVH(
                 clipToOutline = true
                 setBackgroundColor(android.graphics.Color.argb(25, 255, 255, 255))
             }
-            val folderIcon = TextView(ctx).apply {
-                text = "📁"
-                textSize = 32f
-                gravity = android.view.Gravity.CENTER
+            val folderIcon = ImageView(ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
+                    (32 * density).toInt(),
+                    (32 * density).toInt(),
+                    android.view.Gravity.CENTER
                 )
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setImageResource(com.example.rcgallery.R.drawable.ic_collection)
             }
             coverFrame.addView(folderIcon)
             row.addView(coverFrame)
