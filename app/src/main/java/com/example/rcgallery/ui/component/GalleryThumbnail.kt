@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.component
 
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -30,13 +31,14 @@ fun GalleryThumbnail(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     placeholderColor: Color = Color.LightGray.copy(alpha = 0.3f),
-    targetSize: Int = 200
+    targetSize: Int = 120
 ) {
     val context = LocalContext.current
     AsyncImage(
         model = ImageRequest.Builder(context)
             .data(uri)
             .size(targetSize)
+            .bitmapConfig(Bitmap.Config.RGB_565)
             .crossfade(false)
             .build(),
         contentDescription = contentDescription,
