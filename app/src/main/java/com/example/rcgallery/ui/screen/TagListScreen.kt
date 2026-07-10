@@ -1,8 +1,10 @@
 package com.example.rcgallery.ui.screen
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -14,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,10 +28,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
 import com.example.rcgallery.ui.component.GalleryThumbnail
+import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.viewmodel.GalleryViewModel
 
 /** 筛选类型 */
@@ -75,9 +82,30 @@ fun TagListScreen(
     // ── 筛选类型 ──
     var activeFilter by remember { mutableStateOf(FilterType.ALBUM) }
 
+    // ── 多选状态 ──
+    var isTagMediaMultiSelect by remember { mutableStateOf(false) }
+    var tagSelectedMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showTagBatchTagDialog by remember { mutableStateOf(false) }
+    var showTagPickDialog by remember { mutableStateOf(false) }
+    var tagPendingPickItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    fun exitTagMediaMultiSelect() {
+        isTagMediaMultiSelect = false
+        tagSelectedMediaUris = emptySet()
+        showTagBatchTagDialog = false
+        showTagPickDialog = false
+        tagPendingPickItems = emptyList()
+    }
+    fun toggleTagMediaSelection(item: MediaItem) {
+        val uri = item.uri.toString()
+        tagSelectedMediaUris = if (uri in tagSelectedMediaUris) tagSelectedMediaUris - uri
+                               else tagSelectedMediaUris + uri
+    }
+
     // ── 搜索结果 ──
     var searchAlbums by remember { mutableStateOf<List<Album>>(emptyList()) }
     val searchMedia by viewModel.tagSearchResults.collectAsState()
+    val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
+    val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
     var isSearching by remember { mutableStateOf(false) }
     // ── 媒体删除后自动刷新：overlay 关闭重新搜索 ──
     var hasSearchRun by remember { mutableStateOf(false) }
@@ -108,6 +136,9 @@ fun TagListScreen(
     }
     if (selectedMediaIndex >= 0) {
         BackHandler { selectedMediaIndex = -1 }
+    }
+    if (isTagMediaMultiSelect && selectedAlbum == null && selectedMediaIndex < 0) {
+        BackHandler { exitTagMediaMultiSelect() }
     }
 
     // 通知父层显示/隐藏底部导航栏
@@ -149,16 +180,52 @@ fun TagListScreen(
     val mediaGroups = remember(flatFilteredMedia) {
         flatFilteredMedia.groupBy { it.albumName ?: "未分类" }
     }
-    // 预计算 index 映射（O(n) → 后续 O(1) 查询，避免 indexOf O(n²)）
-    val indexMap = remember(flatFilteredMedia) {
-        flatFilteredMedia.withIndex().associate { (idx, item) -> item to idx }
-    }
     // 每个分组的折叠状态
     val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
+            // ═══ 多选模式：顶部工具栏 ═══
+            if (isTagMediaMultiSelect) {
+                Surface(
+                    tonalElevation = 2.dp,
+                    shadowElevation = 4.dp,
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(onClick = { exitTagMediaMultiSelect() }) {
+                            Text("取消")
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "已选 ${tagSelectedMediaUris.size} 项",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.weight(1f))
+                        val allSelected = flatFilteredMedia.isNotEmpty() &&
+                            flatFilteredMedia.all { it.uri.toString() in tagSelectedMediaUris }
+                        TextButton(onClick = {
+                            if (allSelected) {
+                                tagSelectedMediaUris = emptySet()
+                            } else {
+                                tagSelectedMediaUris = flatFilteredMedia.map { it.uri.toString() }.toSet()
+                            }
+                        }) {
+                            Text(if (allSelected) "取消全选" else "全选", fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+
             // ═══ ① 搜索栏 ═══
+            if (!isTagMediaMultiSelect) {
             Surface(
                 tonalElevation = 2.dp,
                 shadowElevation = 4.dp,
@@ -251,9 +318,10 @@ fun TagListScreen(
                     }
                 }
             }
+            }
 
             // ═══ ② TAG 选择区（1/4 区域，椭圆 chips） ═══
-            if (sortedTags.isNotEmpty()) {
+            if (!isTagMediaMultiSelect && sortedTags.isNotEmpty()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -359,6 +427,7 @@ fun TagListScreen(
             }
 
             // ═══ ③ 筛选器 chips ═══
+            if (!isTagMediaMultiSelect) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -408,6 +477,7 @@ fun TagListScreen(
             }
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp))
+            }
 
             // ═══ ④ 结果区域（3/4 剩余空间） ═══
             // 当 overlay 显示时隐藏滚动内容，防止 Compose 手势拦截 VideoPlayer seek 拖拽
@@ -488,9 +558,22 @@ fun TagListScreen(
                         } else {
                             GroupedMediaList(
                                 groups = mediaGroups,
-                                indexMap = indexMap,
                                 collapsedGroups = collapsedGroups,
-                                onMediaClick = { idx -> selectedMediaIndex = idx }
+                                onMediaClick = { item ->
+                                    val idx = flatFilteredMedia.indexOf(item)
+                                    if (idx >= 0) selectedMediaIndex = idx
+                                },
+                                isMultiSelectMode = isTagMediaMultiSelect,
+                                selectedUris = tagSelectedMediaUris,
+                                onMediaLongClick = { item ->
+                                    if (!isTagMediaMultiSelect) {
+                                        isTagMediaMultiSelect = true
+                                        tagSelectedMediaUris = setOf(item.uri.toString())
+                                    }
+                                },
+                                onMediaTapInMultiSelect = { item ->
+                                    toggleTagMediaSelection(item)
+                                }
                             )
                         }
                     }
@@ -502,15 +585,52 @@ fun TagListScreen(
                         } else {
                             GroupedMediaList(
                                 groups = mediaGroups,
-                                indexMap = indexMap,
                                 collapsedGroups = collapsedGroups,
-                                onMediaClick = { idx -> selectedMediaIndex = idx }
+                                onMediaClick = { item ->
+                                    val idx = flatFilteredMedia.indexOf(item)
+                                    if (idx >= 0) selectedMediaIndex = idx
+                                },
+                                isMultiSelectMode = isTagMediaMultiSelect,
+                                selectedUris = tagSelectedMediaUris,
+                                onMediaLongClick = { item ->
+                                    if (!isTagMediaMultiSelect) {
+                                        isTagMediaMultiSelect = true
+                                        tagSelectedMediaUris = setOf(item.uri.toString())
+                                    }
+                                },
+                                onMediaTapInMultiSelect = { item ->
+                                    toggleTagMediaSelection(item)
+                                }
                             )
                         }
                     }
                 }
                 }
             }
+        }
+
+        // ── 多选浮动按钮 ──
+        if (isTagMediaMultiSelect && tagSelectedMediaUris.isNotEmpty()) {
+            FloatingMultiSelectButtons(
+                selectedCount = tagSelectedMediaUris.size,
+                onBatchTag = { showTagBatchTagDialog = true },
+                onDeleteToTrash = {
+                    val toDelete = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
+                    toDelete.forEach { item -> viewModel.moveToTrash(item) }
+                    exitTagMediaMultiSelect()
+                },
+                onAddToClipboard = {
+                    val items = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
+                    viewModel.addToClipboard(items)
+                    exitTagMediaMultiSelect()
+                },
+                onPickTargetAlbum = {
+                    tagPendingPickItems = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
+                    exitTagMediaMultiSelect()
+                    showTagPickDialog = true
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 16.dp)
+            )
         }
 
         // ═══ ⑤ Overlays ═══
@@ -537,18 +657,59 @@ fun TagListScreen(
                 items = flatFilteredMedia
             )
         }
+
+        // ── 批量 TAG 对话框 ──
+        if (showTagBatchTagDialog) {
+            val batchMediaPaths = flatFilteredMedia
+                .filter { it.uri.toString() in tagSelectedMediaUris }
+                .map { it.filePath }
+            TagManageDialog(
+                title = "批量加标签 - 已选 ${batchMediaPaths.size} 个文件",
+                existingTags = emptyList(),
+                allTags = allTags,
+                onAddTag = { tagName ->
+                    batchMediaPaths.forEach { filePath ->
+                        viewModel.addMediaTag(filePath, tagName)
+                    }
+                    showTagBatchTagDialog = false
+                    exitTagMediaMultiSelect()
+                },
+                onRemoveTag = { _ -> },
+                onDismiss = { showTagBatchTagDialog = false }
+            )
+        }
+
+        // ── 选择目标相册对话框 ──
+        if (showTagPickDialog) {
+            AlbumPickDialog(
+                albums = allAlbums,
+                recentMoveAlbums = recentMoveAlbums,
+                onAlbumSelected = { targetDir, targetName, mode ->
+                    if (tagPendingPickItems.isNotEmpty()) {
+                        viewModel.addToClipboard(tagPendingPickItems)
+                        tagPendingPickItems = emptyList()
+                    }
+                    showTagPickDialog = false
+                },
+                onDismiss = { showTagPickDialog = false }
+            )
+        }
     }
 }
 
 // ═══════════════════════════════════════════════
 // 分组媒体列表（相册名 header + 每行独立懒加载）
 // ═══════════════════════════════════════════════
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GroupedMediaList(
     groups: Map<String, List<MediaItem>>,
-    indexMap: Map<MediaItem, Int>,
     collapsedGroups: MutableMap<String, Boolean>,
-    onMediaClick: (Int) -> Unit
+    onMediaClick: (MediaItem) -> Unit,
+    isMultiSelectMode: Boolean = false,
+    selectedUris: Set<String> = emptySet(),
+    onMediaLongClick: ((MediaItem) -> Unit)? = null,
+    onMediaTapInMultiSelect: ((MediaItem) -> Unit)? = null
 ) {
     LazyColumn(
         modifier = Modifier
@@ -618,24 +779,47 @@ private fun GroupedMediaList(
                     ) {
                         Row(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
                             row.forEach { item ->
-                                val idx = indexMap[item] ?: 0
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .aspectRatio(1f)
-                                        .padding(2.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(
-                                            MaterialTheme.colorScheme.surfaceVariant
-                                                .copy(alpha = 0.4f)
-                                        )
-                                        .clickable { onMediaClick(idx) }
-                                ) {
-                                    GalleryThumbnail(
-                                        uri = item.uri,
-                                        contentDescription = item.fileName,
-                                        targetSize = 100
+                                val isSelected = item.uri.toString() in selectedUris
+                                val cellModifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(1f)
+                                    .padding(2.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        if (isSelected) Color(0xFF448AFF).copy(alpha = 0.15f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                                     )
+                                val finalModifier = if (isMultiSelectMode) {
+                                    cellModifier.clickable { onMediaTapInMultiSelect?.invoke(item) }
+                                } else {
+                                    cellModifier.combinedClickable(
+                                        onClick = { onMediaClick(item) },
+                                        onLongClick = { onMediaLongClick?.invoke(item) }
+                                    )
+                                }
+                                Box(modifier = finalModifier) {
+                                    Box(modifier = Modifier.matchParentSize()) {
+                                        GalleryThumbnail(
+                                            uri = item.uri,
+                                            contentDescription = item.fileName,
+                                            targetSize = 100
+                                        )
+                                        if (isSelected) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .matchParentSize()
+                                                    .background(Color.Black.copy(alpha = 0.25f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = "已选",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(28.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             // 填充最后一行空位
