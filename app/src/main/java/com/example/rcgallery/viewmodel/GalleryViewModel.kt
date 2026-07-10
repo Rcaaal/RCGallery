@@ -10,6 +10,9 @@ import com.example.rcgallery.data.TagRepository
 import com.example.rcgallery.data.TrashManager
 import com.example.rcgallery.data.ViewHistoryRepository
 import com.example.rcgallery.data.db.ViewHistoryEntity
+import com.example.rcgallery.data.db.AppDatabase
+import com.example.rcgallery.data.db.ParentAlbumEntity
+import com.example.rcgallery.data.db.ParentChildEntity
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDevice
 import com.example.rcgallery.data.smb.SmbFileInfo
@@ -37,10 +40,13 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import java.io.File
 import java.util.UUID
 import org.json.JSONArray
@@ -207,6 +213,137 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _fileConflict.value = null
         conflictContinuation?.cancel()
         conflictContinuation = null
+    }
+
+    // ── ══════════════════════════════════════
+    //   层级相册（父级虚拟容器 + 子级关系）
+    // ══════════════════════════════════════
+
+    private val parentAlbumDao = AppDatabase.getInstance(getApplication()).parentAlbumDao()
+
+    /** 所有父级实体 */
+    private val _parentEntities = MutableStateFlow<List<ParentAlbumEntity>>(emptyList())
+    val parentEntities: StateFlow<List<ParentAlbumEntity>> = _parentEntities.asStateFlow()
+
+    /** 把父级实体列表转成 Album 对象（供排序/展示用） */
+    val parentAlbumsList: StateFlow<List<Album>> = _parentEntities.map { entities ->
+        entities.map { p ->
+            Album(
+                bucketId = "parent:${p.id}",
+                bucketName = p.name,
+                coverUri = Uri.EMPTY,
+                count = 0,
+                totalSize = 0L,
+                directoryPath = "__parent__:${p.id}",
+                dateAdded = p.createdAt
+            )
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** parentId → child bucketIds 的映射 */
+    private val _parentChildrenBucketMap = MutableStateFlow<Map<Long, List<String>>>(emptyMap())
+    val parentChildrenBucketMap: StateFlow<Map<Long, List<String>>> = _parentChildrenBucketMap.asStateFlow()
+
+    /** 所有子相册的 bucketId 集合（用于根层过滤） */
+    val allChildBucketIds: StateFlow<Set<String>> = _parentChildrenBucketMap.map { map ->
+        map.values.flatten().toSet()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    /** parentId 对应的子相册 Album 对象列表 */
+    fun getChildrenAlbumsForParent(parentId: Long): List<Album> {
+        val childBucketIds = _parentChildrenBucketMap.value[parentId] ?: emptyList()
+        return _albums.value.filter { it.bucketId in childBucketIds }
+    }
+
+    init { loadParents() }
+
+    private fun loadParents() {
+        viewModelScope.launch {
+            parentAlbumDao.getAllParents().collect { entities ->
+                _parentEntities.value = entities
+            }
+        }
+        viewModelScope.launch {
+            parentAlbumDao.getAllChildrenFlow().collect { children ->
+                _parentChildrenBucketMap.value = children.groupBy({ it.parentId }, { it.childBucketId })
+            }
+        }
+    }
+
+    /** 创建父级相册 */
+    fun createParentAlbum(name: String, onResult: (Result<ParentAlbumEntity>) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                val id = withContext(Dispatchers.IO) {
+                    parentAlbumDao.insertParent(ParentAlbumEntity(name = name.trim()))
+                }
+                onResult(Result.success(ParentAlbumEntity(id = id, name = name.trim())))
+            } catch (e: Exception) {
+                onResult(Result.failure(e))
+            }
+        }
+    }
+
+    /** 重命名父级相册 */
+    fun renameParentAlbum(id: Long, newName: String, onResult: (Result<Unit>) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    parentAlbumDao.renameParent(id, newName.trim())
+                }
+                onResult(Result.success(Unit))
+            } catch (e: Exception) {
+                onResult(Result.failure(e))
+            }
+        }
+    }
+
+    /** 删除父级相册（同时删除所有子级关系） */
+    fun deleteParentAlbum(id: Long) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                parentAlbumDao.removeAllChildren(id)
+                parentAlbumDao.deleteParentById(id)
+            }
+        }
+    }
+
+    /** 为父级相册添加子相册 */
+    fun addChildrenToParent(parentId: Long, childBucketIds: List<String>) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val existing = parentAlbumDao.getChildBucketIdsForParent(parentId).toSet()
+                val newItems = childBucketIds.filterNot { it in existing }
+                    .mapIndexed { index, bucketId ->
+                        ParentChildEntity(
+                            parentId = parentId,
+                            childBucketId = bucketId,
+                            orderIndex = existing.size + index
+                        )
+                    }
+                parentAlbumDao.addChildren(newItems)
+            }
+        }
+    }
+
+    /** 从父级相册移出子相册（不删除相册本身） */
+    fun removeChildFromParent(parentId: Long, childBucketId: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                parentAlbumDao.removeChildByBucketId(parentId, childBucketId)
+            }
+        }
+    }
+
+    /** 批量移出子相册 */
+    fun removeChildrenFromParent(parentId: Long, childBucketIds: List<String>) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                childBucketIds.forEach { bucketId ->
+                    parentAlbumDao.removeChildByBucketId(parentId, bucketId)
+                }
+            }
+        }
     }
 
     // ── 筛选规则系统 ──
