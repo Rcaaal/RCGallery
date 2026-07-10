@@ -320,36 +320,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** 删除父级相册（完整清理：共享 TAG → 子级 TAG → 共享关系 → 父子关系 → 父级） */
+    /** 删除父级相册（只删共享关系 + 父子关系 + 父级，不清理子级真实 TAG） */
     fun deleteParentAlbum(id: Long) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                // ① 读取该父级的共享 TAG 绑定
-                val sharedTags = parentSharedTagDao.getTagsForParent(id)
-                val tagIdSet = sharedTags.map { it.tagId }.distinct()
-                // ② 读取所有子级
-                val childBucketIds = parentAlbumDao.getChildBucketIdsForParent(id)
-                val childAlbums = _albums.value.filter { it.bucketId in childBucketIds }
-
-                // ③ 对每个子级清理共享 TAG
-                for (tagId in tagIdSet) {
-                    for (child in childAlbums) {
-                        tagRepository.removeTagFromTarget(tagId, tagRepository.albumKey(child.directoryPath))
-                        val items = repository.loadMediaItems(albumId = child.bucketId, pageSize = 10000)
-                            .getOrDefault(emptyList())
-                        items.forEach { item ->
-                            if (item.filePath.isNotEmpty()) {
-                                tagRepository.removeTagFromTarget(tagId, tagRepository.mediaKey(item.filePath))
-                            }
-                        }
-                    }
-                }
-
-                // ④ 删除父级共享 TAG 关系
+                // ① 删除父级共享 TAG 关系
                 parentSharedTagDao.removeAllTagsForParent(id)
-                // ⑤ 删除父子关系
+                // ② 删除父子关系
                 parentAlbumDao.removeAllChildren(id)
-                // ⑥ 删除父级
+                // ③ 删除父级
                 parentAlbumDao.deleteParentById(id)
             }
         }
