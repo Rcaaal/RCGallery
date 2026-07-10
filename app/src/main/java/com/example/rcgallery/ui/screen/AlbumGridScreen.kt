@@ -159,22 +159,24 @@ fun AlbumGridScreen(
     val parentEntities by viewModel.parentEntities.collectAsStateWithLifecycle()
     val parentChildrenBucketMap by viewModel.parentChildrenBucketMap.collectAsStateWithLifecycle()
     val allChildBucketIds by viewModel.allChildBucketIds.collectAsStateWithLifecycle()
-    val parentAlbumsList by viewModel.parentAlbumsList.collectAsStateWithLifecycle()
 
-    // Grid 模式 badge map：子相册 bucketId → 父级名称
-    val parentBadgeMap = remember(parentChildrenBucketMap, parentEntities) {
-        val result = mutableMapOf<String, String>()
+    // Grid/List 统一父子关系查找：一次遍历 parentChildrenBucketMap 构建两个 map
+    val parentBadgeMap: Map<String, String>
+    val childToParentMap: Map<String, Long>
+    val result = remember(parentChildrenBucketMap, parentEntities) {
+        val badge = mutableMapOf<String, String>()
+        val lookup = mutableMapOf<String, Long>()
         for ((parentId, childBucketIds) in parentChildrenBucketMap) {
             val parentName = parentEntities.find { it.id == parentId }?.name ?: continue
-            childBucketIds.forEach { result[it] = parentName }
+            childBucketIds.forEach { bucketId ->
+                badge[bucketId] = parentName
+                lookup[bucketId] = parentId
+            }
         }
-        result
+        Triple(badge, lookup, Unit)
     }
-
-    // 合并层级相册父级到原始列表（供排序+过滤使用）
-    val mergedAlbums = remember(parentAlbumsList, rawAlbums) {
-        parentAlbumsList + rawAlbums
-    }
+    parentBadgeMap = result.first
+    childToParentMap = result.second
 
     // ── 相册显示模式 & 排序模式（持久化，需在 remember(albums) 之前声明）──
     val prefs = context.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -235,9 +237,9 @@ fun AlbumGridScreen(
         }
     }
 
-    // 本地排序：星标相册永久置顶，再按当前排序模式排列
-    val albums = remember(mergedAlbums, starredIds, albumSortMode, recentAccessMap) {
-        mergedAlbums.sortedWith(
+    // 本地排序：星标相册永久置顶，再按当前排序模式排列（只针对真实相册，不混入父级占位对象）
+    val albums = remember(rawAlbums, starredIds, albumSortMode, recentAccessMap) {
+        rawAlbums.sortedWith(
             compareByDescending<Album> { it.bucketId in starredIds }
                 .then(when (albumSortMode) {
                     AlbumSortMode.DATE -> compareByDescending { it.dateAdded }
@@ -465,31 +467,6 @@ fun AlbumGridScreen(
         else filteredAlbums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }
     }
 
-    // Grid 模式扁平列表：父级位置替换为其子相册，无子级父级不显示
-    val gridAlbums = remember(displayAlbums, parentChildrenBucketMap, allChildBucketIds) {
-        val hasParentAlbums = displayAlbums.any { it.bucketId.startsWith("parent:") }
-        if (!hasParentAlbums) {
-            displayAlbums
-        } else {
-            val result = mutableListOf<Album>()
-            for (album in displayAlbums) {
-                // 跳过子相册（将在父级位置统一插入）
-                if (album.bucketId in allChildBucketIds) continue
-                // 父级占位对象 → 替换为子相册（有子级时），无子级时直接跳过
-                if (album.bucketId.startsWith("parent:")) {
-                    val parentId = album.bucketId.removePrefix("parent:").toLongOrNull()
-                    if (parentId != null) {
-                        val childBucketIds = parentChildrenBucketMap[parentId] ?: emptyList()
-                        val childAlbums = displayAlbums.filter { it.bucketId in childBucketIds }
-                        result.addAll(childAlbums)
-                    }
-                } else {
-                    result.add(album)
-                }
-            }
-            result
-        }
-    }
 
     var showFilterPage by remember { mutableStateOf(false) }
 
@@ -609,7 +586,7 @@ fun AlbumGridScreen(
                     parentChildrenBucketMap = parentChildrenBucketMap,
                     allChildBucketIds = allChildBucketIds,
                     parentBadgeMap = parentBadgeMap,
-                    gridAlbums = gridAlbums,
+                    childToParentMap = childToParentMap,
                     onCreateParent = { name, onResult -> viewModel.createParentAlbum(name, onResult) },
                     onRenameParent = { id, name, onResult -> viewModel.renameParentAlbum(id, name, onResult) },
                     onDeleteParent = { id -> viewModel.deleteParentAlbum(id) },
@@ -920,7 +897,7 @@ private fun AlbumGridContent(
     parentChildrenBucketMap: Map<Long, List<String>> = emptyMap(),
     allChildBucketIds: Set<String> = emptySet(),
     parentBadgeMap: Map<String, String> = emptyMap(),
-    gridAlbums: List<Album> = emptyList(),
+    childToParentMap: Map<String, Long> = emptyMap(),
     onCreateParent: (String, (Result<ParentAlbumEntity>) -> Unit) -> Unit = { _, _ -> },
     onRenameParent: (Long, String, (Result<Unit>) -> Unit) -> Unit = { _, _, _ -> },
     onDeleteParent: (Long) -> Unit = {},
@@ -988,25 +965,12 @@ private fun AlbumGridContent(
     var selectedChildIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var isChildSelectMode by remember { mutableStateOf(false) }
     var showCreateParentDialog by remember { mutableStateOf(false) }
-
-    // 父级排序位置匹配：在排序后列表中，如果 album 的位置与父级创建时间/名称匹配，则在此插入
-    fun matchesParentPosition(parent: ParentAlbumEntity, album: Album, allAlbums: List<Album>, sortMode: AlbumSortMode): Boolean {
-        val parentIdx = allAlbums.indexOfFirst { it.bucketId == "parent:${parent.id}" }
-        val albumIdx = allAlbums.indexOf(album)
-        if (parentIdx < 0 || albumIdx < 0) return false
-        // 父级按排序值（dateAdded 作为 createdAt 的替代）排在相册列表中的位置
-        // 使用 Album 模拟的父级排序属性定位
-        val mockParent = Album(
-            bucketId = "parent:${parent.id}", bucketName = parent.name, coverUri = Uri.EMPTY,
-            count = 0, directoryPath = "__parent__:${parent.id}", dateAdded = parent.createdAt
-        )
-        val comparator = albumSortComparator(sortMode)
-        // 父级在当前相册之前或之后的位置
-        return comparator.compare(mockParent, album) <= 0
-    }
-
-    // ── 层级相册 Grid 模式 badge map：bucketId -> parentName ──
-    // parentBadgeMap 由外部传入
+    // ── 解散/移出确认状态 ──
+    var showDeleteParentConfirm by remember { mutableStateOf(false) }
+    var targetDeleteParentId by remember { mutableStateOf<Long?>(null) }
+    var showRemoveChildConfirm by remember { mutableStateOf(false) }
+    var targetRemoveParentId by remember { mutableStateOf<Long?>(null) }
+    var targetRemoveChildBucketId by remember { mutableStateOf<String?>(null) }
 
     // ── 创建父级对话框 ──
     if (showCreateParentDialog) {
@@ -1144,6 +1108,79 @@ private fun AlbumGridContent(
                 ) { Text("添加 (${selectedAddBucketIds.size})") }
             },
             dismissButton = { TextButton(onClick = { showAddChildDialog = false; addToParentId = null }) { Text("取消") } }
+        )
+    }
+
+    // ── 解散父级确认对话框 ──
+    if (showDeleteParentConfirm && targetDeleteParentId != null) {
+        val parentName = parentEntities.find { it.id == targetDeleteParentId }?.name ?: "未知"
+        AlertDialog(
+            onDismissRequest = { showDeleteParentConfirm = false; targetDeleteParentId = null },
+            title = { Text("解散父级相册") },
+            text = {
+                Column {
+                    Text("确认解散「${parentName}」？")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "• 子相册会回到根层",
+                        fontSize = 13.sp,
+                        color = Color(0xFFCCCCCC)
+                    )
+                    Text(
+                        "• 不会删除子相册本身",
+                        fontSize = 13.sp,
+                        color = Color(0xFFCCCCCC)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteParent(targetDeleteParentId!!)
+                        showDeleteParentConfirm = false
+                        targetDeleteParentId = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("确认解散") }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteParentConfirm = false; targetDeleteParentId = null }) { Text("取消") } }
+        )
+    }
+
+    // ── 移出子相册确认对话框 ──
+    if (showRemoveChildConfirm && targetRemoveParentId != null && targetRemoveChildBucketId != null) {
+        val childAlbum = albums.find { it.bucketId == targetRemoveChildBucketId }
+        val childName = childAlbum?.bucketName ?: "此相册"
+        AlertDialog(
+            onDismissRequest = { showRemoveChildConfirm = false; targetRemoveParentId = null; targetRemoveChildBucketId = null },
+            title = { Text("移出子相册") },
+            text = {
+                Column {
+                    Text("确认将「${childName}」从父级中移出？")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "移出后该相册将回到根层",
+                        fontSize = 13.sp,
+                        color = Color(0xFFCCCCCC)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRemoveChild(targetRemoveParentId!!, targetRemoveChildBucketId!!)
+                        showRemoveChildConfirm = false
+                        targetRemoveParentId = null
+                        targetRemoveChildBucketId = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("确认移出") }
+            },
+            dismissButton = { TextButton(onClick = { showRemoveChildConfirm = false; targetRemoveParentId = null; targetRemoveChildBucketId = null }) { Text("取消") } }
         )
     }
 
@@ -1382,38 +1419,68 @@ private fun AlbumGridContent(
             if (!isDateView) {
             // ── 层级相册：扁平 items 列表（List 模式用）──
             val isListMode = displayMode is AlbumDisplayMode.List
-            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, expandedParentIds, isListMode, albumSortMode, starredIds, allChildBucketIds) {
+            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, childToParentMap, expandedParentIds, isListMode, albumSortMode, starredIds, allChildBucketIds) {
                 if (isListMode && parentEntities.isNotEmpty()) {
                     val result = mutableListOf<Any>()
+                    // 1. 分两类：空父级（顶置） / 有子级父级（进入排序流）
+                    val emptyParents = parentEntities.filter { parent ->
+                        parentChildrenBucketMap[parent.id].isNullOrEmpty()
+                    }
+                    val activeParents = parentEntities.filterNot { parent ->
+                        parentChildrenBucketMap[parent.id].isNullOrEmpty()
+                    }
+                    val activeParentIds = activeParents.map { it.id }.toSet()
+
+                    // 2. 第一段：空父级固定顶置，不展开
+                    emptyParents.forEach { parent ->
+                        result.add(ParentHeader(
+                            parentId = parent.id,
+                            parentName = parent.name,
+                            isExpanded = false,
+                            hasChildren = false
+                        ))
+                    }
+
+                    // 3. 第二段：遍历排序后的 albums，activeParent 在首个子相册处插入 header+子级
+                    val insertedActiveParentIds = mutableSetOf<Long>()
                     for (album in albums) {
-                        // 过滤：跳过子相册（已在父级下展示）
-                        if (album.bucketId in allChildBucketIds) continue
-                        // 查找该位置是否有父级
-                        val parent = parentEntities.find { matchesParentPosition(it, album, albums, albumSortMode) }
-                        if (parent != null) {
-                            val isExpanded = parent.id in expandedParentIds
-                            result.add(ParentHeader(parentId = parent.id, parentName = parent.name, isExpanded = isExpanded, hasChildren = (parentChildrenBucketMap[parent.id]?.isNotEmpty() == true)))
-                            if (isExpanded) {
-                                val childBucketIds = parentChildrenBucketMap[parent.id] ?: emptyList()
-                                val childAlbums = albums.filter { it.bucketId in childBucketIds }
-                                val sorted = childAlbums.sortedWith(
+                        val parentId = childToParentMap[album.bucketId]
+                        if (parentId != null && parentId in activeParentIds && parentId !in insertedActiveParentIds) {
+                            // 首次遇到 activeParent 的子相册：插入 header + 全部子级
+                            val parent = parentEntities.find { it.id == parentId } ?: continue
+                            val childIds = parentChildrenBucketMap[parentId] ?: emptyList()
+                            val sortedChildren = albums
+                                .filter { it.bucketId in childIds }
+                                .sortedWith(
                                     compareByDescending<Album> { it.bucketId in starredIds }
                                         .then(albumSortComparator(albumSortMode))
                                 )
-                                sorted.forEach { result.add(ChildRow(it.bucketId, parent.name, parent.id)) }
+                            insertedActiveParentIds.add(parentId)
+                            result.add(ParentHeader(
+                                parentId = parent.id,
+                                parentName = parent.name,
+                                isExpanded = parent.id in expandedParentIds,
+                                hasChildren = true
+                            ))
+                            if (parent.id in expandedParentIds) {
+                                sortedChildren.forEach { child ->
+                                    result.add(ChildRow(child.bucketId, parent.name, parent.id))
+                                }
                             }
-                        } else {
+                        } else if (parentId == null) {
+                            // 普通相册（不属于任何父级）
                             result.add(album)
                         }
+                        // 子相册但父级已插入 → skip
                     }
                     result
                 } else emptyList<Any>()
             }
             AndroidView(
                 factory = { ctx ->
-                    val adapterItems = if (displayMode is AlbumDisplayMode.Grid && gridAlbums.isNotEmpty()) gridAlbums else albums
+                    // Grid 模式使用 displayAlbums（由 albums 参数传入），List 模式用 albums 作查询后备
                     val adapter = AlbumGridAdapter(
-                        items = adapterItems,
+                        items = albums,
                         onClick = { album -> wrappedAlbumClick(album) },
                         onLongClick = onAlbumLongClick,
                         onToggleStar = onToggleStar,
@@ -1436,7 +1503,16 @@ private fun AlbumGridContent(
                         onToggleChildSelect = { bucketId ->
                             selectedChildIds = if (bucketId in selectedChildIds) selectedChildIds - bucketId else selectedChildIds + bucketId
                         },
-                        selectedChildIds = selectedChildIds
+                        selectedChildIds = selectedChildIds,
+                        onDeleteParentClick = { parentId ->
+                            targetDeleteParentId = parentId
+                            showDeleteParentConfirm = true
+                        },
+                        onRemoveChildClick = { parentId, bucketId ->
+                            targetRemoveParentId = parentId
+                            targetRemoveChildBucketId = bucketId
+                            showRemoveChildConfirm = true
+                        }
                     )
                     val rv = RecyclerView(ctx).apply {
                         layoutManager = when (displayMode) {
@@ -1468,7 +1544,8 @@ private fun AlbumGridContent(
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
                     val prevMode = adapter.currentMode
-                    adapter.items = if (displayMode is AlbumDisplayMode.Grid && gridAlbums.isNotEmpty()) gridAlbums else albums
+                    adapter.items = albums
+                    adapter.albumMap = albums.associateBy { it.bucketId }
                     adapter.starredIds = starredIds
                     adapter.albumTagsMap = albumTags
                     adapter.selectedIds = selectedAlbumIds
@@ -1631,13 +1708,16 @@ private class AlbumGridAdapter(
     var onParentLongClick: ((Long) -> Unit)? = null,
     var onAddChildClick: ((Long) -> Unit)? = null,
     var onToggleChildSelect: ((String) -> Unit)? = null,
-    var selectedChildIds: Set<String> = emptySet()
+    var selectedChildIds: Set<String> = emptySet(),
+    var onDeleteParentClick: ((Long) -> Unit)? = null,
+    var onRemoveChildClick: ((Long, String) -> Unit)? = null
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
     var starredIds: Set<String> = emptySet()
     var albumTagsMap: Map<String, List<TagEntity>> = emptyMap()
     var selectedIds: Set<String> = emptySet()  // 多选模式选中项 bucketId 集合
+    var albumMap: Map<String, Album> = emptyMap()  // bucketId → Album 快速查找
 
     init { setHasStableIds(true) }
 
@@ -1672,8 +1752,8 @@ private class AlbumGridAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             VIEW_TYPE_LIST -> ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
-            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onToggleChildSelect, selectedChildIds)
-            VIEW_TYPE_LIST_CHILD -> ChildRowVH.create(parent, onClick)
+            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onToggleChildSelect, selectedChildIds, onDeleteParentClick)
+            VIEW_TYPE_LIST_CHILD -> ChildRowVH.create(parent, onClick, onRemoveChildClick)
             else -> GridVH.create(parent, onClick, onGridLongClick ?: onLongClick, onToggleStar)
         }
     }
@@ -1690,7 +1770,7 @@ private class AlbumGridAdapter(
                     holder.bind(item, position, starredIds)
                 }
                 holder is ChildRowVH && item is ChildRow -> {
-                    val album = items.find { it.bucketId == item.bucketId }
+                    val album = albumMap[item.bucketId]
                     if (album != null) holder.bind(album, position)
                 }
                 holder is ListVH && item is Album -> {
@@ -2268,7 +2348,8 @@ private class ParentHeaderVH(
             onAddChildClick: ((Long) -> Unit)?,
             onToggleStar: (String) -> Unit,
             onToggleChildSelect: ((String) -> Unit)?,
-            selectedChildIds: Set<String>
+            selectedChildIds: Set<String>,
+            onDeleteParentClick: ((Long) -> Unit)? = null
         ): ParentHeaderVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
@@ -2295,7 +2376,6 @@ private class ParentHeaderVH(
                     (48 * density).toInt(),
                     (48 * density).toInt()
                 )
-                // 用文本显示文件夹图标
                 addView(TextView(ctx).apply {
                     text = "📁"
                     textSize = 24f
@@ -2369,6 +2449,21 @@ private class ParentHeaderVH(
             }
             headerRow.addView(addBtn)
 
+            // ── ⋮ 菜单按钮 ──
+            val menuBtn = TextView(ctx).apply {
+                text = "⋮"
+                textSize = 18f
+                setTextColor(android.graphics.Color.GRAY)
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    (40 * density).toInt(),
+                    (40 * density).toInt()
+                ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
+                isClickable = true
+                focusable = android.view.View.FOCUSABLE
+            }
+            headerRow.addView(menuBtn)
+
             // ── 星标 ──
             val starContainer = FrameLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -2429,6 +2524,27 @@ private class ParentHeaderVH(
                 onAddChildClick?.invoke(item.parentId)
             }
 
+            // ⋮ 菜单点击（弹出 PopupMenu）
+            menuBtn.setOnClickListener {
+                val pos = root.tag as? Int ?: return@setOnClickListener
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
+                val popup = android.widget.PopupMenu(ctx, menuBtn)
+                popup.menu.add(0, 1, 0, "重命名")
+                popup.menu.add(0, 2, 0, "添加子相册")
+                popup.menu.add(0, 3, 0, "解散父级")
+                popup.setOnMenuItemClickListener { menuItem ->
+                    when (menuItem.itemId) {
+                        1 -> { onParentLongClick?.invoke(item.parentId); true }
+                        2 -> { onAddChildClick?.invoke(item.parentId); true }
+                        3 -> { onDeleteParentClick?.invoke(item.parentId); true }
+                        else -> false
+                    }
+                }
+                popup.show()
+            }
+
             return vh
         }
     }
@@ -2455,7 +2571,7 @@ private class ChildRowVH(
 ) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
-        fun create(parent: ViewGroup, onClick: (Album) -> Unit): ChildRowVH {
+        fun create(parent: ViewGroup, onClick: (Album) -> Unit, onRemoveChildClick: ((Long, String) -> Unit)? = null): ChildRowVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
@@ -2484,7 +2600,7 @@ private class ChildRowVH(
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     weight = 1f
-                    setMargins((10 * density).toInt(), 0, 0, 0)
+                    setMargins((10 * density).toInt(), 0, (8 * density).toInt(), 0)
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
                 id = android.R.id.title
@@ -2495,13 +2611,38 @@ private class ChildRowVH(
             }
             root.addView(textTv)
 
+            // ── × 移出按钮 ──
+            val removeBtn = TextView(ctx).apply {
+                text = "✕"
+                textSize = 14f
+                setTextColor(android.graphics.Color.argb(180, 255, 100, 100))
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    (36 * density).toInt(),
+                    (36 * density).toInt()
+                ).apply { setMargins(0, 0, (8 * density).toInt(), 0) }
+                isClickable = true
+                focusable = android.view.View.FOCUSABLE
+                visibility = android.view.View.VISIBLE
+            }
+            root.addView(removeBtn)
+
             root.setOnClickListener {
                 val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
                 val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
                 val item = adapter.parentItems.getOrNull(pos) as? ChildRow ?: return@setOnClickListener
-                val album = adapter.items.find { it.bucketId == item.bucketId }
+                val album = adapter.albumMap[item.bucketId]
                 if (album != null) onClick(album)
+            }
+
+            // × 按钮点击：从父级移出
+            removeBtn.setOnClickListener {
+                val pos = root.tag as? Int ?: return@setOnClickListener
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val item = adapter.parentItems.getOrNull(pos) as? ChildRow ?: return@setOnClickListener
+                onRemoveChildClick?.invoke(item.parentId, item.bucketId)
             }
 
             return ChildRowVH(root)

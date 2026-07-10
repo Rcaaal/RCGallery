@@ -55,10 +55,10 @@ interface ParentAlbumDao {
     @Query("SELECT * FROM parent_children WHERE parentId = :parentId ORDER BY orderIndex ASC")
     suspend fun getChildrenForParent(parentId: Long): List<ParentChildEntity>
 
-    @Query("SELECT * FROM parent_children ORDER BY parentId")
+    @Query("SELECT * FROM parent_children ORDER BY parentId, orderIndex ASC")
     fun getAllChildrenFlow(): Flow<List<ParentChildEntity>>
 
-    @Query("SELECT * FROM parent_children ORDER BY parentId")
+    @Query("SELECT * FROM parent_children ORDER BY parentId, orderIndex ASC")
     suspend fun getAllChildrenOnce(): List<ParentChildEntity>
 
     @Query("SELECT childBucketId FROM parent_children WHERE parentId = :parentId ORDER BY orderIndex ASC")
