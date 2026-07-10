@@ -962,8 +962,6 @@ private fun AlbumGridContent(
     var showParentRenameDialog by remember { mutableStateOf(false) }
     var addToParentId by remember { mutableStateOf<Long?>(null) }
     var showAddChildDialog by remember { mutableStateOf(false) }
-    var selectedChildIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var isChildSelectMode by remember { mutableStateOf(false) }
     var showCreateParentDialog by remember { mutableStateOf(false) }
     // ── 解散/移出确认状态 ──
     var showDeleteParentConfirm by remember { mutableStateOf(false) }
@@ -1419,60 +1417,62 @@ private fun AlbumGridContent(
             if (!isDateView) {
             // ── 层级相册：扁平 items 列表（List 模式用）──
             val isListMode = displayMode is AlbumDisplayMode.List
-            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, childToParentMap, expandedParentIds, isListMode, albumSortMode, starredIds, allChildBucketIds) {
+            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, allChildBucketIds, expandedParentIds, isListMode, albumSortMode, starredIds) {
                 if (isListMode && parentEntities.isNotEmpty()) {
+                    // 统一排序：父级和普通相册在同一排序器中对等比较
+                    // 排序键：空父级 > 星标 > 在 albums 中的位置
+                    // 封装为 Triple(isEmptyParent, isStarred, position)
+                    data class SortKey(val isEmptyParent: Boolean, val isStarred: Boolean, val position: Int)
+
+                    fun sortKeyValue(k: SortKey): Long {
+                        val flag = (if (k.isEmptyParent) 1L shl 62 else 0L) or
+                                   (if (k.isStarred) 1L shl 61 else 0L)
+                        return flag or (Int.MAX_VALUE.toLong() - k.position)
+                    }
+
+                    val items = mutableListOf<Pair<Any, SortKey>>()
+
+                    // 父级
+                    for (parent in parentEntities) {
+                        val childIds = parentChildrenBucketMap[parent.id] ?: emptyList()
+                        val isEmpty = childIds.isEmpty()
+                        val firstChildPos = if (isEmpty) Int.MAX_VALUE
+                            else albums.indexOfFirst { it.bucketId in childIds }.let { if (it < 0) Int.MAX_VALUE else it }
+                        items.add(parent to SortKey(isEmpty, "parent:${parent.id}" in starredIds, firstChildPos))
+                    }
+
+                    // 普通相册（不属于任何父级）
+                    for ((idx, album) in albums.withIndex()) {
+                        if (album.bucketId !in allChildBucketIds) {
+                            items.add(album to SortKey(false, album.bucketId in starredIds, idx))
+                        }
+                    }
+
+                    // 按 sortKeyValue 降序排序（封装为 Long，一次比较）
+                    items.sortByDescending { sortKeyValue(it.second) }
+
+                    // ── 渲染 ──
                     val result = mutableListOf<Any>()
-                    // 1. 分两类：空父级（顶置） / 有子级父级（进入排序流）
-                    val emptyParents = parentEntities.filter { parent ->
-                        parentChildrenBucketMap[parent.id].isNullOrEmpty()
-                    }
-                    val activeParents = parentEntities.filterNot { parent ->
-                        parentChildrenBucketMap[parent.id].isNullOrEmpty()
-                    }
-                    val activeParentIds = activeParents.map { it.id }.toSet()
-
-                    // 2. 第一段：空父级固定顶置，不展开
-                    emptyParents.forEach { parent ->
-                        result.add(ParentHeader(
-                            parentId = parent.id,
-                            parentName = parent.name,
-                            isExpanded = false,
-                            hasChildren = false
-                        ))
-                    }
-
-                    // 3. 第二段：遍历排序后的 albums，activeParent 在首个子相册处插入 header+子级
-                    val insertedActiveParentIds = mutableSetOf<Long>()
-                    for (album in albums) {
-                        val parentId = childToParentMap[album.bucketId]
-                        if (parentId != null && parentId in activeParentIds && parentId !in insertedActiveParentIds) {
-                            // 首次遇到 activeParent 的子相册：插入 header + 全部子级
-                            val parent = parentEntities.find { it.id == parentId } ?: continue
-                            val childIds = parentChildrenBucketMap[parentId] ?: emptyList()
-                            val sortedChildren = albums
-                                .filter { it.bucketId in childIds }
-                                .sortedWith(
-                                    compareByDescending<Album> { it.bucketId in starredIds }
-                                        .then(albumSortComparator(albumSortMode))
-                                )
-                            insertedActiveParentIds.add(parentId)
-                            result.add(ParentHeader(
-                                parentId = parent.id,
-                                parentName = parent.name,
-                                isExpanded = parent.id in expandedParentIds,
-                                hasChildren = true
-                            ))
-                            if (parent.id in expandedParentIds) {
-                                sortedChildren.forEach { child ->
-                                    result.add(ChildRow(child.bucketId, parent.name, parent.id))
+                    for ((item, _) in items) {
+                        when (item) {
+                            is ParentAlbumEntity -> {
+                                val childIds = parentChildrenBucketMap[item.id] ?: emptyList()
+                                val isEmpty = childIds.isEmpty()
+                                result.add(ParentHeader(item.id, item.name, !isEmpty && item.id in expandedParentIds, childIds.size))
+                                if (!isEmpty && item.id in expandedParentIds) {
+                                    val sortedChildren = albums
+                                        .filter { it.bucketId in childIds }
+                                        .sortedWith(
+                                            compareByDescending<Album> { it.bucketId in starredIds }
+                                                .then(albumSortComparator(albumSortMode))
+                                        )
+                                    sortedChildren.forEach { result.add(ChildRow(it.bucketId, item.name, item.id)) }
                                 }
                             }
-                        } else if (parentId == null) {
-                            // 普通相册（不属于任何父级）
-                            result.add(album)
+                            is Album -> result.add(item)
                         }
-                        // 子相册但父级已插入 → skip
                     }
+
                     result
                 } else emptyList<Any>()
             }
@@ -1500,10 +1500,6 @@ private fun AlbumGridContent(
                             addToParentId = parentId
                             showAddChildDialog = true
                         },
-                        onToggleChildSelect = { bucketId ->
-                            selectedChildIds = if (bucketId in selectedChildIds) selectedChildIds - bucketId else selectedChildIds + bucketId
-                        },
-                        selectedChildIds = selectedChildIds,
                         onDeleteParentClick = { parentId ->
                             targetDeleteParentId = parentId
                             showDeleteParentConfirm = true
@@ -1707,8 +1703,6 @@ private class AlbumGridAdapter(
     var onParentClick: ((Long) -> Unit)? = null,
     var onParentLongClick: ((Long) -> Unit)? = null,
     var onAddChildClick: ((Long) -> Unit)? = null,
-    var onToggleChildSelect: ((String) -> Unit)? = null,
-    var selectedChildIds: Set<String> = emptySet(),
     var onDeleteParentClick: ((Long) -> Unit)? = null,
     var onRemoveChildClick: ((Long, String) -> Unit)? = null
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
@@ -1752,7 +1746,7 @@ private class AlbumGridAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             VIEW_TYPE_LIST -> ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
-            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onToggleChildSelect, selectedChildIds, onDeleteParentClick)
+            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onDeleteParentClick)
             VIEW_TYPE_LIST_CHILD -> ChildRowVH.create(parent, onClick, onRemoveChildClick)
             else -> GridVH.create(parent, onClick, onGridLongClick ?: onLongClick, onToggleStar)
         }
@@ -1771,7 +1765,7 @@ private class AlbumGridAdapter(
                 }
                 holder is ChildRowVH && item is ChildRow -> {
                     val album = albumMap[item.bucketId]
-                    if (album != null) holder.bind(album, position)
+                    if (album != null) holder.bind(album, position, item.parentName)
                 }
                 holder is ListVH && item is Album -> {
                     holder.bind(item, position, starredIds, albumTagsMap)
@@ -1798,7 +1792,7 @@ private data class ParentHeader(
     val parentId: Long,
     val parentName: String,
     val isExpanded: Boolean,
-    val hasChildren: Boolean
+    val childCount: Int
 )
 
 /** List 模式扁平 item 类型：子相册行 */
@@ -1958,7 +1952,11 @@ private class GridVH private constructor(
                 setTextSize(10f)
                 setTextColor(android.graphics.Color.WHITE)
                 setPadding((4 * density).toInt(), (2 * density).toInt(), (4 * density).toInt(), (2 * density).toInt())
-                setBackgroundColor(android.graphics.Color.argb(160, 0, 0, 0))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                    setCornerRadius((4 * density))
+                    setColor(android.graphics.Color.argb(160, 0, 0, 0))
+                }
                 tag = "parent_badge"
                 visibility = android.view.View.GONE
             }
@@ -2330,14 +2328,12 @@ private class ListVH private constructor(
 }
 
 // ── 层级相册：List 模式父级标头 ViewHolder ──
+// 与 ListVH 同骨架：64dp 封面区 + [badge+标题] + 副标题 + 星标 + 分隔线
 
 private class ParentHeaderVH(
     itemView: android.view.View,
     private val starContainer: FrameLayout,
-    private val starIv: ImageView,
-    private val onToggleStar: (String) -> Unit,
-    private val onToggleChildSelect: ((String) -> Unit)?,
-    private val selectedChildIds: Set<String>
+    private val starIv: ImageView
 ) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
@@ -2347,8 +2343,6 @@ private class ParentHeaderVH(
             onParentLongClick: ((Long) -> Unit)?,
             onAddChildClick: ((Long) -> Unit)?,
             onToggleStar: (String) -> Unit,
-            onToggleChildSelect: ((String) -> Unit)?,
-            selectedChildIds: Set<String>,
             onDeleteParentClick: ((Long) -> Unit)? = null
         ): ParentHeaderVH {
             val ctx = parent.context
@@ -2361,31 +2355,37 @@ private class ParentHeaderVH(
                 )
             }
 
-            // ── 头部行 ──
-            val headerRow = LinearLayout(ctx).apply {
+            // ── 内容行（与 ListVH 同骨架：封面 + 文字 + 星标）──
+            val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (6 * density).toInt()) }
+                ).apply { setMargins((12 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt()) }
             }
-
-            // 文件夹图标
-            val folderIcon = FrameLayout(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    (48 * density).toInt(),
-                    (48 * density).toInt()
-                )
-                addView(TextView(ctx).apply {
-                    text = "📁"
-                    textSize = 24f
-                    gravity = android.view.Gravity.CENTER
-                }, ViewGroup.LayoutParams(
+            // 封面区：64dp 圆角容器（与 ListVH 缩略图同尺寸），保持文件夹图标
+            val thumbSize = (64 * density).toInt()
+            val coverFrame = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, (ITEM_CORNER_RADIUS_DP * density))
+                    }
+                }
+                clipToOutline = true
+                setBackgroundColor(android.graphics.Color.argb(25, 255, 255, 255))
+            }
+            val folderIcon = TextView(ctx).apply {
+                text = "📁"
+                textSize = 32f
+                gravity = android.view.Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
-                ))
+                )
             }
-            headerRow.addView(folderIcon)
+            coverFrame.addView(folderIcon)
+            row.addView(coverFrame)
 
             // 文字列
             val textColumn = LinearLayout(ctx).apply {
@@ -2395,24 +2395,51 @@ private class ParentHeaderVH(
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     weight = 1f
-                    setMargins((10 * density).toInt(), 0, 0, 0)
+                    setMargins((12 * density).toInt(), 0, 0, 0)
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
             }
 
-            val nameTv = TextView(ctx).apply {
-                id = android.R.id.title
+            // ── 标题行：[badge "父级"] + [nameTv] ──
+            val titleRow = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
+            }
+            val badgeTv = TextView(ctx).apply {
+                text = "父级"
+                textSize = 10f
+                setTextColor(android.graphics.Color.argb(180, 255, 255, 255))
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((4 * density))
+                        setColor(android.graphics.Color.argb(60, 255, 255, 255))
+                    }
+                )
+                setPadding((4 * density).toInt(), (1 * density).toInt(), (4 * density).toInt(), (1 * density).toInt())
+                tag = "identity_badge"
+            }
+            titleRow.addView(badgeTv)
+            titleRow.addView(android.view.View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams((6 * density).toInt(), 0)
+            })
+            val nameTv = TextView(ctx).apply {
+                id = android.R.id.title
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { weight = 1f }
                 setTextSize(14f)
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 setTextColor(android.graphics.Color.WHITE)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
-            textColumn.addView(nameTv)
+            titleRow.addView(nameTv)
+            textColumn.addView(titleRow)
 
             val countTv = TextView(ctx).apply {
                 id = android.R.id.summary
@@ -2420,111 +2447,75 @@ private class ParentHeaderVH(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
-                setTextSize(11f)
+                setTextSize(12f)
                 setTextColor(android.graphics.Color.GRAY)
+                maxLines = 1
             }
             textColumn.addView(countTv)
 
-            headerRow.addView(textColumn)
+            row.addView(textColumn)
 
-            // ── ⊕ 添加按钮 ──
-            val addBtn = TextView(ctx).apply {
-                text = "+"
-                textSize = 16f
-                setTextColor(android.graphics.Color.WHITE)
-                gravity = android.view.Gravity.CENTER
+            // ── ⋮ 菜单按钮（48dp 容器 + 24dp 图标，与星标同规格）──
+            val menuBtn = FrameLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    (40 * density).toInt(),
-                    (40 * density).toInt()
-                ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
-                setBackgroundDrawable(
-                    android.graphics.drawable.GradientDrawable().apply {
-                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
-                        setColor(android.graphics.Color.argb(180, 100, 180, 100))
-                    }
+                    (48 * density).toInt(),
+                    (48 * density).toInt()
+                ).apply { setMargins(0, 0, (3 * density).toInt(), 0); gravity = android.view.Gravity.CENTER_VERTICAL }
+                isClickable = true
+                focusable = View.FOCUSABLE
+            }
+            val menuIv = ImageView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (24 * density).toInt(),
+                    (24 * density).toInt(),
+                    android.view.Gravity.CENTER
                 )
-                isClickable = true
-                focusable = android.view.View.FOCUSABLE
-                visibility = android.view.View.VISIBLE
+                scaleType = ImageView.ScaleType.FIT_XY
+                setImageBitmap(createVerticalDotsBitmap((24 * density).toInt(), (24 * density).toInt(), android.graphics.Color.GRAY))
             }
-            headerRow.addView(addBtn)
+            menuBtn.addView(menuIv)
+            row.addView(menuBtn)
 
-            // ── ⋮ 菜单按钮 ──
-            val menuBtn = TextView(ctx).apply {
-                text = "⋮"
-                textSize = 18f
-                setTextColor(android.graphics.Color.GRAY)
-                gravity = android.view.Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(
-                    (40 * density).toInt(),
-                    (40 * density).toInt()
-                ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
-                isClickable = true
-                focusable = android.view.View.FOCUSABLE
-            }
-            headerRow.addView(menuBtn)
-
-            // ── 星标 ──
+            // ── 星标（48dp 容器 + 24dp 图标，与 ListVH 一致）──
             val starContainer = FrameLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    (40 * density).toInt(),
-                    (40 * density).toInt()
-                )
+                    (48 * density).toInt(),
+                    (48 * density).toInt()
+                ).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
                 isClickable = true
                 focusable = View.FOCUSABLE
             }
             val starIv = ImageView(ctx).apply {
                 layoutParams = FrameLayout.LayoutParams(
-                    (22 * density).toInt(),
-                    (22 * density).toInt(),
+                    (24 * density).toInt(),
+                    (24 * density).toInt(),
                     android.view.Gravity.CENTER
                 )
                 scaleType = ImageView.ScaleType.FIT_XY
                 setImageResource(com.example.rcgallery.R.drawable.ic_star)
             }
             starContainer.addView(starIv)
-            headerRow.addView(starContainer)
+            row.addView(starContainer)
 
-            root.addView(headerRow)
+            root.addView(row)
 
-            // ── 浅底色背景（区分父级标头）──
-            root.setBackgroundDrawable(
-                android.graphics.drawable.GradientDrawable().apply {
-                    setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                    setCornerRadius((8 * density))
-                    setColor(android.graphics.Color.argb(20, 255, 255, 255))
-                }
-            )
-
-            // ── 点击 ──
-            root.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
-                onParentClick?.invoke(item.parentId)
+            // ── 分隔线（与 ListVH 同款）──
+            val divider = android.view.View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    (1 * density).toInt()
+                ).apply { setMargins((12 * density).toInt(), 0, (12 * density).toInt(), 0) }
+                setBackgroundColor(android.graphics.Color.argb(25, 255, 255, 255))
             }
-            root.setOnLongClickListener {
-                val pos = root.tag as? Int ?: return@setOnLongClickListener true
-                val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnLongClickListener true
-                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnLongClickListener true
-                onParentLongClick?.invoke(item.parentId)
-                true
+            root.addView(divider)
+
+            // ── 星标点击 ──
+            starContainer.setOnClickListener {
+                val bucketId = starContainer.tag as? String ?: return@setOnClickListener
+                onToggleStar(bucketId)
             }
 
-            val vh = ParentHeaderVH(root, starContainer, starIv, onToggleStar, onToggleChildSelect, selectedChildIds)
-
-            // ⊕ 添加按钮点击
-            addBtn.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
-                onAddChildClick?.invoke(item.parentId)
-            }
-
-            // ⋮ 菜单点击（弹出 PopupMenu）
+            // ⋮ 菜单点击
             menuBtn.setOnClickListener {
                 val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
@@ -2545,7 +2536,16 @@ private class ParentHeaderVH(
                 popup.show()
             }
 
-            return vh
+            // ── 点击展开/折叠 ──
+            root.setOnClickListener {
+                val pos = root.tag as? Int ?: return@setOnClickListener
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
+                onParentClick?.invoke(item.parentId)
+            }
+
+            return ParentHeaderVH(root, starContainer, starIv)
         }
     }
 
@@ -2553,9 +2553,9 @@ private class ParentHeaderVH(
         itemView.tag = pos
         starContainer.tag = "parent:${item.parentId}"
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
-        title?.text = "📁 ${item.parentName}"
+        title?.text = item.parentName
         val summary = itemView.findViewById<android.widget.TextView>(android.R.id.summary)
-        summary?.text = if (item.hasChildren) "${item.parentName} 的子相册" else "暂无子相册"
+        summary?.text = if (item.childCount > 0) "${item.childCount} 个子相册" else "暂无子相册"
         val isStarred = "parent:${item.parentId}" in starredIds
         starIv.colorFilter = android.graphics.PorterDuffColorFilter(
             if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
@@ -2565,6 +2565,8 @@ private class ParentHeaderVH(
 }
 
 // ── 层级相册：List 模式子相册行 ViewHolder ──
+// 与 ListVH 同骨架：64dp 缩略图 + [badge+标题] + album 数据副标题 + ✕ 按钮 + 分隔线
+// 层级关系靠缩进 + badge "父:xxx" 表示
 
 private class ChildRowVH(
     itemView: android.view.View
@@ -2575,58 +2577,134 @@ private class ChildRowVH(
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
+                orientation = LinearLayout.VERTICAL
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
 
-            // 缩进留白
-            root.setPadding((32 * density).toInt(), 0, 0, 0)
+            // ── 内容行（缩进 + 封面 + 文字 + ✕）──
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins((32 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt()) }
+            }
 
-            val thumbSize = (48 * density).toInt()
+            val thumbSize = (64 * density).toInt()
             val iv = ImageView(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(thumbSize, thumbSize)
                 scaleType = ImageView.ScaleType.CENTER_CROP
                 id = android.R.id.icon
                 setRoundedCorner(ITEM_CORNER_RADIUS_DP)
             }
-            root.addView(iv)
+            row.addView(iv)
 
-            val textTv = TextView(ctx).apply {
+            val textColumn = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
                     0,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
                     weight = 1f
-                    setMargins((10 * density).toInt(), 0, (8 * density).toInt(), 0)
+                    setMargins((12 * density).toInt(), 0, 0, 0)
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
+            }
+
+            // ── 标题行：[badge "父:xxx"] + [nameTv] ──
+            val titleRow = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            val badgeTv = TextView(ctx).apply {
+                textSize = 10f
+                setTextColor(android.graphics.Color.argb(180, 255, 255, 255))
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                        setCornerRadius((4 * density))
+                        setColor(android.graphics.Color.argb(40, 180, 200, 255))
+                    }
+                )
+                setPadding((4 * density).toInt(), (1 * density).toInt(), (4 * density).toInt(), (1 * density).toInt())
+                tag = "parent_badge"
+            }
+            titleRow.addView(badgeTv)
+            titleRow.addView(android.view.View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams((6 * density).toInt(), 0)
+            })
+            val nameTv = TextView(ctx).apply {
                 id = android.R.id.title
-                setTextSize(13f)
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { weight = 1f }
+                setTextSize(14f)
+                setTypeface(null, android.graphics.Typeface.BOLD)
                 setTextColor(android.graphics.Color.WHITE)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
-            root.addView(textTv)
+            titleRow.addView(nameTv)
+            textColumn.addView(titleRow)
 
-            // ── × 移出按钮 ──
-            val removeBtn = TextView(ctx).apply {
+            val infoTv = TextView(ctx).apply {
+                id = android.R.id.summary
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                setTextSize(12f)
+                setTextColor(android.graphics.Color.GRAY)
+                maxLines = 1
+            }
+            textColumn.addView(infoTv)
+
+            row.addView(textColumn)
+
+            // ── ✕ 移出按钮（48dp 容器，与 ListVH 星标同规格）──
+            val removeBtn = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (48 * density).toInt(),
+                    (48 * density).toInt()
+                ).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+                isClickable = true
+                focusable = View.FOCUSABLE
+            }
+            val removeIv = TextView(ctx).apply {
                 text = "✕"
-                textSize = 14f
+                textSize = 18f
                 setTextColor(android.graphics.Color.argb(180, 255, 100, 100))
                 gravity = android.view.Gravity.CENTER
-                layoutParams = LinearLayout.LayoutParams(
-                    (36 * density).toInt(),
-                    (36 * density).toInt()
-                ).apply { setMargins(0, 0, (8 * density).toInt(), 0) }
-                isClickable = true
-                focusable = android.view.View.FOCUSABLE
-                visibility = android.view.View.VISIBLE
+                includeFontPadding = false
+                layoutParams = FrameLayout.LayoutParams(
+                    (24 * density).toInt(),
+                    (24 * density).toInt(),
+                    android.view.Gravity.CENTER
+                )
             }
-            root.addView(removeBtn)
+            removeBtn.addView(removeIv)
+            row.addView(removeBtn)
 
+            root.addView(row)
+
+            // ── 分隔线（左对齐缩进起始）──
+            val divider = android.view.View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    (1 * density).toInt()
+                ).apply { setMargins((32 * density).toInt(), 0, (12 * density).toInt(), 0) }
+                setBackgroundColor(android.graphics.Color.argb(25, 255, 255, 255))
+            }
+            root.addView(divider)
+
+            // ── 点击进入相册 ──
             root.setOnClickListener {
                 val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
@@ -2636,7 +2714,7 @@ private class ChildRowVH(
                 if (album != null) onClick(album)
             }
 
-            // × 按钮点击：从父级移出
+            // ✕ 按钮点击
             removeBtn.setOnClickListener {
                 val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
@@ -2649,12 +2727,29 @@ private class ChildRowVH(
         }
     }
 
-    fun bind(item: Album, pos: Int) {
+    fun bind(item: Album, pos: Int, parentName: String? = null) {
         itemView.tag = pos
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
-        iv?.load(item.coverUri) { size(120); crossfade(false) }
+        iv?.load(item.coverUri) { size(160); crossfade(false) }
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
         title?.text = item.bucketName
+        // 副标题：相册自己的数据
+        val info = itemView.findViewById<android.widget.TextView>(android.R.id.summary)
+        info?.text = buildString {
+            append(com.example.rcgallery.util.FormatUtil.formatFileSize(item.totalSize))
+            append(" · ${item.imageCount} 图片")
+            if (item.videoCount > 0) append(" · ${item.videoCount} 视频")
+            if (item.gifCount > 0) append(" · ${item.gifCount} GIF")
+        }
+        info?.visibility = android.view.View.VISIBLE
+        // badge：归属关系
+        val badge = itemView.findViewWithTag<android.widget.TextView>("parent_badge")
+        if (badge != null && parentName != null) {
+            badge.text = "父:$parentName"
+            badge.visibility = android.view.View.VISIBLE
+        } else if (badge != null) {
+            badge.visibility = android.view.View.GONE
+        }
     }
 }
 
@@ -3461,3 +3556,17 @@ private class DateGroupDiffCallback(
     }
 }
 
+
+/** 生成竖直三点图标 Bitmap（与星标图标同规格，保证对齐） */
+private fun createVerticalDotsBitmap(width: Int, height: Int, color: Int): android.graphics.Bitmap {
+    val bmp = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+    val dotRadius = width * 0.08f
+    val spacing = height / 4f
+    val centerX = width / 2f
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
+    for (i in 1..3) {
+        canvas.drawCircle(centerX, spacing * i, dotRadius, paint)
+    }
+    return bmp
+}
