@@ -13,6 +13,7 @@ import com.example.rcgallery.data.db.ViewHistoryEntity
 import com.example.rcgallery.data.db.AppDatabase
 import com.example.rcgallery.data.db.ParentAlbumEntity
 import com.example.rcgallery.data.db.ParentChildEntity
+import com.example.rcgallery.data.db.ParentSharedTagEntity
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.data.smb.SmbDevice
 import com.example.rcgallery.data.smb.SmbFileInfo
@@ -220,6 +221,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ══════════════════════════════════════
 
     private val parentAlbumDao = AppDatabase.getInstance(getApplication()).parentAlbumDao()
+    private val parentSharedTagDao = AppDatabase.getInstance(getApplication()).parentSharedTagDao()
 
     /** 所有父级实体 */
     private val _parentEntities = MutableStateFlow<List<ParentAlbumEntity>>(emptyList())
@@ -249,11 +251,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         map.values.flatten().toSet()
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
-    /** parentId 对应的子相册 Album 对象列表 */
-    fun getChildrenAlbumsForParent(parentId: Long): List<Album> {
-        val childBucketIds = _parentChildrenBucketMap.value[parentId] ?: emptyList()
-        return _albums.value.filter { it.bucketId in childBucketIds }
-    }
+    /** parentId → 共享 TAG 列表的映射（用于主页父级卡片显示） */
+    private val _parentSharedTagMap = MutableStateFlow<Map<Long, List<TagEntity>>>(emptyMap())
+    val parentSharedTagMap: StateFlow<Map<Long, List<TagEntity>>> = _parentSharedTagMap.asStateFlow()
 
     init { loadParents() }
 
@@ -268,8 +268,30 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 _parentChildrenBucketMap.value = children.groupBy({ it.parentId }, { it.childBucketId })
             }
         }
+        // 父级共享 TAG 映射：关联绑定关系 + TAG 定义
+        viewModelScope.launch {
+            combine(
+                parentSharedTagDao.getAllFlow(),
+                tagRepository.getAllTags()
+            ) { links, allTags ->
+                val map = mutableMapOf<Long, MutableList<TagEntity>>()
+                val tagMap = allTags.associateBy { it.id }
+                links.forEach { link ->
+                    val tag = tagMap[link.tagId] ?: return@forEach
+                    map.getOrPut(link.parentId) { mutableListOf() }
+                        .add(tag)
+                }
+                // 去重：同一个父级可能多条记录对应同一个 tagId
+                map.mapValues { (_, tags) -> tags.distinctBy { it.id } }
+            }.collect { map ->
+                _parentSharedTagMap.value = map
+            }
+        }
     }
-
+    fun getChildrenAlbumsForParent(parentId: Long): List<Album> {
+        val childBucketIds = _parentChildrenBucketMap.value[parentId] ?: emptyList()
+        return _albums.value.filter { it.bucketId in childBucketIds }
+    }
     /** 创建父级相册 */
     fun createParentAlbum(name: String, onResult: (Result<ParentAlbumEntity>) -> Unit = {}) {
         viewModelScope.launch {
@@ -298,12 +320,81 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** 删除父级相册（同时删除所有子级关系） */
+    /** 删除父级相册（完整清理：共享 TAG → 子级 TAG → 共享关系 → 父子关系 → 父级） */
     fun deleteParentAlbum(id: Long) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                // ① 读取该父级的共享 TAG 绑定
+                val sharedTags = parentSharedTagDao.getTagsForParent(id)
+                val tagIdSet = sharedTags.map { it.tagId }.distinct()
+                // ② 读取所有子级
+                val childBucketIds = parentAlbumDao.getChildBucketIdsForParent(id)
+                val childAlbums = _albums.value.filter { it.bucketId in childBucketIds }
+
+                // ③ 对每个子级清理共享 TAG
+                for (tagId in tagIdSet) {
+                    for (child in childAlbums) {
+                        tagRepository.removeTagFromTarget(tagId, tagRepository.albumKey(child.directoryPath))
+                        val items = repository.loadMediaItems(albumId = child.bucketId, pageSize = 10000)
+                            .getOrDefault(emptyList())
+                        items.forEach { item ->
+                            if (item.filePath.isNotEmpty()) {
+                                tagRepository.removeTagFromTarget(tagId, tagRepository.mediaKey(item.filePath))
+                            }
+                        }
+                    }
+                }
+
+                // ④ 删除父级共享 TAG 关系
+                parentSharedTagDao.removeAllTagsForParent(id)
+                // ⑤ 删除父子关系
                 parentAlbumDao.removeAllChildren(id)
+                // ⑥ 删除父级
                 parentAlbumDao.deleteParentById(id)
+            }
+        }
+    }
+
+    /** 为父级添加共享 TAG——将 TAG 同步到所有子级的 album/media */
+    fun addSharedTagToParent(parentId: Long, tagName: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val tag = tagRepository.getOrCreateTag(tagName)
+                val childBucketIds = parentAlbumDao.getChildBucketIdsForParent(parentId)
+                if (childBucketIds.isEmpty()) return@withContext
+
+                val childAlbums = _albums.value.filter { it.bucketId in childBucketIds }
+
+                // 写入父级共享 TAG 关系（每子级一行）
+                val links = childAlbums.map { child ->
+                    ParentSharedTagEntity(
+                        parentId = parentId,
+                        tagId = tag.id,
+                        childBucketId = child.bucketId
+                    )
+                }
+                parentSharedTagDao.insertAll(links)
+
+                // 同步到子级 album/media
+                for (child in childAlbums) {
+                    tagRepository.addTagToTarget(tag.id, tagRepository.albumKey(child.directoryPath), TagRepository.TYPE_ALBUM)
+                    val items = repository.loadMediaItems(albumId = child.bucketId, pageSize = 10000)
+                        .getOrDefault(emptyList())
+                    items.forEach { item ->
+                        if (item.filePath.isNotEmpty()) {
+                            tagRepository.addTagToTarget(tag.id, tagRepository.mediaKey(item.filePath), TagRepository.TYPE_MEDIA)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** 从父级移除共享 TAG——只删共享绑定关系，不清理子级真实 TAG（因为子级可以独立管理） */
+    fun removeSharedTagFromParent(parentId: Long, tagId: Long) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                parentSharedTagDao.removeTagFromParent(parentId, tagId)
             }
         }
     }
@@ -1096,9 +1187,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 最近使用的 TAG */
     suspend fun getRecentTags(): List<TagEntity> = tagRepository.getRecentTags()
 
-    /** 删除 TAG 定义（级联所有关联） */
+    /** 删除 TAG 定义（先清理父级共享关联，再级联删除真实关联） */
     fun deleteTag(tagId: Long) {
-        viewModelScope.launch { tagRepository.deleteTag(tagId) }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                parentSharedTagDao.removeByTagId(tagId)
+                tagRepository.deleteTag(tagId)
+            }
+        }
     }
 
     /** 多 TAG AND 搜索 */

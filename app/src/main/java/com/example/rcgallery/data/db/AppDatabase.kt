@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class],
-    version = 3,
+    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class],
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -17,6 +17,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun tagDao(): TagDao
     abstract fun viewHistoryDao(): ViewHistoryDao
     abstract fun parentAlbumDao(): ParentAlbumDao
+    abstract fun parentSharedTagDao(): ParentSharedTagDao
 
     companion object {
         @Volatile
@@ -62,6 +63,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** 版本 3→4：新增父级共享 TAG 关系表 parent_shared_tags */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `parent_shared_tags` (
+                        `parentId` INTEGER NOT NULL,
+                        `tagId` INTEGER NOT NULL,
+                        `childBucketId` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`parentId`, `tagId`, `childBucketId`),
+                        FOREIGN KEY(`tagId`) REFERENCES `tag_defs`(`id`) ON DELETE CASCADE
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_parent_shared_tags_parentId` ON `parent_shared_tags` (`parentId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_parent_shared_tags_tagId` ON `parent_shared_tags` (`tagId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_parent_shared_tags_parentId_tagId` ON `parent_shared_tags` (`parentId`, `tagId`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -69,7 +89,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "rcgallery_tags.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }
