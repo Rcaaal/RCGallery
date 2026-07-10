@@ -166,6 +166,49 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun clearMoveRollbackCount() { _moveRollbackCount.value = 0 }
 
+    // ── 文件冲突状态（pasteToAlbum 中检测到重名时暂停等待用户选择）──
+
+    /** 单个文件冲突信息 */
+    data class FileConflictInfo(
+        val sourceFileName: String,
+        val index: Int,
+        val total: Int
+    )
+
+    /** 用户对冲突文件的操作选择 */
+    enum class FileConflictAction { OVERWRITE, SKIP, RENAME }
+
+    /** 用户的完整冲突响应 */
+    data class FileConflictResponse(
+        val action: FileConflictAction,
+        val applyToAll: Boolean
+    )
+
+    private val _fileConflict = MutableStateFlow<FileConflictInfo?>(null)
+    val fileConflict: StateFlow<FileConflictInfo?> = _fileConflict.asStateFlow()
+
+    /** 当前等待用户响应的协程续体 */
+    private var conflictContinuation: kotlinx.coroutines.CancellableContinuation<FileConflictAction>? = null
+
+    /** 用户勾选「对全部冲突应用此操作」后保存的全局策略 */
+    private var globalConflictAction: FileConflictAction? = null
+
+    /** 用户通过 UI 对冲突做出响应 */
+    fun respondConflict(response: FileConflictResponse) {
+        if (response.applyToAll) globalConflictAction = response.action
+        conflictContinuation?.resume(response.action)
+        conflictContinuation = null
+        _fileConflict.value = null
+    }
+
+    /** 重置冲突状态（重新粘贴前调用） */
+    private fun resetConflictState() {
+        globalConflictAction = null
+        _fileConflict.value = null
+        conflictContinuation?.cancel()
+        conflictContinuation = null
+    }
+
     // ── 筛选规则系统 ──
     private val _persistentRules = MutableStateFlow<List<TagRule>>(emptyList())
     val persistentRules: StateFlow<List<TagRule>> = _persistentRules.asStateFlow()
@@ -1733,6 +1776,40 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /**
+     * 在 SMB 当前文件夹内创建子目录。
+     * 创建成功后自动刷新文件夹内容。
+     */
+    fun smbCreateFolder(parentPath: String, folderName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val dirPath = if (parentPath.endsWith("/")) "$parentPath$folderName" else "$parentPath/$folderName"
+            smbRepository.mkdirs(dirPath).onSuccess {
+                AppLogger.d("SMB", "create folder OK: $folderName at $parentPath")
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "文件夹已创建",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                // 刷新当前文件夹
+                val currentState = _smbBrowseState.value
+                if (currentState is SmbBrowseState.FolderContent) {
+                    smbRefreshCurrentFolder(currentState.currentPath, currentState.folderName)
+                }
+            }.onFailure { e ->
+                AppLogger.e("SMB", "create folder FAIL: $folderName at $parentPath", e)
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "创建失败: ${e.localizedMessage ?: "未知错误"}",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
     /** 最近移动过的相册 */
     data class RecentMoveAlbum(
         val directoryPath: String,
@@ -2281,6 +2358,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val thumbRecordId = UUID.randomUUID().toString().take(8)
             val app = getApplication<Application>()
             val context = app
+            // 重置冲突状态（每次粘贴开始时）
+            resetConflictState()
 
             for (item in items) {
                     _pasteProgress.value = PasteProgress(
@@ -2297,12 +2376,35 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     }
                     // 目标路径：targetDir/文件名
                     var targetFile = File(targetDir, srcFile.name)
-                    var suffix = 1
-                    while (targetFile.exists()) {
-                        val nameWithoutExt = srcFile.nameWithoutExtension
-                        val ext = srcFile.extension
-                        targetFile = File(targetDir, "${nameWithoutExt}($suffix).$ext")
-                        suffix++
+                    // ── 文件冲突处理（重名时弹窗让用户选择）──
+                    if (targetFile.exists()) {
+                        val action = globalConflictAction ?: suspendCancellableCoroutine { cont ->
+                            conflictContinuation = cont
+                            _fileConflict.value = FileConflictInfo(
+                                sourceFileName = srcFile.name,
+                                index = items.indexOf(item) + 1,
+                                total = items.size
+                            )
+                        }
+                        when (action) {
+                            FileConflictAction.OVERWRITE -> {
+                                targetFile.delete()
+                                AppLogger.d("Paste", "用户选择覆盖: ${srcFile.name}")
+                            }
+                            FileConflictAction.SKIP -> {
+                                AppLogger.d("Paste", "用户选择跳过: ${srcFile.name}")
+                                continue
+                            }
+                            FileConflictAction.RENAME -> {
+                                var suffix = 1
+                                while (targetFile.exists()) {
+                                    val nameWithoutExt = srcFile.nameWithoutExtension
+                                    val ext = srcFile.extension
+                                    targetFile = File(targetDir, "${nameWithoutExt}($suffix).$ext")
+                                    suffix++
+                                }
+                            }
+                        }
                     }
                     // 复制文件
                     srcFile.inputStream().use { input ->
@@ -2411,6 +2513,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
 
             _pasteProgress.value = null
+            _fileConflict.value = null
+            conflictContinuation = null
 
             // ── MOVE 回滚提示（UI 层消费 moveRollbackCount 弹对话框）──
             if (mode == PasteMode.MOVE && successCount < items.size) {

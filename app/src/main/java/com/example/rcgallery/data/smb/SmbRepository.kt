@@ -353,6 +353,19 @@ class SmbRepository {
     fun getContextForPathSync(path: String): CIFSContext = getContextForPath(path)
 
     /**
+     * 在 SMB 服务器上递归创建目录。
+     * 与 [ensureTrailingSlash] 配合使用，确保路径以 / 结尾。
+     * 模式与 [deleteFile] 一致：认证上下文解析 → jcifs-ng API 调用 → 异常处理。
+     */
+    suspend fun mkdirs(dirPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val ctx = getContextForPath(dirPath)
+            val dir = SmbFile(ensureTrailingSlash(dirPath), ctx)
+            dir.mkdirs()
+        }
+    }
+
+    /**
      * 删除 SMB 文件（永久删除，不可恢复）。
      */
     suspend fun deleteFile(path: String): Result<Unit> = withContext(Dispatchers.IO) {

@@ -70,6 +70,9 @@ fun NetworkBrowserScreen(
     var isSmbMultiSelect by remember { mutableStateOf(false) }
     var selectedSmbPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showSmbDeleteConfirm by remember { mutableStateOf(false) }
+    // 跟踪当前文件夹的 mediaFiles（供 actions 中全选用）
+    var currentSmbMediaFiles by remember { mutableStateOf<List<SmbFileInfo>>(emptyList()) }
+    var showNewFolderDialog by remember { mutableStateOf(false) }
     fun exitSmbMultiSelect() {
         isSmbMultiSelect = false
         selectedSmbPaths = emptySet()
@@ -128,7 +131,23 @@ fun NetworkBrowserScreen(
                         containerColor = MaterialTheme.colorScheme.surface
                     ),
                     actions = {
-                        if (!isSmbMultiSelect && smbBrowseState is SmbBrowseState.FolderContent) {
+                        if (isSmbMultiSelect) {
+                            val allSelected = currentSmbMediaFiles.isNotEmpty() &&
+                                currentSmbMediaFiles.all { it.path in selectedSmbPaths }
+                            TextButton(onClick = {
+                                if (allSelected) {
+                                    selectedSmbPaths = emptySet()
+                                    isSmbMultiSelect = false
+                                } else {
+                                    selectedSmbPaths = currentSmbMediaFiles.map { it.path }.toSet()
+                                }
+                            }) {
+                                Text(if (allSelected) "取消全选" else "全选", fontSize = 13.sp)
+                            }
+                        } else if (smbBrowseState is SmbBrowseState.FolderContent) {
+                            TextButton(onClick = { showNewFolderDialog = true }) {
+                                Text("+新建", fontSize = 13.sp)
+                            }
                             TextButton(onClick = { showHistoryPage = true }) {
                                 Text("📋", fontSize = 16.sp)
                             }
@@ -185,6 +204,8 @@ fun NetworkBrowserScreen(
                     }
                     is SmbBrowseState.FolderContent -> {
                         Box(Modifier.fillMaxSize()) {
+                            // 跟踪当前文件夹文件列表供 actions 全选用
+                            currentSmbMediaFiles = s.mediaFiles
                             FolderMixedContent(
                                 subFolders = s.subFolders,
                                 mediaFiles = s.mediaFiles,
@@ -309,6 +330,39 @@ fun NetworkBrowserScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { showSmbDeleteConfirm = false }) { Text("取消") }
+                }
+            )
+        }
+
+        // ── 新建文件夹对话框 ──
+        if (showNewFolderDialog) {
+            var folderName by remember { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { showNewFolderDialog = false },
+                title = { Text("新建文件夹") },
+                text = {
+                    OutlinedTextField(
+                        value = folderName,
+                        onValueChange = { folderName = it },
+                        label = { Text("文件夹名称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = folderName.isNotBlank(),
+                        onClick = {
+                            showNewFolderDialog = false
+                            val state = smbBrowseState
+                            if (state is SmbBrowseState.FolderContent) {
+                                viewModel.smbCreateFolder(state.currentPath, folderName.trim())
+                            }
+                        }
+                    ) { Text("创建") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showNewFolderDialog = false }) { Text("取消") }
                 }
             )
         }

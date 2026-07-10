@@ -940,6 +940,60 @@ fun MediaGridScreen(
                 )
             }
 
+            // ── 文件冲突对话框 ──
+            val fileConflict by viewModel.fileConflict.collectAsStateWithLifecycle()
+            if (fileConflict != null) {
+                val conflict = fileConflict ?: return@Box
+                var applyToAll by remember { mutableStateOf(false) }
+                AlertDialog(
+                    onDismissRequest = {
+                        viewModel.respondConflict(
+                            GalleryViewModel.FileConflictResponse(
+                                GalleryViewModel.FileConflictAction.SKIP, false
+                            )
+                        )
+                    },
+                    title = { Text("文件冲突") },
+                    text = {
+                        Column {
+                            Text("目标目录中已存在「${conflict.sourceFileName}」")
+                            Spacer(Modifier.height(4.dp))
+                            Text("如何处理此文件？(${conflict.index}/${conflict.total})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(12.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.material3.Checkbox(
+                                    checked = applyToAll,
+                                    onCheckedChange = { applyToAll = it }
+                                )
+                                Text("对全部冲突应用此操作", fontSize = 13.sp)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = {
+                                viewModel.respondConflict(
+                                    GalleryViewModel.FileConflictResponse(GalleryViewModel.FileConflictAction.OVERWRITE, applyToAll)
+                                )
+                            }) { Text("覆盖") }
+                            TextButton(onClick = {
+                                viewModel.respondConflict(
+                                    GalleryViewModel.FileConflictResponse(GalleryViewModel.FileConflictAction.SKIP, applyToAll)
+                                )
+                            }) { Text("跳过") }
+                            TextButton(onClick = {
+                                viewModel.respondConflict(
+                                    GalleryViewModel.FileConflictResponse(GalleryViewModel.FileConflictAction.RENAME, applyToAll)
+                                )
+                            }) { Text("重命名") }
+                        }
+                    },
+                    dismissButton = {}  // 无取消按钮，必须三选一
+                )
+            }
+
             // ── 粘贴进度覆盖层 ──
             val pasteProgress by viewModel.pasteProgress.collectAsStateWithLifecycle()
             if (pasteProgress != null) {
