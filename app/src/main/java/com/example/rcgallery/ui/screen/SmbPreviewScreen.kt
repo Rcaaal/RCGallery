@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -196,12 +197,27 @@ fun SmbPreviewScreen(
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
             ) { Text("← 返回", color = Color.White) }
 
-            Text(
-                "${pagerState.currentPage + 1}/${mutableItems.size}",
-                color = Color.White,
-                fontSize = 14.sp,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
-            )
+            val currentFile = mutableItems.getOrNull(pagerState.currentPage)
+            Column(
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "${pagerState.currentPage + 1}/${mutableItems.size}",
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+                if (currentFile != null) {
+                    Text(
+                        currentFile.name,
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 48.dp)
+                    )
+                }
+            }
         }
 
         // ── 删除确认对话框 ──
