@@ -465,16 +465,17 @@ fun AlbumGridScreen(
         else filteredAlbums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }
     }
 
-    // Grid 模式扁平列表：把父级位置替换为子相册
-    val gridAlbums = remember(displayAlbums, parentChildrenBucketMap, parentEntities, allChildBucketIds) {
-        if (parentEntities.isEmpty() || allChildBucketIds.isEmpty()) {
+    // Grid 模式扁平列表：父级位置替换为其子相册，无子级父级不显示
+    val gridAlbums = remember(displayAlbums, parentChildrenBucketMap, allChildBucketIds) {
+        val hasParentAlbums = displayAlbums.any { it.bucketId.startsWith("parent:") }
+        if (!hasParentAlbums) {
             displayAlbums
         } else {
             val result = mutableListOf<Album>()
             for (album in displayAlbums) {
-                // 跳过子相册（将被插入在父级位置）
+                // 跳过子相册（将在父级位置统一插入）
                 if (album.bucketId in allChildBucketIds) continue
-                // 如果是父级占位对象，替换为子相册
+                // 父级占位对象 → 替换为子相册（有子级时），无子级时直接跳过
                 if (album.bucketId.startsWith("parent:")) {
                     val parentId = album.bucketId.removePrefix("parent:").toLongOrNull()
                     if (parentId != null) {
@@ -608,6 +609,7 @@ fun AlbumGridScreen(
                     parentChildrenBucketMap = parentChildrenBucketMap,
                     allChildBucketIds = allChildBucketIds,
                     parentBadgeMap = parentBadgeMap,
+                    gridAlbums = gridAlbums,
                     onCreateParent = { name, onResult -> viewModel.createParentAlbum(name, onResult) },
                     onRenameParent = { id, name, onResult -> viewModel.renameParentAlbum(id, name, onResult) },
                     onDeleteParent = { id -> viewModel.deleteParentAlbum(id) },
@@ -918,6 +920,7 @@ private fun AlbumGridContent(
     parentChildrenBucketMap: Map<Long, List<String>> = emptyMap(),
     allChildBucketIds: Set<String> = emptySet(),
     parentBadgeMap: Map<String, String> = emptyMap(),
+    gridAlbums: List<Album> = emptyList(),
     onCreateParent: (String, (Result<ParentAlbumEntity>) -> Unit) -> Unit = { _, _ -> },
     onRenameParent: (Long, String, (Result<Unit>) -> Unit) -> Unit = { _, _, _ -> },
     onDeleteParent: (Long) -> Unit = {},
@@ -1167,14 +1170,6 @@ private fun AlbumGridContent(
                                 )
                             }
                             Spacer(Modifier.width(4.dp))
-                            // 创建层级相册按钮
-                            IconButton(
-                                onClick = { showCreateParentDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Text("📁", fontSize = 16.sp)
-                            }
-                            Spacer(Modifier.width(2.dp))
                             // 搜索输入框（无边框，与 TopAppBar 背景融合）
                             TextField(
                                 value = searchQuery,
@@ -1282,6 +1277,14 @@ private fun AlbumGridContent(
                         if (isSearchActive) {
                             // 搜索模式下 actions 为空（搜索 UI 在 title 中）
                         } else {
+                            // ── 创建层级相册按钮 ──
+                            IconButton(
+                                onClick = { showCreateParentDialog = true },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Text("📁", fontSize = 16.sp)
+                            }
+                            Spacer(Modifier.width(4.dp))
                             // ── 搜索按钮 ──
                             Icon(
                                 painter = painterResource(com.example.rcgallery.R.drawable.ic_search),
@@ -1408,8 +1411,9 @@ private fun AlbumGridContent(
             }
             AndroidView(
                 factory = { ctx ->
+                    val adapterItems = if (displayMode is AlbumDisplayMode.Grid && gridAlbums.isNotEmpty()) gridAlbums else albums
                     val adapter = AlbumGridAdapter(
-                        items = albums,
+                        items = adapterItems,
                         onClick = { album -> wrappedAlbumClick(album) },
                         onLongClick = onAlbumLongClick,
                         onToggleStar = onToggleStar,
@@ -1464,7 +1468,7 @@ private fun AlbumGridContent(
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
                     val prevMode = adapter.currentMode
-                    adapter.items = albums
+                    adapter.items = if (displayMode is AlbumDisplayMode.Grid && gridAlbums.isNotEmpty()) gridAlbums else albums
                     adapter.starredIds = starredIds
                     adapter.albumTagsMap = albumTags
                     adapter.selectedIds = selectedAlbumIds
