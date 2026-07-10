@@ -1863,7 +1863,31 @@ private fun AlbumTagBarBottom(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            if (rows.isNotEmpty()) {
+            if (rows.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp, bottom = 2.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFF64B464),
+                        modifier = Modifier
+                            .size(plusSizeDp)
+                            .clickable { onAddTag() }
+                    ) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                "+",
+                                fontSize = 13.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            } else {
                 // 从上到下渲染：先渲染顶行，最后渲染底行
                 for (i in rows.lastIndex downTo 0) {
                     if (i < rows.lastIndex) {
