@@ -1866,7 +1866,7 @@ private class AlbumGridAdapter(
             val item = parentItems[position]
             when {
                 holder is ParentHeaderVH && item is ParentHeader -> {
-                    holder.bind(item, position, starredIds) { onManageSharedTagClick?.invoke(item.parentId) }
+                    holder.bind(item, position, starredIds, parentSharedTagMap) { onManageSharedTagClick?.invoke(item.parentId) }
                 }
                 holder is ChildRowVH && item is ChildRow -> {
                     val album = albumMap[item.bucketId]
@@ -2439,7 +2439,8 @@ private class ParentHeaderVH(
     itemView: android.view.View,
     private val starContainer: FrameLayout,
     private val starIv: ImageView,
-    private val tagRow: LinearLayout
+    private val tagRow: LinearLayout,
+    private val tagChips: Array<TextView>
 ) : RecyclerView.ViewHolder(itemView) {
 
     companion object {
@@ -2590,6 +2591,29 @@ private class ParentHeaderVH(
                 tag = "parent_tag_add"
             }
             tagRow.addView(tagAddChip)
+            // 预建共享 TAG chip（与 ListVH 同风格：圆角矩形白色文字）
+            val chipCount = 8
+            val tagChips = Array(chipCount) {
+                TextView(ctx).apply {
+                    textSize = 10f
+                    setTextColor(android.graphics.Color.WHITE)
+                    setBackgroundDrawable(
+                        android.graphics.drawable.GradientDrawable().apply {
+                            setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
+                            setCornerRadius(6 * density)
+                            setColor(android.graphics.Color.argb(180, 100, 140, 255))
+                        }
+                    )
+                    gravity = android.view.Gravity.CENTER
+                    setPadding((6 * density).toInt(), 0, (6 * density).toInt(), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        (20 * density).toInt()
+                    ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
+                    visibility = android.view.View.GONE
+                }
+            }
+            tagChips.forEach { tagRow.addView(it) }
             textColumn.addView(tagRow)
 
             row.addView(textColumn)
@@ -2684,11 +2708,11 @@ private class ParentHeaderVH(
                 onParentClick?.invoke(item.parentId)
             }
 
-            return ParentHeaderVH(root, starContainer, starIv, tagRow)
+            return ParentHeaderVH(root, starContainer, starIv, tagRow, tagChips)
         }
     }
 
-    fun bind(item: ParentHeader, pos: Int, starredIds: Set<String>, onManageSharedTag: ((Long) -> Unit)? = null) {
+    fun bind(item: ParentHeader, pos: Int, starredIds: Set<String>, parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap(), onManageSharedTag: ((Long) -> Unit)? = null) {
         itemView.tag = pos
         starContainer.tag = "parent:${item.parentId}"
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
@@ -2701,10 +2725,21 @@ private class ParentHeaderVH(
             android.graphics.PorterDuff.Mode.SRC_IN
         )
 
-        // ── 共享 TAG 行：始终显示绿色 + 按钮 ──
+        // ── 共享 TAG 行 ──
         tagRow.visibility = android.view.View.VISIBLE
-        val addBtn = tagRow.getChildAt(0)
-        addBtn?.setOnClickListener { onManageSharedTag?.invoke(item.parentId) }
+        // + 按钮点击：管理共享 TAG
+        (tagRow.getChildAt(0) as? TextView)?.setOnClickListener { onManageSharedTag?.invoke(item.parentId) }
+        // 填充已有 TAG chip
+        val tags = parentSharedTagMap[item.parentId] ?: emptyList()
+        tags.forEachIndexed { i, tag ->
+            val chip = tagChips.getOrNull(i) ?: return@forEachIndexed
+            chip.text = tag.name
+            chip.visibility = android.view.View.VISIBLE
+        }
+        // 隐藏多余的
+        for (i in tags.size until tagChips.size) {
+            tagChips[i].visibility = android.view.View.GONE
+        }
     }
 }
 
