@@ -914,6 +914,7 @@ private fun AlbumGridContent(
     parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap()
 ) {
     // ── Grid 模式多选状态 ──
+    // ── Grid 模式多选状态 ──
     var isAlbumMultiSelect by remember { mutableStateOf(false) }
     var selectedAlbumIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -979,10 +980,7 @@ private fun AlbumGridContent(
     var targetRemoveChildBucketId by remember { mutableStateOf<String?>(null) }
 
     // ── 添加/移除共享 TAG 对话框状态 ──
-    var showAddSharedTagDialog by remember { mutableStateOf(false) }
-    var addSharedTagTargetParentId by remember { mutableStateOf<Long?>(null) }
-    var showRemoveSharedTagDialog by remember { mutableStateOf(false) }
-    var removeSharedTagTargetParentId by remember { mutableStateOf<Long?>(null) }
+    var manageSharedTagParentId by remember { mutableStateOf<Long?>(null) }
 
     // ── 创建父级对话框 ──
     if (showCreateParentDialog) {
@@ -1196,73 +1194,67 @@ private fun AlbumGridContent(
         )
     }
 
-    // ── 添加共享 TAG 对话框 ──
-    if (showAddSharedTagDialog && addSharedTagTargetParentId != null) {
-        val targetParentId = addSharedTagTargetParentId!!
-        var sharedTagNameInput by remember { mutableStateOf("") }
+    // ── 管理共享 TAG 对话框（统一添加 / 移除）──
+    if (manageSharedTagParentId != null) {
+        val targetParentId = manageSharedTagParentId!!
+        val currentTags = parentSharedTagMap[targetParentId] ?: emptyList()
+        var tagInput by remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { showAddSharedTagDialog = false; addSharedTagTargetParentId = null },
-            title = { Text("添加共享 TAG") },
+            onDismissRequest = { manageSharedTagParentId = null },
+            title = { Text("管理共享 TAG") },
             text = {
                 Column {
-                    Text("为父级所有子相册统一添加 TAG：", fontSize = 13.sp, color = Color.Gray)
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = sharedTagNameInput,
-                        onValueChange = { sharedTagNameInput = it },
-                        singleLine = true,
-                        placeholder = { Text("TAG 名称", fontSize = 13.sp) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val name = sharedTagNameInput.trim()
-                        if (name.isEmpty()) return@Button
-                        showAddSharedTagDialog = false
-                        addSharedTagTargetParentId = null
-                        onAddSharedTag(targetParentId, name)
+                    // ── 添加区域 ──
+                    Text("添加共享 TAG：", fontSize = 13.sp, color = Color.Gray)
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = tagInput,
+                            onValueChange = { tagInput = it },
+                            singleLine = true,
+                            placeholder = { Text("TAG 名称", fontSize = 13.sp) },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            textStyle = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            enabled = tagInput.isNotBlank(),
+                            onClick = {
+                                val name = tagInput.trim()
+                                if (name.isEmpty()) return@Button
+                                onAddSharedTag(targetParentId, name)
+                                tagInput = ""
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) { Text("添加", fontSize = 13.sp) }
                     }
-                ) { Text("添加") }
-            },
-            dismissButton = { TextButton(onClick = { showAddSharedTagDialog = false; addSharedTagTargetParentId = null }) { Text("取消") } }
-        )
-    }
-
-    // ── 移除共享 TAG 对话框 ──
-    if (showRemoveSharedTagDialog && removeSharedTagTargetParentId != null) {
-        val targetParentId = removeSharedTagTargetParentId!!
-        val currentTags = parentSharedTagMap[targetParentId] ?: emptyList()
-        AlertDialog(
-            onDismissRequest = { showRemoveSharedTagDialog = false; removeSharedTagTargetParentId = null },
-            title = { Text("移除共享 TAG") },
-            text = {
-                if (currentTags.isEmpty()) {
-                    Text("该父级暂无共享 TAG", fontSize = 13.sp, color = Color.Gray)
-                } else {
-                    Column {
-                        Text("选择要移除的共享 TAG：", fontSize = 13.sp, color = Color.Gray)
-                        Spacer(Modifier.height(8.dp))
+                    // ── 移除区域 ──
+                    if (currentTags.isNotEmpty()) {
+                        Spacer(Modifier.height(16.dp))
+                        Text("已有共享 TAG：", fontSize = 13.sp, color = Color.Gray)
+                        Spacer(Modifier.height(4.dp))
                         currentTags.forEach { tag ->
-                            TextButton(
-                                onClick = {
-                                    showRemoveSharedTagDialog = false
-                                    removeSharedTagTargetParentId = null
-                                    onRemoveSharedTag(targetParentId, tag.id)
-                                },
-                                modifier = Modifier.fillMaxWidth()
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(tag.name, modifier = Modifier.weight(1f))
-                                Text("移除", fontSize = 12.sp, color = Color(0xFFCC4444))
+                                Text(tag.name, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                TextButton(
+                                    onClick = {
+                                        manageSharedTagParentId = null
+                                        onRemoveSharedTag(targetParentId, tag.id)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text("移除", fontSize = 12.sp, color = Color(0xFFCC4444))
+                                }
                             }
                         }
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { showRemoveSharedTagDialog = false; removeSharedTagTargetParentId = null }) { Text("取消") } }
+            dismissButton = { TextButton(onClick = { manageSharedTagParentId = null }) { Text("关闭") } }
         )
     }
 
@@ -1586,13 +1578,8 @@ private fun AlbumGridContent(
                             targetRemoveChildBucketId = bucketId
                             showRemoveChildConfirm = true
                         },
-                        onAddSharedTagClick = { parentId ->
-                            addSharedTagTargetParentId = parentId
-                            showAddSharedTagDialog = true
-                        },
-                        onRemoveSharedTagClick = { parentId ->
-                            removeSharedTagTargetParentId = parentId
-                            showRemoveSharedTagDialog = true
+                        onManageSharedTagClick = { parentId ->
+                            manageSharedTagParentId = parentId
                         },
                         parentSharedTagMap = parentSharedTagMap
                     )
@@ -1821,8 +1808,7 @@ private class AlbumGridAdapter(
     var onAddChildClick: ((Long) -> Unit)? = null,
     var onDeleteParentClick: ((Long) -> Unit)? = null,
     var onRemoveChildClick: ((Long, String) -> Unit)? = null,
-    var onAddSharedTagClick: ((Long) -> Unit)? = null,
-    var onRemoveSharedTagClick: ((Long) -> Unit)? = null,
+    var onManageSharedTagClick: ((Long) -> Unit)? = null,
     var parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap()
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
@@ -1865,7 +1851,7 @@ private class AlbumGridAdapter(
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             VIEW_TYPE_LIST -> ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
-            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onDeleteParentClick, onAddSharedTagClick, onRemoveSharedTagClick, parentSharedTagMap)
+            VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onDeleteParentClick, onManageSharedTagClick)
             VIEW_TYPE_LIST_CHILD -> ChildRowVH.create(parent, onClick, onRemoveChildClick)
             else -> GridVH.create(parent, onClick, onGridLongClick ?: onLongClick, onToggleStar)
         }
@@ -1880,7 +1866,7 @@ private class AlbumGridAdapter(
             val item = parentItems[position]
             when {
                 holder is ParentHeaderVH && item is ParentHeader -> {
-                    holder.bind(item, position, starredIds, parentSharedTagMap)
+                    holder.bind(item, position, starredIds) { onManageSharedTagClick?.invoke(item.parentId) }
                 }
                 holder is ChildRowVH && item is ChildRow -> {
                     val album = albumMap[item.bucketId]
@@ -2464,9 +2450,7 @@ private class ParentHeaderVH(
             onAddChildClick: ((Long) -> Unit)?,
             onToggleStar: (String) -> Unit,
             onDeleteParentClick: ((Long) -> Unit)? = null,
-            onAddSharedTagClick: ((Long) -> Unit)? = null,
-            onRemoveSharedTagClick: ((Long) -> Unit)? = null,
-            parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap()
+            onManageSharedTagClick: ((Long) -> Unit)? = null
         ): ParentHeaderVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
@@ -2576,15 +2560,36 @@ private class ParentHeaderVH(
             }
             textColumn.addView(countTv)
 
-            // ── 共享 TAG 行（横向滚动 chip 行）──
+            // ── 共享 TAG 行（与 ListVH 同款：绿色圆圈 + 按钮）──
             val tagRow = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+                ).apply { setMargins(0, (3 * density).toInt(), 0, 0) }
                 visibility = android.view.View.GONE
             }
+            // + 按钮（与 ListVH 完全一致：绿色圆形 20dp）
+            val tagAddChip = TextView(ctx).apply {
+                text = "+"
+                textSize = 12f
+                setTextColor(android.graphics.Color.WHITE)
+                setBackgroundDrawable(
+                    android.graphics.drawable.GradientDrawable().apply {
+                        setShape(android.graphics.drawable.GradientDrawable.OVAL)
+                        setColor(android.graphics.Color.argb(180, 100, 180, 100))
+                    }
+                )
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    (20 * density).toInt(),
+                    (20 * density).toInt()
+                ).apply { setMargins(0, 0, (4 * density).toInt(), 0) }
+                isClickable = true
+                focusable = android.view.View.FOCUSABLE
+                tag = "parent_tag_add"
+            }
+            tagRow.addView(tagAddChip)
             textColumn.addView(tagRow)
 
             row.addView(textColumn)
@@ -2658,16 +2663,12 @@ private class ParentHeaderVH(
                 val popup = android.widget.PopupMenu(ctx, menuBtn)
                 popup.menu.add(0, 1, 0, "重命名")
                 popup.menu.add(0, 2, 0, "添加子相册")
-                popup.menu.add(0, 4, 0, "添加共享TAG")
-                popup.menu.add(0, 5, 0, "移除共享TAG")
                 popup.menu.add(0, 3, 0, "解散父级")
                 popup.setOnMenuItemClickListener { menuItem ->
                     when (menuItem.itemId) {
                         1 -> { onParentLongClick?.invoke(item.parentId); true }
                         2 -> { onAddChildClick?.invoke(item.parentId); true }
                         3 -> { onDeleteParentClick?.invoke(item.parentId); true }
-                        4 -> { onAddSharedTagClick?.invoke(item.parentId); true }
-                        5 -> { onRemoveSharedTagClick?.invoke(item.parentId); true }
                         else -> false
                     }
                 }
@@ -2687,7 +2688,7 @@ private class ParentHeaderVH(
         }
     }
 
-    fun bind(item: ParentHeader, pos: Int, starredIds: Set<String>, parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap()) {
+    fun bind(item: ParentHeader, pos: Int, starredIds: Set<String>, onManageSharedTag: ((Long) -> Unit)? = null) {
         itemView.tag = pos
         starContainer.tag = "parent:${item.parentId}"
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
@@ -2700,44 +2701,10 @@ private class ParentHeaderVH(
             android.graphics.PorterDuff.Mode.SRC_IN
         )
 
-        // ── 渲染共享 TAG chips ──
-        val tags = parentSharedTagMap[item.parentId] ?: emptyList()
-        if (tags.isEmpty()) {
-            tagRow.visibility = android.view.View.GONE
-            return
-        }
-        val density = itemView.resources.displayMetrics.density
-        // 为每个 tag 创建或复用 chip
-        while (tagRow.childCount < tags.size) {
-            val chip = TextView(tagRow.context).apply {
-                textSize = 10f
-                setTextColor(android.graphics.Color.argb(200, 200, 200, 200))
-                setBackgroundDrawable(
-                    android.graphics.drawable.GradientDrawable().apply {
-                        setShape(android.graphics.drawable.GradientDrawable.RECTANGLE)
-                        setCornerRadius((4 * density))
-                        setColor(android.graphics.Color.argb(30, 255, 255, 255))
-                    }
-                )
-                setPadding((6 * density).toInt(), (2 * density).toInt(), (6 * density).toInt(), (2 * density).toInt())
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, (3 * density).toInt(), (4 * density).toInt(), 0) }
-            }
-            tagRow.addView(chip)
-        }
-        // 更新文本
-        for (i in tags.indices) {
-            val chip = tagRow.getChildAt(i) as? TextView ?: continue
-            chip.text = tags[i].name
-            chip.visibility = android.view.View.VISIBLE
-        }
-        // 隐藏多余的
-        for (i in tags.size until tagRow.childCount) {
-            tagRow.getChildAt(i).visibility = android.view.View.GONE
-        }
+        // ── 共享 TAG 行：始终显示绿色 + 按钮 ──
         tagRow.visibility = android.view.View.VISIBLE
+        val addBtn = tagRow.getChildAt(0)
+        addBtn?.setOnClickListener { onManageSharedTag?.invoke(item.parentId) }
     }
 }
 
