@@ -53,6 +53,7 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ContentValues
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.provider.MediaStore
@@ -2035,7 +2036,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val targetPath: String,
         val mimeType: String,
         val size: Long,
-        val dateAdded: Long = 0L
+        val dateAdded: Long = 0L,
+        val mediaUri: String = ""       // 移动/复制后目标文件的 MediaStore URI，用于撤销时反查
     )
 
     /** 一次移动/复制操作的完整记录 */
@@ -2618,41 +2620,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             }
                         }
                     }
-                    // ── MOVE 快路径：先尝试同卷 renameTo ──
-                    var moveByRename = false
+                    // ── MOVE 主路径：通过 MediaStore RELATIVE_PATH 移动（API 30+ 官方推荐）──
+                    var mediaStoreMoved = false
+                    var resultMediaUri: String? = null
                     if (mode == PasteMode.MOVE) {
                         AppLogger.d("Paste", "MOVE start: ${item.fileName} src=${srcFile.absolutePath} dst=${targetFile.absolutePath}")
-                        moveByRename = try { srcFile.renameTo(targetFile) } catch (_: Exception) { false }
+                        mediaStoreMoved = moveMediaByMediaStore(context, item.uri, targetDir)
+                        if (mediaStoreMoved) {
+                            AppLogger.d("Paste", "MOVE MediaStore RELATIVE_PATH OK: ${item.fileName}")
+                            // 验证目标文件确实存在（update 返回 > 0 只是 MediaStore 接受了变更）
+                            val targetOk = targetFile.exists() && targetFile.length() >= item.size / 2
+                            if (!targetOk) {
+                                AppLogger.d("Paste", "MOVE MediaStore accepted but target not found, fallback: ${item.fileName}")
+                                mediaStoreMoved = false
+                            } else {
+                                // 主路径成功：不 delete(item.uri)，不 scanFile，不 IS_PENDING
+                                // 记录 MediaStore URI 供撤销定位
+                                resultMediaUri = item.uri.toString()
+                            }
+                        }
                     }
-                    if (moveByRename) {
-                        AppLogger.d("Paste", "MOVE fast path OK: ${item.fileName} -> ${targetFile.absolutePath}")
-                        // 清理旧 MediaStore 记录（防路径残留）
-                        try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
-                        // per-file scanFile 等回调，确保 MediaStore 注册完成
-                        val newUri = suspendCancellableCoroutine<Uri?> { cont ->
-                            MediaScannerConnection.scanFile(
-                                app, arrayOf(targetFile.absolutePath), null
-                            ) { _, uri -> cont.resume(uri) }
-                        }
-                        // IS_PENDING hack 修正 DATE_ADDED
-                        if (newUri != null) {
-                            try {
-                                context.contentResolver.update(newUri,
-                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
-                                    null, null)
-                                context.contentResolver.update(newUri,
-                                    ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded) },
-                                    null, null)
-                                context.contentResolver.update(newUri,
-                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                                    null, null)
-                            } catch (_: Exception) { }
-                        }
-                    } else {
-                        if (mode == PasteMode.MOVE) {
-                            AppLogger.d("Paste", "MOVE fast path FAIL, fallback COPY+DELETE: ${item.fileName}")
-                        }
-                        // 快路径失败 → fallback：复制 + 删除源文件
+                    if (!mediaStoreMoved) {
+                        // ── COPY 或 MOVE fallback：复制文件 ──
                         srcFile.inputStream().use { input ->
                             targetFile.outputStream().use { output ->
                                 input.copyTo(output)
@@ -2662,45 +2651,47 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             if (mode == PasteMode.MOVE) srcFile.lastModified() else System.currentTimeMillis()
                         )
 
-                        // MOVE fallback: per-file scanFile（需要 URI 做 IS_PENDING hack）
                         if (mode == PasteMode.MOVE) {
-                            val newUri = suspendCancellableCoroutine<Uri?> { cont ->
+                            // MOVE fallback: 验证目标 → scanFile → 目标确认后再删源文件
+                            val targetOk = targetFile.exists() && targetFile.length() >= item.size / 2
+                            if (!targetOk) {
+                                try { targetFile.delete() } catch (_: Exception) { }
+                                AppLogger.e("Paste", "MOVE fallback: target verification failed, rolled back: ${item.fileName}")
+                                continue
+                            }
+                            val fallbackUri = suspendCancellableCoroutine<Uri?> { cont ->
                                 MediaScannerConnection.scanFile(
                                     app, arrayOf(targetFile.absolutePath), null
                                 ) { _, uri -> cont.resume(uri) }
                             }
-                            // IS_PENDING hack: API 30+ DATE_ADDED 只读，IS_PENDING=1 解锁
-                            if (newUri != null) {
+                            resultMediaUri = fallbackUri?.toString()
+                            if (fallbackUri != null) {
                                 try {
-                                    context.contentResolver.update(newUri,
+                                    context.contentResolver.update(fallbackUri,
                                         ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
                                         null, null)
-                                    context.contentResolver.update(newUri,
+                                    context.contentResolver.update(fallbackUri,
                                         ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded) },
                                         null, null)
-                                    context.contentResolver.update(newUri,
+                                    context.contentResolver.update(fallbackUri,
                                         ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
                                         null, null)
                                 } catch (_: Exception) { }
                             }
+                            // 目标已验证存在 → 最后删源文件
+                            val sourceDeleted = try { srcFile.delete() } catch (_: Exception) { false }
+                            if (!sourceDeleted) {
+                                try { targetFile.delete() } catch (_: Exception) { }
+                                AppLogger.e("Paste", "MOVE rollback: source delete failed, rolled back: ${item.fileName}")
+                                continue
+                            }
+                            try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
                         } else {
-                            // COPY: per-file scanFile 确保 MediaStore 注册
+                            // COPY: scanFile 确保 MediaStore 注册
                             suspendCancellableCoroutine<Unit?> { cont ->
                                 MediaScannerConnection.scanFile(
                                     app, arrayOf(targetFile.absolutePath), null
                                 ) { _, _ -> cont.resume(Unit) }
-                            }
-                        }
-
-                        // 移动模式：物理删除源文件
-                        if (mode == PasteMode.MOVE) {
-                            val fileDeleted = try { srcFile.delete() } catch (_: Exception) { false }
-                            if (fileDeleted) {
-                                try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
-                            } else {
-                                try { targetFile.delete() } catch (_: Exception) { }
-                                AppLogger.e("Paste", "MOVE rollback: deleted target ${targetFile.name} (source delete failed)")
-                                continue
                             }
                         }
                     }
@@ -2711,7 +2702,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         targetPath = targetFile.absolutePath,
                         mimeType = item.mimeType,
                         size = item.size,
-                        dateAdded = item.dateAdded
+                        dateAdded = item.dateAdded,
+                        mediaUri = resultMediaUri ?: ""
                     ))
                     // 生成缩略图到缓存（非视频文件）
                     if (!item.mimeType.startsWith("video/")) {
@@ -2845,55 +2837,36 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         val sourceFile = File(entry.sourcePath)
                         sourceFile.parentFile?.mkdirs()
                         AppLogger.d("Undo", "MOVE undo start: ${entry.fileName} src=${sourceFile.absolutePath} dst=${targetFile.absolutePath}")
-                        // ── 快路径：同卷 renameTo 搬回 ──
-                        val movedBack = try { targetFile.renameTo(sourceFile) } catch (_: Exception) { false }
-                        if (movedBack) {
-                            AppLogger.d("Undo", "MOVE undo fast path OK: ${entry.fileName}")
-                            // 清理旧 MediaStore 记录（旧 target 路径）
-                            try {
-                                context.contentResolver.delete(
-                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                    "${MediaStore.MediaColumns.DATA} = ?",
-                                    arrayOf(targetFile.absolutePath)
-                                )
-                            } catch (_: Exception) { }
-                            try {
-                                context.contentResolver.delete(
-                                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                                    "${MediaStore.MediaColumns.DATA} = ?",
-                                    arrayOf(targetFile.absolutePath)
-                                )
-                            } catch (_: Exception) { }
-                            // per-file scanFile 等回调，确保 MediaStore 注册
-                            val undoNewUri = suspendCancellableCoroutine<Uri?> { cont ->
-                                MediaScannerConnection.scanFile(
-                                    app, arrayOf(sourceFile.absolutePath), null
-                                ) { _, uri -> cont.resume(uri) }
+
+                        // ── 主路径：通过 MediaStore RELATIVE_PATH 反向移回（优先用记录的 mediaUri）──
+                        var mediaStoreReverted = false
+                        val targetUri = if (entry.mediaUri.isNotBlank()) Uri.parse(entry.mediaUri) else null
+                        val sourceDir = sourceFile.parent
+                        if (targetUri != null && sourceDir != null) {
+                            mediaStoreReverted = moveMediaByMediaStore(context, targetUri, sourceDir)
+                            if (mediaStoreReverted) {
+                                AppLogger.d("Undo", "MOVE undo RELATIVE_PATH OK: ${entry.fileName}")
                             }
-                            // IS_PENDING hack 修正 DATE_ADDED
-                            if (undoNewUri != null && entry.dateAdded > 0L) {
-                                try {
-                                    context.contentResolver.update(undoNewUri,
-                                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
-                                        null, null)
-                                    context.contentResolver.update(undoNewUri,
-                                        ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, entry.dateAdded) },
-                                        null, null)
-                                    context.contentResolver.update(undoNewUri,
-                                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                                        null, null)
-                                } catch (_: Exception) { }
-                            }
-                        } else {
-                            AppLogger.d("Undo", "MOVE undo fast path FAIL, fallback COPY+DELETE: ${entry.fileName}")
-                            // ── fallback：复制回 source → 删除 target ──
+                        }
+                        if (!mediaStoreReverted) {
+                            AppLogger.d("Undo", "MOVE undo RELATIVE_PATH FAIL, fallback COPY+DELETE: ${entry.fileName}")
+                            // 验证目标文件存在
+                            if (!targetFile.exists()) continue
+                            // ── fallback：复制回 source → 验证 → 删 target ──
                             targetFile.inputStream().use { input ->
                                 sourceFile.outputStream().use { output ->
                                     input.copyTo(output)
                                 }
                             }
                             sourceFile.setLastModified(targetFile.lastModified())
-                            // per-file scanFile（需要 URI 做 IS_PENDING hack）
+                            // 验证 source 文件
+                            val srcOk = sourceFile.exists() && sourceFile.length() >= entry.size / 2
+                            if (!srcOk) {
+                                try { sourceFile.delete() } catch (_: Exception) { }
+                                AppLogger.e("Undo", "MOVE undo fallback: source verification failed, rolled back: ${entry.fileName}")
+                                continue
+                            }
+                            // scanFile + IS_PENDING hack
                             val newUri = suspendCancellableCoroutine<Uri?> { cont ->
                                 MediaScannerConnection.scanFile(
                                     app, arrayOf(sourceFile.absolutePath), null
@@ -2912,9 +2885,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                         null, null)
                                 } catch (_: Exception) { }
                             }
-                            // 删除目标副本
+                            // 验证成功 → 删除目标
                             targetFile.delete()
-                            // 清理目标 MediaStore 条目
                             try {
                                 context.contentResolver.delete(
                                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -2930,7 +2902,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 )
                             } catch (_: Exception) { }
                         }
-                        // TAG 迁移回源路径（快路径和 fallback 共享）
+                        // TAG 迁移回源路径（主路径和 fallback 共享）
                         try {
                             tagRepository.updateTargetKey(
                                 tagRepository.mediaKey(targetFile.absolutePath),
@@ -3015,6 +2987,33 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         } else {
             record.files.all { File(it.sourcePath).exists() }
         }
+    }
+
+    /**
+     * 通过 MediaStore RELATIVE_PATH update 完成同卷移动（API 30+ 官方推荐方式）。
+     * 成功时 MediaStore 会自动处理物理文件移动和索引更新。
+     * 返回 true 表示 MediaStore 接受了变更。
+     */
+    private suspend fun moveMediaByMediaStore(
+        context: Context,
+        uri: Uri,
+        targetDir: String
+    ): Boolean {
+        return try {
+            val relativePath = toRelativePath(targetDir)
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            }
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (_: Exception) { false }
+    }
+
+    /** 从绝对目录路径推导 RELATIVE_PATH */
+    private fun toRelativePath(absDir: String): String {
+        return absDir
+            .replace("/storage/emulated/0/", "")
+            .replace("/sdcard/", "")
+            .trimEnd('/') + "/"
     }
 }
 
