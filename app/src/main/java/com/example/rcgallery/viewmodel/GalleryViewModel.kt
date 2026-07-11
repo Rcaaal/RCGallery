@@ -174,6 +174,29 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun clearMoveRollbackCount() { _moveRollbackCount.value = 0 }
 
+    /** MOVE 失败原因枚举（替代单一计数，让 UI 显示准确提示） */
+    enum class MoveFailureReason {
+        SOURCE_DELETE_FAILED,       // 源文件删除失败（可能是权限不足）
+        TARGET_VERIFICATION_FAILED, // 目标验证失败（文件大小不符等）
+        MEDIASTORE_UPDATE_FAILED,   // MediaStore RELATIVE_PATH 更新失败
+        SCAN_FAILED,                // 扫描注册失败
+        SOURCE_NOT_FOUND,           // 源文件不存在
+        UNKNOWN_ERROR               // 其他未预期异常
+    }
+
+    /** 单个文件的 MOVE 失败信息 */
+    data class MoveFailure(
+        val fileName: String,
+        val reason: MoveFailureReason,
+        val message: String
+    )
+
+    /** MOVE 失败明细（UI 按原因分组展示），空列表表示无失败 */
+    private val _moveFailures = MutableStateFlow<List<MoveFailure>>(emptyList())
+    val moveFailures: StateFlow<List<MoveFailure>> = _moveFailures.asStateFlow()
+
+    fun clearMoveFailures() { _moveFailures.value = emptyList() }
+
     // ── 文件冲突状态（pasteToAlbum 中检测到重名时暂停等待用户选择）──
 
     /** 单个文件冲突信息 */
@@ -2557,6 +2580,407 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun clearClipboard() {
         _clipboardItems.value = emptyList()
         AppLogger.d("VM", "clearClipboard")
+    }
+
+    /**
+     * 独立 MOVE 入口：直接将指定文件移动到目标相册，不经过 clipboard 中转站。
+     *
+     * 与 pasteToAlbum(MOVE) 的区别：
+     * - 直接吃 items 参数，不读 _clipboardItems
+     * - 不写 _clipboardItems（MOVE 成功后不清空 clipboard — clipboard 只是 COPY 的中转站）
+     * - 收集失败原因到 _moveFailures，而不是单一计数
+     *
+     * @param items 待移动的媒体文件列表
+     * @param targetDir 目标相册目录绝对路径
+     * @param targetName 目标相册名（日志用）
+     * @param currentAlbumId 当前源相册 ID（用于刷新列表）
+     */
+    fun moveItemsToAlbum(
+        items: List<MediaItem>,
+        targetDir: String,
+        targetName: String,
+        currentAlbumId: String? = null
+    ): kotlinx.coroutines.Job {
+        return viewModelScope.launch(Dispatchers.IO) {
+            var successCount = 0
+            val failures = mutableListOf<MoveFailure>()
+            val completedEntries = mutableListOf<MoveFileEntry>()
+            val thumbRecordId = UUID.randomUUID().toString().take(8)
+            val app = getApplication<Application>()
+            val context = app
+            resetConflictState()
+
+            for (item in items) {
+                _pasteProgress.value = PasteProgress(
+                    current = items.indexOf(item) + 1,
+                    total = items.size,
+                    fileName = item.fileName,
+                    mode = PasteMode.MOVE
+                )
+                try {
+                    val srcFile = File(item.filePath)
+                    if (!srcFile.exists()) {
+                        failures.add(MoveFailure(item.fileName, MoveFailureReason.SOURCE_NOT_FOUND, "源文件不存在: ${item.filePath}"))
+                        continue
+                    }
+                    // ── 目标路径 ──
+                    var targetFile = File(targetDir, srcFile.name)
+                    // ── 文件冲突处理 ──
+                    if (targetFile.exists()) {
+                        val action = globalConflictAction ?: suspendCancellableCoroutine { cont ->
+                            conflictContinuation = cont
+                            _fileConflict.value = FileConflictInfo(
+                                sourceFileName = srcFile.name,
+                                index = items.indexOf(item) + 1,
+                                total = items.size
+                            )
+                        }
+                        when (action) {
+                            FileConflictAction.OVERWRITE -> { targetFile.delete() }
+                            FileConflictAction.SKIP -> {
+                                failures.add(MoveFailure(item.fileName, MoveFailureReason.UNKNOWN_ERROR, "用户跳过"))
+                                continue
+                            }
+                            FileConflictAction.RENAME -> {
+                                var suffix = 1
+                                while (targetFile.exists()) {
+                                    val nameWithoutExt = srcFile.nameWithoutExtension
+                                    val ext = srcFile.extension
+                                    targetFile = File(targetDir, "${nameWithoutExt}($suffix).$ext")
+                                    suffix++
+                                }
+                            }
+                        }
+                    }
+
+                    // ── MOVE 主路径：MediaStore RELATIVE_PATH ──
+                    var mediaStoreMoved = false
+                    var resultMediaUri: String? = null
+                    AppLogger.d("VM", "MOVE start: ${item.fileName} src=${srcFile.absolutePath} dst=${targetFile.absolutePath}")
+                    mediaStoreMoved = moveMediaByMediaStore(context, item.uri, targetDir)
+                    if (mediaStoreMoved) {
+                        val targetOk = targetFile.exists() && targetFile.length() == item.size
+                        if (!targetOk) {
+                            AppLogger.d("VM", "MOVE MediaStore accepted but target not found, fallback: ${item.fileName}")
+                            mediaStoreMoved = false
+                        } else {
+                            resultMediaUri = item.uri.toString()
+                        }
+                    }
+
+                    if (!mediaStoreMoved) {
+                        // ── MOVE fallback：复制 → 验证 → 删源 ──
+                        try {
+                            srcFile.inputStream().use { input ->
+                                targetFile.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            failures.add(MoveFailure(item.fileName, MoveFailureReason.MEDIASTORE_UPDATE_FAILED, "文件复制失败: ${e.message}"))
+                            continue
+                        }
+                        targetFile.setLastModified(srcFile.lastModified())
+
+                        val targetOk = targetFile.exists() && targetFile.length() == item.size
+                        if (!targetOk) {
+                            try { targetFile.delete() } catch (_: Exception) { }
+                            failures.add(MoveFailure(item.fileName, MoveFailureReason.TARGET_VERIFICATION_FAILED, "目标文件验证失败"))
+                            continue
+                        }
+
+                        // scanFile 注册
+                        val fallbackUri = try {
+                            suspendCancellableCoroutine<Uri?> { cont ->
+                                MediaScannerConnection.scanFile(
+                                    app, arrayOf(targetFile.absolutePath), null
+                                ) { _, uri -> cont.resume(uri) }
+                            }
+                        } catch (e: Exception) { null }
+                        resultMediaUri = fallbackUri?.toString()
+                        if (fallbackUri == null) {
+                            failures.add(MoveFailure(item.fileName, MoveFailureReason.SCAN_FAILED, "扫描注册失败"))
+                        } else {
+                            // 设置日期和 IS_PENDING hack
+                            try {
+                                context.contentResolver.update(fallbackUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 1) },
+                                    null, null)
+                                context.contentResolver.update(fallbackUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded) },
+                                    null, null)
+                                context.contentResolver.update(fallbackUri,
+                                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                                    null, null)
+                            } catch (_: Exception) { }
+                        }
+
+                        // 删除源文件
+                        val sourceDeleted = try { srcFile.delete() } catch (_: Exception) { false }
+                        if (!sourceDeleted) {
+                            try { targetFile.delete() } catch (_: Exception) { }
+                            failures.add(MoveFailure(item.fileName, MoveFailureReason.SOURCE_DELETE_FAILED,
+                                "源文件删除失败，可能是权限不足"))
+                            continue
+                        }
+                        try { context.contentResolver.delete(item.uri, null, null) } catch (_: Exception) { }
+                    }
+
+                    successCount++
+                    completedEntries.add(MoveFileEntry(
+                        fileName = targetFile.name,
+                        sourcePath = item.filePath,
+                        targetPath = targetFile.absolutePath,
+                        mimeType = item.mimeType,
+                        size = item.size,
+                        dateAdded = item.dateAdded,
+                        mediaUri = resultMediaUri ?: ""
+                    ))
+                    // 缩略图缓存
+                    if (!item.mimeType.startsWith("video/")) {
+                        saveThumbnail(context, thumbRecordId, targetFile.absolutePath)
+                    }
+                    // ── TAG 迁移 ──
+                    try {
+                        val oldMediaKey = tagRepository.mediaKey(item.filePath)
+                        val newMediaKey = tagRepository.mediaKey(targetFile.absolutePath)
+                        val albumInfo = item.albumId?.let { aid ->
+                            _albums.value.find { it.bucketId == aid }
+                        }
+                        val inheritedTagIds = if (albumInfo != null)
+                            (_albumTags.value[albumInfo.directoryPath] ?: emptyList()).map { it.id }.toSet()
+                        else emptySet()
+                        tagRepository.updateTargetKey(oldMediaKey, newMediaKey)
+                        inheritedTagIds.forEach { tagId ->
+                            tagRepository.removeTagFromTarget(tagId, newMediaKey)
+                        }
+                    } catch (_: Exception) { }
+                } catch (e: Exception) {
+                    failures.add(MoveFailure(item.fileName, MoveFailureReason.UNKNOWN_ERROR, "未预期异常: ${e.message}"))
+                    AppLogger.e("VM", "moveItemsToAlbum failed: ${item.fileName}", e)
+                }
+            }
+
+            _pasteProgress.value = null
+            _fileConflict.value = null
+            conflictContinuation = null
+
+            // ── 收集失败结果 ──
+            if (successCount < items.size) {
+                _moveFailures.value = failures.toList()
+            }
+
+            // 更新最近移动记录
+            if (successCount > 0) {
+                val recent = _recentMoveAlbums.value.toMutableList()
+                recent.removeAll { it.directoryPath == targetDir }
+                recent.add(0, RecentMoveAlbum(
+                    directoryPath = targetDir,
+                    movedAt = System.currentTimeMillis()
+                ))
+                _recentMoveAlbums.value = recent.take(20)
+                saveRecentMoveAlbums(_recentMoveAlbums.value)
+
+                // 记录移动操作
+                val firstItem = items.firstOrNull()
+                val srcDir = firstItem?.filePath?.let { File(it).parent } ?: ""
+                val srcAlbumName = firstItem?.albumName
+                    ?: if (srcDir.isNotEmpty()) File(srcDir).name else ""
+                val tgtAlbumName = if (targetName.isNotBlank()) targetName
+                    else File(targetDir).name
+                saveMoveRecord(
+                    mode = PasteMode.MOVE.name,
+                    files = completedEntries,
+                    sourceDir = srcDir,
+                    targetDir = targetDir,
+                    sourceAlbumName = srcAlbumName,
+                    targetAlbumName = tgtAlbumName,
+                    successCount = successCount,
+                    totalCount = items.size,
+                    recordId = thumbRecordId
+                )
+
+                // 刷新
+                loadAlbums()
+                loadAllMedia()
+                if (currentAlbumId != null) {
+                    loadMedia(currentAlbumId)
+                }
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "移动成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            AppLogger.d("VM", "moveItemsToAlbum: target=$targetName success=$successCount/${items.size}")
+        }
+    }
+
+    /**
+     * 独立 COPY 入口：直接将指定文件复制到目标相册，不经过 clipboard 中转站。
+     *
+     * 与 pasteToAlbum(COPY) 的区别：
+     * - 直接吃 items 参数，不读 _clipboardItems
+     * - 不写 _clipboardItems
+     *
+     * @param items 待复制的媒体文件列表
+     * @param targetDir 目标相册目录绝对路径
+     * @param targetName 目标相册名（日志用）
+     * @param currentAlbumId 当前源相册 ID（用于刷新列表）
+     */
+    fun copyItemsToAlbum(
+        items: List<MediaItem>,
+        targetDir: String,
+        targetName: String,
+        currentAlbumId: String? = null
+    ): kotlinx.coroutines.Job {
+        return viewModelScope.launch(Dispatchers.IO) {
+            var successCount = 0
+            val completedEntries = mutableListOf<MoveFileEntry>()
+            val thumbRecordId = UUID.randomUUID().toString().take(8)
+            val app = getApplication<Application>()
+            val context = app
+            resetConflictState()
+
+            for (item in items) {
+                _pasteProgress.value = PasteProgress(
+                    current = items.indexOf(item) + 1,
+                    total = items.size,
+                    fileName = item.fileName,
+                    mode = PasteMode.COPY
+                )
+                try {
+                    val srcFile = File(item.filePath)
+                    if (!srcFile.exists()) {
+                        AppLogger.d("VM", "copyItemsToAlbum: source not found: ${item.filePath}")
+                        continue
+                    }
+                    var targetFile = File(targetDir, srcFile.name)
+                    // ── 文件冲突处理 ──
+                    if (targetFile.exists()) {
+                        val action = globalConflictAction ?: suspendCancellableCoroutine { cont ->
+                            conflictContinuation = cont
+                            _fileConflict.value = FileConflictInfo(
+                                sourceFileName = srcFile.name,
+                                index = items.indexOf(item) + 1,
+                                total = items.size
+                            )
+                        }
+                        when (action) {
+                            FileConflictAction.OVERWRITE -> { targetFile.delete() }
+                            FileConflictAction.SKIP -> { continue }
+                            FileConflictAction.RENAME -> {
+                                var suffix = 1
+                                while (targetFile.exists()) {
+                                    val nameWithoutExt = srcFile.nameWithoutExtension
+                                    val ext = srcFile.extension
+                                    targetFile = File(targetDir, "${nameWithoutExt}($suffix).$ext")
+                                    suffix++
+                                }
+                            }
+                        }
+                    }
+                    // ── 复制文件 ──
+                    srcFile.inputStream().use { input ->
+                        targetFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    targetFile.setLastModified(System.currentTimeMillis())
+                    // scanFile 注册
+                    suspendCancellableCoroutine<Unit?> { cont ->
+                        MediaScannerConnection.scanFile(
+                            app, arrayOf(targetFile.absolutePath), null
+                        ) { _, _ -> cont.resume(Unit) }
+                    }
+                    successCount++
+                    completedEntries.add(MoveFileEntry(
+                        fileName = targetFile.name,
+                        sourcePath = item.filePath,
+                        targetPath = targetFile.absolutePath,
+                        mimeType = item.mimeType,
+                        size = item.size,
+                        dateAdded = item.dateAdded,
+                        mediaUri = ""
+                    ))
+                    // 缩略图缓存
+                    if (!item.mimeType.startsWith("video/")) {
+                        saveThumbnail(context, thumbRecordId, targetFile.absolutePath)
+                    }
+                    // ── TAG 复制：只复制用户手动添加的 TAG（非继承）──
+                    try {
+                        val oldMediaKey = tagRepository.mediaKey(item.filePath)
+                        val newMediaKey = tagRepository.mediaKey(targetFile.absolutePath)
+                        val albumInfo = item.albumId?.let { aid ->
+                            _albums.value.find { it.bucketId == aid }
+                        }
+                        val inheritedTagIds = if (albumInfo != null)
+                            (_albumTags.value[albumInfo.directoryPath] ?: emptyList()).map { it.id }.toSet()
+                        else emptySet()
+                        val allTagIds = tagRepository.getTagIdsForTarget(oldMediaKey)
+                        (allTagIds.toSet() - inheritedTagIds).forEach { tagId ->
+                            tagRepository.addTagToTarget(tagId, newMediaKey, TagRepository.TYPE_MEDIA)
+                        }
+                    } catch (_: Exception) { }
+                } catch (e: Exception) {
+                    AppLogger.e("VM", "copyItemsToAlbum failed: ${item.fileName}", e)
+                }
+            }
+
+            _pasteProgress.value = null
+            _fileConflict.value = null
+            conflictContinuation = null
+
+            // 更新最近移动记录
+            if (successCount > 0) {
+                val recent = _recentMoveAlbums.value.toMutableList()
+                recent.removeAll { it.directoryPath == targetDir }
+                recent.add(0, RecentMoveAlbum(
+                    directoryPath = targetDir,
+                    movedAt = System.currentTimeMillis()
+                ))
+                _recentMoveAlbums.value = recent.take(20)
+                saveRecentMoveAlbums(_recentMoveAlbums.value)
+
+                // 记录复制操作
+                val firstItem = items.firstOrNull()
+                val srcDir = firstItem?.filePath?.let { File(it).parent } ?: ""
+                val srcAlbumName = firstItem?.albumName
+                    ?: if (srcDir.isNotEmpty()) File(srcDir).name else ""
+                val tgtAlbumName = if (targetName.isNotBlank()) targetName
+                    else File(targetDir).name
+                saveMoveRecord(
+                    mode = PasteMode.COPY.name,
+                    files = completedEntries,
+                    sourceDir = srcDir,
+                    targetDir = targetDir,
+                    sourceAlbumName = srcAlbumName,
+                    targetAlbumName = tgtAlbumName,
+                    successCount = successCount,
+                    totalCount = items.size,
+                    recordId = thumbRecordId
+                )
+
+                // 刷新
+                loadAlbums()
+                loadAllMedia()
+                if (currentAlbumId != null) {
+                    loadMedia(currentAlbumId)
+                }
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication(),
+                        "复制成功 $successCount 个文件",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            AppLogger.d("VM", "copyItemsToAlbum: target=$targetName success=$successCount/${items.size}")
+        }
     }
 
     /**

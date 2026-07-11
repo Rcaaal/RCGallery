@@ -799,10 +799,25 @@ fun MediaGridScreen(
             if (!isMediaMultiSelect) {
                 val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
                 if (clipboardItems.isNotEmpty()) {
+                    val clipboardScope = rememberCoroutineScope()
                     ClipboardBadge(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = albumDirectoryPath.ifEmpty { null },
-                        onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, albumName, albumId.ifEmpty { null }) },
+                        onPasteToAlbum = { mode, dir ->
+                            if (mode == PasteMode.MOVE) {
+                                // MOVE 走独立入口：不从 clipboard 塞入后再 paste，直接 moveItemsToAlbum
+                                val job = viewModel.moveItemsToAlbum(clipboardItems, dir, albumName, albumId.ifEmpty { null })
+                                // 全部移动成功后清空 clipboard，失败后保留以便重试
+                                clipboardScope.launch {
+                                    job.join()
+                                    if (viewModel.moveFailures.value.isEmpty()) {
+                                        viewModel.clearClipboard()
+                                    }
+                                }
+                            } else {
+                                viewModel.pasteToAlbum(mode, dir, albumName, albumId.ifEmpty { null })
+                            }
+                        },
                         onPickTargetAlbum = { showAlbumPickDialog = true },
                         onClear = { viewModel.clearClipboard() },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 80.dp)
@@ -926,16 +941,29 @@ fun MediaGridScreen(
                     },
                     onAlbumSelected = { targetDir, targetName, mode ->
                         showAlbumPickDialog = false
-                        // 来自多选"选择目标相册"：先加入中转站再粘贴
-                        if (pendingPickItems.isNotEmpty()) {
-                            viewModel.addToClipboard(pendingPickItems)
-                            pendingPickItems = emptyList()
-                        }
-                        // 来自中转站 badge：中转站已有内容，直接粘贴
-                        viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
-                        // MOVE 后多选态中的文件已不在当前相册，退出多选防旧 position 残留
-                        if (mode == PasteMode.MOVE && isMediaMultiSelect) {
-                            exitMediaMultiSelect()
+                        if (mode == PasteMode.MOVE) {
+                            // MOVE 走独立入口：多选路径用 pendingPickItems，中转站路径用 clipboardItems
+                            val moveItems = if (pendingPickItems.isNotEmpty()) {
+                                val items = pendingPickItems.toList()
+                                pendingPickItems = emptyList()
+                                items
+                            } else {
+                                viewModel.clipboardItems.value.toList()
+                            }
+                            viewModel.moveItemsToAlbum(moveItems, targetDir, targetName, albumId.ifEmpty { null })
+                            if (isMediaMultiSelect) {
+                                exitMediaMultiSelect()
+                            }
+                        } else {
+                            // COPY 直连：多选路径用 pendingPickItems，中转站路径用 clipboardItems
+                            val copyItems = if (pendingPickItems.isNotEmpty()) {
+                                val items = pendingPickItems.toList()
+                                pendingPickItems = emptyList()
+                                items
+                            } else {
+                                viewModel.clipboardItems.value.toList()
+                            }
+                            viewModel.copyItemsToAlbum(copyItems, targetDir, targetName, albumId.ifEmpty { null })
                         }
                     },
                     onCreateFolder = { name, onResult ->
@@ -953,28 +981,63 @@ fun MediaGridScreen(
                 )
             }
 
-            // ── 全盘权限引导对话框 ──
-            val rollbackCount by viewModel.moveRollbackCount.collectAsStateWithLifecycle()
-            if (rollbackCount > 0) {
+            // ── MOVE 失败提示对话框（按失败原因分组展示准确信息）──
+            val moveFailures by viewModel.moveFailures.collectAsStateWithLifecycle()
+            if (moveFailures.isNotEmpty()) {
+                val grouped = moveFailures.groupBy { it.reason }.mapValues { it.value.size }
+                val totalFailed = moveFailures.size
                 AlertDialog(
-                    onDismissRequest = { viewModel.clearMoveRollbackCount() },
-                    title = { Text("需要全盘访问权限") },
+                    onDismissRequest = { viewModel.clearMoveFailures() },
+                    title = { Text("移动未完全成功") },
                     text = {
-                        Text("移动 $rollbackCount 个文件时无法删除源文件。请开启「所有文件访问权限」后重试。")
+                        Column {
+                            Text("共 $totalFailed 个文件移动失败：",
+                                style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(8.dp))
+                            grouped.forEach { (reason, count) ->
+                                val message = when (reason) {
+                                    GalleryViewModel.MoveFailureReason.SOURCE_DELETE_FAILED ->
+                                        "$count 个文件已复制到目标但删除源文件失败。可能是系统文件或权限不足，请尝试在系统设置中开启「所有文件访问权限」。"
+                                    GalleryViewModel.MoveFailureReason.TARGET_VERIFICATION_FAILED ->
+                                        "$count 个文件移动失败：目标文件验证未通过。请检查存储空间和文件系统状态。"
+                                    GalleryViewModel.MoveFailureReason.MEDIASTORE_UPDATE_FAILED ->
+                                        "$count 个文件移动失败：MediaStore 更新异常。请检查存储空间是否充足。"
+                                    GalleryViewModel.MoveFailureReason.SCAN_FAILED ->
+                                        "$count 个文件已复制，但媒体扫描注册失败。可尝试刷新相册列表。"
+                                    GalleryViewModel.MoveFailureReason.SOURCE_NOT_FOUND ->
+                                        "$count 个文件在移动前已不存在，已被自动跳过。"
+                                    GalleryViewModel.MoveFailureReason.UNKNOWN_ERROR ->
+                                        "$count 个文件移动时出现未知错误。"
+                                }
+                                Text(
+                                    text = message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(bottom = 6.dp)
+                                )
+                            }
+                        }
                     },
                     confirmButton = {
+                        val hasPermissionFailures = moveFailures.any {
+                            it.reason == GalleryViewModel.MoveFailureReason.SOURCE_DELETE_FAILED
+                        }
                         Button(onClick = {
-                            viewModel.clearMoveRollbackCount()
-                            try {
-                                val intent = android.content.Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = android.net.Uri.parse("package:${activity.packageName}")
-                                }
-                                activity.startActivity(intent)
-                            } catch (_: Exception) { }
-                        }) { Text("去开启") }
+                            viewModel.clearMoveFailures()
+                            if (hasPermissionFailures) {
+                                try {
+                                    val intent = android.content.Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                        data = android.net.Uri.parse("package:${activity.packageName}")
+                                    }
+                                    activity.startActivity(intent)
+                                } catch (_: Exception) { }
+                            }
+                        }) {
+                            Text(if (hasPermissionFailures) "去开启权限" else "知道了")
+                        }
                     },
                     dismissButton = {
-                        TextButton(onClick = { viewModel.clearMoveRollbackCount() }) { Text("知道了") }
+                        TextButton(onClick = { viewModel.clearMoveFailures() }) { Text("关闭") }
                     }
                 )
             }

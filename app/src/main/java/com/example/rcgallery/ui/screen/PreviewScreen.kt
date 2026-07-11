@@ -678,12 +678,12 @@ fun PreviewScreen(
                 onAlbumSelected = { targetDir, targetName, mode ->
                     showAlbumPickDialog = false
                     if (singleItem != null) {
-                        // 单张图片操作：先清空中转站再加入当前项，防止混入之前的中转站内容
-                        viewModel.clearClipboard()
-                        viewModel.addToClipboard(listOf(singleItem))
-                        viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
-                        // MOVE 后：从本地快照中移除、翻页、显示撤销 Snackbar
                         if (mode == PasteMode.MOVE) {
+                            // MOVE 走独立入口，不经过 clipboard 中转站
+                            viewModel.moveItemsToAlbum(
+                                listOf(singleItem), targetDir, targetName, albumId.ifEmpty { null }
+                            )
+                            // MOVE 后：从本地快照中移除、翻页、显示 Snackbar
                             val movedPage = pagerState.currentPage
                             val wasLastPage = movedPage >= mediaItems.lastIndex
                             mediaItems = mediaItems.filterIndexed { i, _ -> i != movedPage }
@@ -692,10 +692,13 @@ fun PreviewScreen(
                                     delay(50)
                                     pagerState.animateScrollToPage(movedPage.coerceAtMost(mediaItems.lastIndex))
                                 }
-                                // 不移除 Snackbar undo — pasteToAlbum(MOVE) 后文件路径已变，
-                                // 且 MoveRecord 尚未写入，正确撤销需走 最近移动 → 撤销
                                 snackbarHostState.showSnackbar("已移动", duration = SnackbarDuration.Short)
                             }
+                        } else {
+                            // COPY 直连，不碰 clipboard
+                            viewModel.copyItemsToAlbum(
+                                listOf(singleItem), targetDir, targetName, albumId.ifEmpty { null }
+                            )
                         }
                     }
                 }
