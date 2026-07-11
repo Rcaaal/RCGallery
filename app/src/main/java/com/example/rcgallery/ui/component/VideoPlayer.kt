@@ -102,6 +102,10 @@ fun VideoPlayer(
     var playerPosition by remember { mutableFloatStateOf(0f) }
     var playerDuration by remember { mutableFloatStateOf(1f) }
     val lastTapTime = remember { longArrayOf(0L) }
+    /** 是否正在拖拽 seek（用于显示浮动时间提示 + 冻结控制栏） */
+    var isDraggingSeek by remember { mutableStateOf(false) }
+    /** 拖拽中的目标进度位置（ms），供浮动时间提示显示 */
+    var seekIndicatorPosition by remember { mutableLongStateOf(0L) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -325,8 +329,11 @@ fun VideoPlayer(
 
                     // 时间区滑动状态
                     val seeking = booleanArrayOf(false)
-                    val seekStartX = floatArrayOf(0f)
+                    val lastSeekTime = longArrayOf(0L)      // 上次实际 seekTo 的时刻（节流用）
+                    val seekOriginRawX = floatArrayOf(0f)    // 拖动起始 X（用于绝对偏移计算）
+                    val seekBasePosition = longArrayOf(0L)   // 拖动起始播放位置（ms）
                     var seekLogged = false
+                    val SEEK_THROTTLE_MS = 40L               // seekTo 节流间隔
 
                     // ── 覆盖层（带调试虚线框绘制）──
                     val overlay = object : View(ctx) {
@@ -384,7 +391,14 @@ fun VideoPlayer(
                                 if (inSeekZone) {
                                     onControlZoneActive?.invoke(true)
                                     lastTapTime[0] = 0L
-                                    seeking[0] = true; seekStartX[0] = ev.rawX
+                                    seeking[0] = true
+                                    seekOriginRawX[0] = ev.rawX
+                                    seekBasePosition[0] = exoPlayer.currentPosition
+                                    // 拖动开始：冻结控制栏 + 初始化浮动提示
+                                    isDraggingSeek = true
+                                    seekIndicatorPosition = exoPlayer.currentPosition
+                                    pv.controllerShowTimeoutMs = Int.MAX_VALUE
+                                    pv.showController()
                                 } else if (!inControlBarZone) {
                                     // 上方视频区才启动长按倍速计时（控制栏按钮区不触发）
                                     if (exoPlayer.playWhenReady) { v.postDelayed(lpr, (InertiaSettings.longPressTimeoutSec * 1000).toLong()) }
@@ -398,14 +412,17 @@ fun VideoPlayer(
                             MotionEvent.ACTION_MOVE -> {
                                 if (seeking[0]) {
                                     if (!seekLogged) { seekLogged = true; AppLogger.d("VideoPlayer", "[touch] seeking start") }
-                                    val dx = ev.rawX - seekStartX[0]
                                     val dur = exoPlayer.duration.coerceAtLeast(1)
                                     val sw = ctx.resources.displayMetrics.widthPixels
-                                    val dSeek = (dx / sw * dur).toLong()
-                                    val np = (exoPlayer.currentPosition + dSeek).coerceIn(0, dur)
-                                    exoPlayer.seekTo(np)
-                                    seekStartX[0] = ev.rawX
-                                    pv.showController()
+                                    val dx = ev.rawX - seekOriginRawX[0]
+                                    val np = (seekBasePosition[0] + (dx / sw * dur).toLong()).coerceIn(0, dur)
+                                    // 始终更新浮动提示的位置（不论是否节流）
+                                    seekIndicatorPosition = np
+                                    val now = SystemClock.elapsedRealtime()
+                                    if (now - lastSeekTime[0] >= SEEK_THROTTLE_MS) {
+                                        exoPlayer.seekTo(np)
+                                        lastSeekTime[0] = now
+                                    }
                                 } else {
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 }
@@ -418,7 +435,11 @@ fun VideoPlayer(
                                 val now = SystemClock.uptimeMillis()
 
                                 if (seeking[0]) {
-                                    AppLogger.d("VideoPlayer", "[touch] seeking done @ ${exoPlayer.currentPosition}/${exoPlayer.duration}")
+                                    // 拖动结束：最终 seek 到位 + 隐藏浮动提示 + 恢复控制栏自动隐藏
+                                    isDraggingSeek = false
+                                    exoPlayer.seekTo(seekIndicatorPosition)
+                                    pv.controllerShowTimeoutMs = 3000
+                                    AppLogger.d("VideoPlayer", "[touch] seeking done @ ${seekIndicatorPosition}/${exoPlayer.duration}")
                                     seeking[0] = false; lastTapTime[0] = 0L
                                     pv.showController()
                                 } else if (inControlBarZone) {
@@ -451,8 +472,10 @@ fun VideoPlayer(
                             }
 
                             MotionEvent.ACTION_CANCEL -> {
+                                isDraggingSeek = false
                                 seeking[0] = false; v.removeCallbacks(lpr)
                                 onControlZoneActive?.invoke(false)
+                                pv.controllerShowTimeoutMs = 3000
                                 if (speedBoosted[0]) { exoPlayer.setPlaybackSpeed(1f); speedBoosted[0] = false; speedText = "1x" }
                                 pv.dispatchTouchEvent(MotionEvent.obtain(ev)); true
                             }
@@ -483,6 +506,26 @@ fun VideoPlayer(
             AnimatedVisibility(visible = speedText.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                     Text(text = speedText, modifier = Modifier.padding(top = 80.dp), fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
+
+            // ── 拖动进度浮动时间提示 ──
+            AnimatedVisibility(visible = isDraggingSeek, enter = fadeIn(), exit = fadeOut()) {
+                val pos = seekIndicatorPosition
+                val dur = playerDuration.toLong()
+                val posMin = pos / 60000; val posSec = (pos % 60000) / 1000
+                val durMin = dur / 60000; val durSec = (dur % 60000) / 1000
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+                    Text(
+                        text = "${posMin}:${posSec.toString().padStart(2, '0')} / ${durMin}:${durSec.toString().padStart(2, '0')}",
+                        modifier = Modifier
+                            .padding(bottom = 100.dp)
+                            .background(Color(0x80000000), shape = CircleShape)
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
                 }
             }
 
