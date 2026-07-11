@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -31,7 +30,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -509,16 +507,6 @@ fun VideoPlayer(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // ── 统一进度条（PiP 时隐藏）──
-            if (!hideUiOverlays && playerDuration > 0f) {
-                val barOffsetY by remember { derivedStateOf { if (controllerVisible) (-54).dp else 0.dp } }
-                LinearProgressIndicator(
-                    progress = { (playerPosition / playerDuration).coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().height(3.dp).align(Alignment.BottomCenter).offset(y = barOffsetY),
-                    color = Color.White,
-                    trackColor = Color.White.copy(alpha = 0.2f)
-                )
-            }
 
             AnimatedVisibility(visible = speedText.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
