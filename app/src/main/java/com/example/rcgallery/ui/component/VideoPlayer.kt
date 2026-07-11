@@ -279,12 +279,10 @@ fun VideoPlayer(
                     }
                     pvRef.value = pv
 
-                    // 拦截齿轮按钮→弹出自定义速度设置（而不是 ExoPlayer 原生设置）
+                    // 隐藏 PlayerView 原生齿轮按钮（已移至左上角 Compose 层）
                     pv.post {
                         val sid = ctx.resources.getIdentifier("exo_settings", "id", ctx.packageName)
-                        if (sid != 0) pv.findViewById<View>(sid)?.setOnClickListener {
-                            showSpeedSettings = true
-                        }
+                        if (sid != 0) pv.findViewById<View>(sid)?.visibility = android.view.View.GONE
                     }
 
                     // ── seek 区边界（基于按钮真实坐标，zoneVersion 变化时重算）──
@@ -292,12 +290,11 @@ fun VideoPlayer(
                     val tmTop = intArrayOf(0); val tmBot = intArrayOf(0)
                     val pvScreenTop = intArrayOf(0); val pvScreenHeight = intArrayOf(0)
                     val pauseBtnBottom = intArrayOf(Int.MAX_VALUE)
-                    val settingsBtnLeft = intArrayOf(Int.MAX_VALUE)
                     var zonesReady = false
                     val lastZoneVersion = intArrayOf(-1)
                     val GAP_SEEK_DP = 8f
 
-                    // 基于暂停/播放按钮和设置按钮的真实位置锁定 seek 矩形
+                    // 基于暂停/播放按钮位置锁定 seek 矩形，全宽
                     fun tryLockZones() {
                         if (zonesReady && lastZoneVersion[0] == zoneVersion[0]) return
                         zonesReady = false
@@ -317,26 +314,18 @@ fun VideoPlayer(
                                 pauseBtnBottom[0] = pos[1] + btn.height
                             }
                         }
-                        // 读取设置按钮位置 → seek 区右边界
-                        val sId = ctx.resources.getIdentifier("exo_settings", "id", ctx.packageName)
-                        if (sId != 0) {
-                            pv.findViewById<View>(sId)?.let { btn ->
-                                val pos = IntArray(2)
-                                try { btn.getLocationOnScreen(pos) } catch (_: Exception) { return@let }
-                                settingsBtnLeft[0] = pos[0]
-                            }
-                        }
+                        // 设置按钮已移至左上角 Compose 层，seek 右边界采用全宽
 
                         val gapPx = (GAP_SEEK_DP * density).toInt()
                         tmLeft[0] = pvLeft
+                        tmRight[0] = pvLeft + pvW  // 全宽
                         tmTop[0] = if (pauseBtnBottom[0] != Int.MAX_VALUE) pauseBtnBottom[0] + gapPx else pvTop + pvH - (120 * density).toInt()
-                        tmRight[0] = if (settingsBtnLeft[0] != Int.MAX_VALUE) settingsBtnLeft[0] - gapPx else pvLeft + pvW
                         tmBot[0] = pvTop + pvH
 
                         if (tmRight[0] > tmLeft[0]) {
                             zonesReady = true
                             lastZoneVersion[0] = zoneVersion[0]
-                            AppLogger.d("VideoPlayer", "zone LOCKED v${zoneVersion[0]} pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}] pauseBtm=${pauseBtnBottom[0]} settingsLft=${settingsBtnLeft[0]}")
+                            AppLogger.d("VideoPlayer", "zone LOCKED v${zoneVersion[0]} pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}] pauseBtm=${pauseBtnBottom[0]}")
                         }
                     }
 
@@ -375,12 +364,10 @@ fun VideoPlayer(
                                 dPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(5f, 5f), 0f)
                                 dPaint.color = android.graphics.Color.YELLOW
                                 canvas.drawRect(android.graphics.Rect(tmLeft[0] - off[0], tmTop[0] - off[1], tmRight[0] - off[0], tmBot[0] - off[1]), dPaint)
-                                // 绿色虚线 = 暂停按钮排除区（seek 区上方）
+                                // 绿色虚线 = 控制栏按钮排除区（seek 区上方）
                                 dPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 6f), 0f)
                                 dPaint.color = android.graphics.Color.GREEN
                                 canvas.drawRect(android.graphics.Rect(tmLeft[0] - off[0], tmBot[0] - off[1] - 160, tmRight[0] - off[0], tmTop[0] - off[1]), dPaint)
-                                // 绿色虚线 = 设置按钮排除区（seek 区右侧）
-                                canvas.drawRect(android.graphics.Rect(tmRight[0] - off[0], tmTop[0] - off[1], tmRight[0] + 56 - off[0], tmBot[0] - off[1]), dPaint)
                             }
                             dPaint.pathEffect = null
                         }
@@ -403,16 +390,15 @@ fun VideoPlayer(
                     overlay.setOnTouchListener { v, ev ->
                         val ry = ev.rawY.toInt(); val rx = ev.rawX.toInt()
                         val inSeekZone = zonesReady && ry in tmTop[0]..tmBot[0] && rx in tmLeft[0]..tmRight[0]
-                        // 按钮排除区：只在控制栏可视范围（seek 区上方约 160px）内生效
+                        // 控制栏按钮排除区（seek 区上方约 160px，全宽），用于保护播放/暂停等按钮不被 seek 吃掉
                         val barTop = tmTop[0] - (160 * density).toInt()
-                        val inPausePlayZone = zonesReady && barTop > 0 && ry in barTop..<tmTop[0] && rx in tmLeft[0]..<(tmLeft[0] + tmRight[0]) / 2
-                        val inSettingsZone = zonesReady && barTop > 0 && ry in barTop..tmBot[0] && rx >= (tmLeft[0] + tmRight[0]) / 2 && rx !in tmLeft[0]..tmRight[0]
+                        val inControlBarZone = zonesReady && barTop > 0 && ry in barTop..<tmTop[0] && rx in tmLeft[0]..tmRight[0]
 
                         when (ev.actionMasked) {
                             MotionEvent.ACTION_DOWN -> {
                                 v.removeCallbacks(lpr); seeking[0] = false; seekGestureActive[0] = false; seekLogged = false
                                 // 按钮排除区 → 清空双击计时器，直接转发给 PlayerView
-                                if (inPausePlayZone || inSettingsZone) {
+                                if (inControlBarZone) {
                                     lastTapTime[0] = 0L
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 } else if (inSeekZone) {
@@ -474,7 +460,7 @@ fun VideoPlayer(
                                     pv.showController()
                                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                     seeking[0] = false
-                                } else if (inPausePlayZone || inSettingsZone) {
+                                } else if (inControlBarZone) {
                                     lastTapTime[0] = 0L
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 } else if (now - lastTapTime[0] < DOUBLE_TAP_TIMEOUT_MS) {
@@ -592,6 +578,20 @@ fun VideoPlayer(
                         )
                     }
                 }
+            }
+
+            // ── 设置按钮（左上角，常驻不随控制栏显隐）──
+            if (!hideUiOverlays) {
+                Icon(
+                    painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                    contentDescription = "播放设置",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 12.dp, top = 12.dp)
+                        .size(24.dp)
+                        .clickable { showSpeedSettings = true }
+                )
             }
 
             // ── 删除按钮（常驻右上角，不随控制面板显隐，纯图标无背景）──
