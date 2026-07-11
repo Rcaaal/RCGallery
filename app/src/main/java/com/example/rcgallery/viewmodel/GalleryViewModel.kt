@@ -2131,7 +2131,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         targetPath = fo.getString("targetPath"),
                         mimeType = fo.getString("mimeType"),
                         size = fo.getLong("size"),
-                        dateAdded = fo.optLong("dateAdded", 0L)
+                        dateAdded = fo.optLong("dateAdded", 0L),
+                        mediaUri = fo.optString("mediaUri", "")
                     )
                 }
                 MoveRecord(
@@ -2169,6 +2170,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         put("mimeType", f.mimeType)
                         put("size", f.size)
                         put("dateAdded", f.dateAdded)
+                        put("mediaUri", f.mediaUri)
                     })
                 }
                 arr.put(JSONObject().apply {
@@ -2629,7 +2631,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         if (mediaStoreMoved) {
                             AppLogger.d("Paste", "MOVE MediaStore RELATIVE_PATH OK: ${item.fileName}")
                             // 验证目标文件确实存在（update 返回 > 0 只是 MediaStore 接受了变更）
-                            val targetOk = targetFile.exists() && targetFile.length() >= item.size / 2
+                            val targetOk = targetFile.exists() && targetFile.length() == item.size
                             if (!targetOk) {
                                 AppLogger.d("Paste", "MOVE MediaStore accepted but target not found, fallback: ${item.fileName}")
                                 mediaStoreMoved = false
@@ -2653,7 +2655,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
                         if (mode == PasteMode.MOVE) {
                             // MOVE fallback: 验证目标 → scanFile → 目标确认后再删源文件
-                            val targetOk = targetFile.exists() && targetFile.length() >= item.size / 2
+                            val targetOk = targetFile.exists() && targetFile.length() == item.size
                             if (!targetOk) {
                                 try { targetFile.delete() } catch (_: Exception) { }
                                 AppLogger.e("Paste", "MOVE fallback: target verification failed, rolled back: ${item.fileName}")
@@ -2860,7 +2862,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             }
                             sourceFile.setLastModified(targetFile.lastModified())
                             // 验证 source 文件
-                            val srcOk = sourceFile.exists() && sourceFile.length() >= entry.size / 2
+                            val srcOk = sourceFile.exists() && sourceFile.length() == entry.size
                             if (!srcOk) {
                                 try { sourceFile.delete() } catch (_: Exception) { }
                                 AppLogger.e("Undo", "MOVE undo fallback: source verification failed, rolled back: ${entry.fileName}")
