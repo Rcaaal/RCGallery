@@ -820,7 +820,8 @@ fun MediaGridScreen(
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     volumeEnabled = volumeEnabled,
                     onVolumeToggle = { volumeEnabled = !volumeEnabled },
-                    items = tagFilteredItems
+                    items = tagFilteredItems,
+                    albumId = albumId
                 )
             }
 

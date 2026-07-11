@@ -66,7 +66,8 @@ fun PreviewScreen(
     onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
     volumeEnabled: Boolean = false,
     onVolumeToggle: () -> Unit = {},
-    items: List<com.example.rcgallery.model.MediaItem> = emptyList()  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
+    items: List<com.example.rcgallery.model.MediaItem> = emptyList(),  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
+    albumId: String = ""  // 来源相册 ID，MOVE 后用于刷新源相册媒体列表
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
@@ -680,7 +681,7 @@ fun PreviewScreen(
                         // 单张图片操作：先清空中转站再加入当前项，防止混入之前的中转站内容
                         viewModel.clearClipboard()
                         viewModel.addToClipboard(listOf(singleItem))
-                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
                         // MOVE 后：从本地快照中移除、翻页、显示撤销 Snackbar
                         if (mode == PasteMode.MOVE) {
                             val movedPage = pagerState.currentPage
