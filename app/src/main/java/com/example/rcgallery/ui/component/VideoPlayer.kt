@@ -287,46 +287,56 @@ fun VideoPlayer(
                         }
                     }
 
-                    // ── seek 区边界（基于 PlayerView 实际可视区域，配合 zoneVersion 支持翻页后重锁）──
+                    // ── seek 区边界（基于按钮真实坐标，zoneVersion 变化时重算）──
                     val tmLeft = intArrayOf(0); val tmRight = intArrayOf(0)
                     val tmTop = intArrayOf(0); val tmBot = intArrayOf(0)
                     val pvScreenTop = intArrayOf(0); val pvScreenHeight = intArrayOf(0)
+                    val pauseBtnBottom = intArrayOf(Int.MAX_VALUE)
+                    val settingsBtnLeft = intArrayOf(Int.MAX_VALUE)
                     var zonesReady = false
                     val lastZoneVersion = intArrayOf(-1)
+                    val GAP_SEEK_DP = 8f
 
-                    fun findTimeBar(v: View): View? {
-                        if (v.javaClass.name == "androidx.media3.ui.DefaultTimeBar") return v
-                        if (v is ViewGroup) for (i in 0 until v.childCount) { findTimeBar(v.getChildAt(i))?.let { return it } }
-                        return null
-                    }
-
-                    // 基于 PlayerView 实际屏幕位置锁定 seek 区，zoneVersion 变化时重新锁定
+                    // 基于暂停/播放按钮和设置按钮的真实位置锁定 seek 矩形
                     fun tryLockZones() {
                         if (zonesReady && lastZoneVersion[0] == zoneVersion[0]) return
-                        zonesReady = false  // 版本变化或首次，强制重算
-                        findTimeBar(pv)?.let { tb ->
-                            try {
-                                tb.visibility = android.view.View.INVISIBLE
-                                tb.setPadding(0, 0, 0, 0)
-                                tb.invalidate()
-                            } catch (_: Exception) {}
-                        }
+                        zonesReady = false
+
                         val pvPos = IntArray(2)
                         try { pv.getLocationOnScreen(pvPos) } catch (_: Exception) { return }
-                        val pvLeft = pvPos[0]; val pvTop = pvPos[1]
-                        val pvW = pv.width; val pvH = pv.height
+                        val pvLeft = pvPos[0]; val pvTop = pvPos[1]; val pvW = pv.width; val pvH = pv.height
                         if (pvW <= 0 || pvH <= 0) return
                         pvScreenTop[0] = pvTop; pvScreenHeight[0] = pvH
-                        val barZoneH = (120 * density).toInt()
-                        tmLeft[0] = pvLeft; tmRight[0] = pvLeft + pvW
-                        tmTop[0] = pvTop + pvH - barZoneH; tmBot[0] = pvTop + pvH
-                        // 右边界预留齿轮按钮空间
-                        val gearWidthPx = (56 * density).toInt()
-                        tmRight[0] = (tmRight[0] - gearWidthPx).coerceAtLeast(tmLeft[0] + 1)
+
+                        // 读取暂停/播放按钮位置 → seek 区上边界
+                        val ppId = ctx.resources.getIdentifier("exo_play_pause", "id", ctx.packageName)
+                        if (ppId != 0) {
+                            pv.findViewById<View>(ppId)?.let { btn ->
+                                val pos = IntArray(2)
+                                try { btn.getLocationOnScreen(pos) } catch (_: Exception) { return@let }
+                                pauseBtnBottom[0] = pos[1] + btn.height
+                            }
+                        }
+                        // 读取设置按钮位置 → seek 区右边界
+                        val sId = ctx.resources.getIdentifier("exo_settings", "id", ctx.packageName)
+                        if (sId != 0) {
+                            pv.findViewById<View>(sId)?.let { btn ->
+                                val pos = IntArray(2)
+                                try { btn.getLocationOnScreen(pos) } catch (_: Exception) { return@let }
+                                settingsBtnLeft[0] = pos[0]
+                            }
+                        }
+
+                        val gapPx = (GAP_SEEK_DP * density).toInt()
+                        tmLeft[0] = pvLeft
+                        tmTop[0] = if (pauseBtnBottom[0] != Int.MAX_VALUE) pauseBtnBottom[0] + gapPx else pvTop + pvH - (120 * density).toInt()
+                        tmRight[0] = if (settingsBtnLeft[0] != Int.MAX_VALUE) settingsBtnLeft[0] - gapPx else pvLeft + pvW
+                        tmBot[0] = pvTop + pvH
+
                         if (tmRight[0] > tmLeft[0]) {
                             zonesReady = true
                             lastZoneVersion[0] = zoneVersion[0]
-                            AppLogger.d("VideoPlayer", "zone LOCKED version=${zoneVersion[0]} pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}]")
+                            AppLogger.d("VideoPlayer", "zone LOCKED v${zoneVersion[0]} pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}] pauseBtm=${pauseBtnBottom[0]} settingsLft=${settingsBtnLeft[0]}")
                         }
                     }
 
@@ -361,18 +371,16 @@ fun VideoPlayer(
                             if (!InertiaSettings.showControlZoneDebug) return
                             val off = IntArray(2); getLocationOnScreen(off)
                             if (zonesReady) {
-                                // 黄色虚线 = seek 区
+                                // 黄色虚线 = seekRect（基于按钮锚点）
                                 dPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(5f, 5f), 0f)
                                 dPaint.color = android.graphics.Color.YELLOW
                                 canvas.drawRect(android.graphics.Rect(tmLeft[0] - off[0], tmTop[0] - off[1], tmRight[0] - off[0], tmBot[0] - off[1]), dPaint)
-                            }
-                            // 绿色虚线 = 控制栏按钮区（百分比，基于 PlayerView 可视区域）
-                            dPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 6f), 0f)
-                            dPaint.color = android.graphics.Color.GREEN
-                            if (pvScreenHeight[0] > 0) {
-                                val cbTopG = pvScreenTop[0] + pvScreenHeight[0] - (pvScreenHeight[0] * InertiaSettings.controlBarZonePercent / 100).toInt()
-                                val pvScreenBottom = pvScreenTop[0] + pvScreenHeight[0]
-                                canvas.drawRect(android.graphics.Rect(0, cbTopG - off[1], width, pvScreenBottom - off[1]), dPaint)
+                                // 绿色虚线 = 暂停按钮排除区（seek 区上方）
+                                dPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 6f), 0f)
+                                dPaint.color = android.graphics.Color.GREEN
+                                canvas.drawRect(android.graphics.Rect(tmLeft[0] - off[0], tmBot[0] - off[1] - 160, tmRight[0] - off[0], tmTop[0] - off[1]), dPaint)
+                                // 绿色虚线 = 设置按钮排除区（seek 区右侧）
+                                canvas.drawRect(android.graphics.Rect(tmRight[0] - off[0], tmTop[0] - off[1], tmRight[0] + 56 - off[0], tmBot[0] - off[1]), dPaint)
                             }
                             dPaint.pathEffect = null
                         }
@@ -395,37 +403,34 @@ fun VideoPlayer(
                     overlay.setOnTouchListener { v, ev ->
                         val ry = ev.rawY.toInt(); val rx = ev.rawX.toInt()
                         val inSeekZone = zonesReady && ry in tmTop[0]..tmBot[0] && rx in tmLeft[0]..tmRight[0]
-                        val cbTop = if (pvScreenHeight[0] > 0)
-                            pvScreenTop[0] + pvScreenHeight[0] - (pvScreenHeight[0] * InertiaSettings.controlBarZonePercent / 100).toInt()
-                        else 0
-                        val pvScreenBottom = pvScreenTop[0] + pvScreenHeight[0]
-                        val inControlBarZone = cbTop > 0 && pvScreenBottom > 0 && ry in cbTop..pvScreenBottom && !inSeekZone
+                        // 按钮排除区：只在控制栏可视范围（seek 区上方约 160px）内生效
+                        val barTop = tmTop[0] - (160 * density).toInt()
+                        val inPausePlayZone = zonesReady && barTop > 0 && ry in barTop..<tmTop[0] && rx in tmLeft[0]..<(tmLeft[0] + tmRight[0]) / 2
+                        val inSettingsZone = zonesReady && barTop > 0 && ry in barTop..tmBot[0] && rx >= (tmLeft[0] + tmRight[0]) / 2 && rx !in tmLeft[0]..tmRight[0]
 
                         when (ev.actionMasked) {
                             MotionEvent.ACTION_DOWN -> {
                                 v.removeCallbacks(lpr); seeking[0] = false; seekGestureActive[0] = false; seekLogged = false
-                                // 控制栏按钮区 → 立即清空双击计时器
-                                if (inControlBarZone) lastTapTime[0] = 0L
-                                AppLogger.d("VideoPlayer", "[touch] DOWN seek=${if (inSeekZone)"Y" else "N"} cb=${if (inControlBarZone)"Y" else "N"} controller=${controllerVisible} pos=${exoPlayer.currentPosition}")
-                                if (inSeekZone) {
+                                // 按钮排除区 → 清空双击计时器，直接转发给 PlayerView
+                                if (inPausePlayZone || inSettingsZone) {
+                                    lastTapTime[0] = 0L
+                                    pv.dispatchTouchEvent(MotionEvent.obtain(ev))
+                                } else if (inSeekZone) {
+                                    AppLogger.d("VideoPlayer", "[touch] DOWN seek ry=$ry rx=$rx")
                                     onControlZoneActive?.invoke(true)
                                     lastTapTime[0] = 0L
                                     seeking[0] = true
                                     seekGestureActive[0] = true
                                     seekOriginRawX[0] = ev.rawX
                                     seekBasePosition[0] = exoPlayer.currentPosition
-                                    // 震动：进入 seek 模式
                                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                    // 拖动开始：冻结控制栏 + 初始化浮动提示
                                     isDraggingSeek = true
                                     seekIndicatorPosition = exoPlayer.currentPosition
                                     pv.controllerShowTimeoutMs = Int.MAX_VALUE
                                     pv.showController()
-                                } else if (!inControlBarZone) {
-                                    // 上方视频区才启动长按倍速计时（控制栏按钮区不触发）
-                                    if (exoPlayer.playWhenReady) { v.postDelayed(lpr, (InertiaSettings.longPressTimeoutSec * 1000).toLong()) }
-                                    pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 } else {
+                                    // 视频区：长按倍速 / 双击暂停
+                                    if (exoPlayer.playWhenReady) { v.postDelayed(lpr, (InertiaSettings.longPressTimeoutSec * 1000).toLong()) }
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 }
                                 true
@@ -436,14 +441,12 @@ fun VideoPlayer(
                                     if (!seekLogged) {
                                         seekLogged = true
                                         AppLogger.d("VideoPlayer", "[touch] seeking start")
-                                        // 震动：拖动首次真正开始
                                         v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                                     }
                                     val dur = exoPlayer.duration.coerceAtLeast(1)
                                     val sw = ctx.resources.displayMetrics.widthPixels
                                     val dx = ev.rawX - seekOriginRawX[0]
                                     val np = (seekBasePosition[0] + (dx / sw * dur).toLong()).coerceIn(0, dur)
-                                    // 始终更新浮动提示的位置（不论是否节流）
                                     seekIndicatorPosition = np
                                     val now = SystemClock.elapsedRealtime()
                                     if (now - lastSeekTime[0] >= SEEK_THROTTLE_MS) {
@@ -461,7 +464,6 @@ fun VideoPlayer(
                                 onControlZoneActive?.invoke(false)
                                 val now = SystemClock.uptimeMillis()
 
-                                // 先检查 seek 手势 — 只要 seekGestureActive 为 true 就短路双击
                                 if (seekGestureActive[0]) {
                                     seekGestureActive[0] = false
                                     isDraggingSeek = false
@@ -470,11 +472,9 @@ fun VideoPlayer(
                                     AppLogger.d("VideoPlayer", "[touch] seeking done @ ${seekIndicatorPosition}/${exoPlayer.duration}")
                                     lastTapTime[0] = 0L
                                     pv.showController()
-                                    // 震动：seek 结束
                                     v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                     seeking[0] = false
-                                } else if (inControlBarZone) {
-                                    // 控制栏按钮区 → 不触发双击，保护快进/快退按钮
+                                } else if (inPausePlayZone || inSettingsZone) {
                                     lastTapTime[0] = 0L
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 } else if (now - lastTapTime[0] < DOUBLE_TAP_TIMEOUT_MS) {
@@ -486,7 +486,6 @@ fun VideoPlayer(
                                     pv.dispatchTouchEvent(cancel); cancel.recycle()
                                     exoPlayer.setPlaybackSpeed(1f); speedBoosted[0] = false; speedText = "1x"; pv.hideController()
                                 } else if (controllerVisible) {
-                                    // 控制栏可见且不在按钮区 → 支持双击暂停，单击转发给 PlayerView（隐藏）
                                     if (now - lastTapTime[0] < DOUBLE_TAP_TIMEOUT_MS) {
                                         lastTapTime[0] = 0L
                                         exoPlayer.playWhenReady = !exoPlayer.playWhenReady
