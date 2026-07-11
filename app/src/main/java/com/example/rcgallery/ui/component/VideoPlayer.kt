@@ -107,6 +107,8 @@ fun VideoPlayer(
     var isDraggingSeek by remember { mutableStateOf(false) }
     /** 拖拽中的目标进度位置（ms），供浮动时间提示显示 */
     var seekIndicatorPosition by remember { mutableLongStateOf(0L) }
+    /** seek 区锁定版本号 — isActive 变化时递增，触发 tryLockZones 重新锁定 */
+    val zoneVersion = remember { intArrayOf(0) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -204,11 +206,16 @@ fun VideoPlayer(
         if (isActive) {
             hasError = false; exoPlayer.prepare(); exoPlayer.playWhenReady = true
             savedPositions.remove(uri)?.let { exoPlayer.seekTo(it) }
+            // 翻页后重置 seek 区锁定版本，让 tryLockZones 重新计算坐标
+            zoneVersion[0]++
+            isDraggingSeek = false
+            pvRef.value?.let { pv -> pv.controllerShowTimeoutMs = 3000 }
         } else {
             val pos = exoPlayer.currentPosition
             if (pos > 1000) savedPositions[uri] = pos
             exoPlayer.playWhenReady = false; exoPlayer.stop(); exoPlayer.setPlaybackSpeed(1f)
             speedBoosted[0] = false; speedText = ""
+            isDraggingSeek = false
         }
     }
 
@@ -280,11 +287,12 @@ fun VideoPlayer(
                         }
                     }
 
-                    // ── seek 区边界（基于 PlayerView 实际可视区域，锁定后永不重新计算）──
+                    // ── seek 区边界（基于 PlayerView 实际可视区域，配合 zoneVersion 支持翻页后重锁）──
                     val tmLeft = intArrayOf(0); val tmRight = intArrayOf(0)
                     val tmTop = intArrayOf(0); val tmBot = intArrayOf(0)
                     val pvScreenTop = intArrayOf(0); val pvScreenHeight = intArrayOf(0)
                     var zonesReady = false
+                    val lastZoneVersion = intArrayOf(-1)
 
                     fun findTimeBar(v: View): View? {
                         if (v.javaClass.name == "androidx.media3.ui.DefaultTimeBar") return v
@@ -292,9 +300,10 @@ fun VideoPlayer(
                         return null
                     }
 
-                    // 基于 PlayerView 实际屏幕位置锁定 seek 区，成功后不再重入
+                    // 基于 PlayerView 实际屏幕位置锁定 seek 区，zoneVersion 变化时重新锁定
                     fun tryLockZones() {
-                        if (zonesReady) return
+                        if (zonesReady && lastZoneVersion[0] == zoneVersion[0]) return
+                        zonesReady = false  // 版本变化或首次，强制重算
                         findTimeBar(pv)?.let { tb ->
                             try {
                                 tb.visibility = android.view.View.INVISIBLE
@@ -316,7 +325,8 @@ fun VideoPlayer(
                         tmRight[0] = (tmRight[0] - gearWidthPx).coerceAtLeast(tmLeft[0] + 1)
                         if (tmRight[0] > tmLeft[0]) {
                             zonesReady = true
-                            AppLogger.d("VideoPlayer", "zone LOCKED pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}]")
+                            lastZoneVersion[0] = zoneVersion[0]
+                            AppLogger.d("VideoPlayer", "zone LOCKED version=${zoneVersion[0]} pv[${pvLeft},${pvTop} ${pvW}x${pvH}] seek[${tmLeft[0]}-${tmRight[0]} ${tmTop[0]}-${tmBot[0]}]")
                         }
                     }
 
@@ -537,11 +547,10 @@ fun VideoPlayer(
                 val dur = playerDuration.toLong()
                 val posMin = pos / 60000; val posSec = (pos % 60000) / 1000
                 val durMin = dur / 60000; val durSec = (dur % 60000) / 1000
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         text = "${posMin}:${posSec.toString().padStart(2, '0')} / ${durMin}:${durSec.toString().padStart(2, '0')}",
                         modifier = Modifier
-                            .padding(bottom = 100.dp)
                             .background(Color(0x80000000), shape = CircleShape)
                             .padding(horizontal = 14.dp, vertical = 8.dp),
                         fontSize = 16.sp,
