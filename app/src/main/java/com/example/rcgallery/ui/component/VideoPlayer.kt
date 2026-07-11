@@ -526,8 +526,8 @@ fun VideoPlayer(
             }
 
             AnimatedVisibility(visible = speedText.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                    Text(text = speedText, modifier = Modifier.padding(top = 80.dp), fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(text = speedText, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             }
 
