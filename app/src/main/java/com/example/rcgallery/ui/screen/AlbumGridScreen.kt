@@ -75,10 +75,13 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import kotlinx.coroutines.delay
 
 // 跨闭包信号：设为 true 时触发搜索建议关闭 + 输入框失焦
 // 用模块级变量而非 composable 局部变量，解决 Kotlin 2.1 Compose 编译器对普通 lambda 捕获限制
 private val _dismissSearchSuggestions = mutableStateOf(false)
+// 跨闭包信号：失焦时仅隐藏建议，不收 IME（和 _dismissSearchSuggestions 分离，防止失焦抖动导致键盘被收回）
+private val _hideSearchSuggestions = mutableStateOf(false)
 
 /**
  * 相册显示模式。
@@ -215,25 +218,34 @@ fun AlbumGridScreen(
     // 下拉菜单显隐：放在 LaunchedEffect 前，确保 suspend lambda 可捕获
     var showSuggestions by remember { mutableStateOf(true) }
 
-    // 收到顶层信号后执行实际关闭操作（在 composable 作用域内，可访问局部变量）
+    // 收到顶层信号后收键盘 + 隐藏搜索建议（不退出搜索态，不影响焦点状态）
     LaunchedEffect(_dismissSearchSuggestions.value) {
         if (_dismissSearchSuggestions.value) {
-            focusManager.clearFocus()
             keyboardController?.hide()
             showSuggestions = false
             _dismissSearchSuggestions.value = false
         }
     }
+    // 收到失焦信号后仅隐藏建议（不碰 IME，防止焦点抖动导致键盘被收回）
+    LaunchedEffect(_hideSearchSuggestions.value) {
+        if (_hideSearchSuggestions.value) {
+            showSuggestions = false
+            _hideSearchSuggestions.value = false
+        }
+    }
 
-    /** 退出搜索模式 */
+    /** 退出搜索模式（统一出口：回车确认、点击相册、返回键、关闭按钮都走这里） */
     fun exitSearch() {
         searchQuery = ""
         isSearchActive = false
         keyboardController?.hide()
+        focusManager.clearFocus()
     }
-    // 进入搜索模式时自动聚焦并弹出输入法
+    // 进入搜索模式时：重置建议显隐、延迟聚焦（等 TextField 挂载）、弹 IME
     LaunchedEffect(isSearchActive) {
         if (isSearchActive) {
+            showSuggestions = true
+            delay(1)
             searchFocusRequester.requestFocus()
             keyboardController?.show()
         }
@@ -339,6 +351,10 @@ fun AlbumGridScreen(
             selectedAlbumId = null
             onAlbumActiveChanged(false)
         }
+    }
+    // ── 搜索态独立返回拦截（避免系统接管导致回桌面）──
+    if (isSearchActive) {
+        BackHandler { exitSearch() }
     }
 
     // ── 设置面板 / 日志（复用组件 SettingsOverlay）──
@@ -469,6 +485,21 @@ fun AlbumGridScreen(
         else filteredAlbums.filter { it.bucketName.contains(searchQuery, ignoreCase = true) }
     }
 
+    // ── 父级相册搜索匹配（父级名或任意子相册名匹配即命中，用于 List 模式的 parentItems 搜索过滤）──
+    val matchedParentIds = remember(searchQuery, albums, parentEntities, parentChildrenBucketMap) {
+        if (searchQuery.isBlank()) emptySet()
+        else {
+            val q = searchQuery.trim()
+            if (q.isEmpty()) emptySet()
+            else parentEntities.filter { parent ->
+                parent.name.contains(q, ignoreCase = true) ||
+                (parentChildrenBucketMap[parent.id]?.any { childBucketId ->
+                    albums.any { it.bucketId == childBucketId && it.bucketName.contains(q, ignoreCase = true) }
+                } == true)
+            }.map { it.id }.toSet()
+        }
+    }
+
 
     var showFilterPage by remember { mutableStateOf(false) }
 
@@ -521,6 +552,8 @@ fun AlbumGridScreen(
                     searchFocusRequester = searchFocusRequester,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
+                        // 点击相册先退出搜索态，再打开相册
+                        exitSearch()
                         viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName
@@ -597,7 +630,8 @@ fun AlbumGridScreen(
                     onRemoveChildren = { parentId, bucketIds -> viewModel.removeChildrenFromParent(parentId, bucketIds) },
                     onAddSharedTag = { parentId, tagName -> viewModel.addSharedTagToParent(parentId, tagName) },
                     onRemoveSharedTag = { parentId, tagId -> viewModel.removeSharedTagFromParent(parentId, tagId) },
-                    parentSharedTagMap = parentSharedTagMap
+                    parentSharedTagMap = parentSharedTagMap,
+                    matchedParentIds = matchedParentIds
                 )
                 // ── TAG 管理对话框 ──
                 val currentTagAlbum = tagDialogAlbum
@@ -911,7 +945,8 @@ private fun AlbumGridContent(
     onRemoveChildren: (Long, List<String>) -> Unit = { _, _ -> },
     onAddSharedTag: (Long, String) -> Unit = { _, _ -> },
     onRemoveSharedTag: (Long, Long) -> Unit = { _, _ -> },
-    parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap()
+    parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap(),
+    matchedParentIds: Set<Long> = emptySet()
 ) {
     // ── Grid 模式多选状态 ──
     // ── Grid 模式多选状态 ──
@@ -1321,7 +1356,7 @@ private fun AlbumGridContent(
                                 modifier = Modifier
                                     .weight(1f)
                                     .focusRequester(searchFocusRequester)
-                                    .onFocusChanged { if (!it.isFocused) _dismissSearchSuggestions.value = true }
+                                    .onFocusChanged { if (!it.isFocused) _hideSearchSuggestions.value = true }
                             )
                         }
                     }
@@ -1486,8 +1521,9 @@ private fun AlbumGridContent(
             if (!isDateView) {
             // ── 层级相册：扁平 items 列表（List 模式用）──
             val isListMode = displayMode is AlbumDisplayMode.List
-            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, allChildBucketIds, expandedParentIds, isListMode, albumSortMode, starredIds) {
+            val parentItems = remember(albums, parentEntities, parentChildrenBucketMap, allChildBucketIds, expandedParentIds, isListMode, albumSortMode, starredIds, searchQuery, matchedParentIds) {
                 if (isListMode && parentEntities.isNotEmpty()) {
+                    val isSearching = searchQuery.isNotBlank()
                     // 统一排序：父级和普通相册在同一排序器中对等比较
                     // 排序键：空父级 > 星标 > 在 albums 中的位置
                     // 封装为 Triple(isEmptyParent, isStarred, position)
@@ -1501,8 +1537,9 @@ private fun AlbumGridContent(
 
                     val items = mutableListOf<Pair<Any, SortKey>>()
 
-                    // 父级
+                    // 父级（搜索模式下只保留命中的父级）
                     for (parent in parentEntities) {
+                        if (isSearching && parent.id !in matchedParentIds) continue
                         val childIds = parentChildrenBucketMap[parent.id] ?: emptyList()
                         val isEmpty = childIds.isEmpty()
                         val firstChildPos = if (isEmpty) Int.MAX_VALUE
@@ -1527,14 +1564,25 @@ private fun AlbumGridContent(
                             is ParentAlbumEntity -> {
                                 val childIds = parentChildrenBucketMap[item.id] ?: emptyList()
                                 val isEmpty = childIds.isEmpty()
-                                result.add(ParentHeader(item.id, item.name, !isEmpty && item.id in expandedParentIds, childIds.size))
-                                if (!isEmpty && item.id in expandedParentIds) {
-                                    val sortedChildren = albums
-                                        .filter { it.bucketId in childIds }
-                                        .sortedWith(
-                                            compareByDescending<Album> { it.bucketId in starredIds }
-                                                .then(albumSortComparator(albumSortMode))
-                                        )
+                                // 搜索模式下自动展开父级，仅显示命中的子级
+                                val showChildren = if (isSearching) {
+                                    !isEmpty && childIds.any { childBucketId ->
+                                        albums.any { it.bucketId == childBucketId && it.bucketName.contains(searchQuery, ignoreCase = true) }
+                                    }
+                                } else {
+                                    !isEmpty && item.id in expandedParentIds
+                                }
+                                result.add(ParentHeader(item.id, item.name, showChildren, childIds.size))
+                                if (showChildren) {
+                                    val childrenToShow = if (isSearching) {
+                                        albums.filter { it.bucketId in childIds && it.bucketName.contains(searchQuery, ignoreCase = true) }
+                                    } else {
+                                        albums.filter { it.bucketId in childIds }
+                                    }
+                                    val sortedChildren = childrenToShow.sortedWith(
+                                        compareByDescending<Album> { it.bucketId in starredIds }
+                                            .then(albumSortComparator(albumSortMode))
+                                    )
                                     sortedChildren.forEach { result.add(ChildRow(it.bucketId, item.name, item.id)) }
                                 }
                             }

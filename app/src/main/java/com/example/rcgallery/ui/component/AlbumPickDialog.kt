@@ -73,9 +73,10 @@ fun AlbumPickDialog(
             AlbumSort.DATE -> albums.sortedByDescending { it.dateAdded }
             AlbumSort.COUNT -> albums.sortedByDescending { it.count }
             AlbumSort.RECENT -> {
-                // 仅显示最近移动过的相册
+                // 仅显示最近移动过的相册，按 movedAt 降序排列
                 val recentSet = recentMoveAlbums.map { it.directoryPath }.toSet()
                 albums.filter { it.directoryPath in recentSet }
+                    .sortedByDescending { recentTimeMap[it.directoryPath] ?: 0L }
             }
         }
         // 星标相册始终排在最前面

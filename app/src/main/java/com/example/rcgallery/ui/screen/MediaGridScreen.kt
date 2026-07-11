@@ -906,6 +906,8 @@ fun MediaGridScreen(
                             val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
                             val dir = File(dcim, name)
                             val path = if (dir.mkdirs() || dir.exists()) {
+                                // 创建成功后刷新相册列表加速 MediaStore 注册，降低新建后点击的竞态
+                                viewModel.loadAlbums()
                                 dir.absolutePath
                             } else null
                             onResult(path)

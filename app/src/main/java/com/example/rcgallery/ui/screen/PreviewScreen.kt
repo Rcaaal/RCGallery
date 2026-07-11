@@ -16,10 +16,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,6 +36,9 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -674,6 +681,21 @@ fun PreviewScreen(
                         viewModel.clearClipboard()
                         viewModel.addToClipboard(listOf(singleItem))
                         viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        // MOVE 后：从本地快照中移除、翻页、显示撤销 Snackbar
+                        if (mode == PasteMode.MOVE) {
+                            val movedPage = pagerState.currentPage
+                            val wasLastPage = movedPage >= mediaItems.lastIndex
+                            mediaItems = mediaItems.filterIndexed { i, _ -> i != movedPage }
+                            scope.launch {
+                                if (!wasLastPage && mediaItems.isNotEmpty()) {
+                                    delay(50)
+                                    pagerState.animateScrollToPage(movedPage.coerceAtMost(mediaItems.lastIndex))
+                                }
+                                // 不移除 Snackbar undo — pasteToAlbum(MOVE) 后文件路径已变，
+                                // 且 MoveRecord 尚未写入，正确撤销需走 最近移动 → 撤销
+                                snackbarHostState.showSnackbar("已移动", duration = SnackbarDuration.Short)
+                            }
+                        }
                     }
                 }
             )
@@ -795,6 +817,8 @@ private fun InfoCard(
     }
 
     val filePath = item.filePath.ifEmpty { albumDisplayName }
+    // 目录路径展开状态（默认折叠，maxLines=2）
+    var filePathExpanded by remember { mutableStateOf(false) }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -802,84 +826,126 @@ private fun InfoCard(
         tonalElevation = 4.dp
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-            // Row 1: 文件名(可点击) + 创建时间
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = item.fileName,
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f).clickable { showRenameDialog = true }
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = formatDate(item.dateAdded),
-                    color = Color(0xFF999999),
-                    fontSize = 11.sp,
-                    maxLines = 1
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            // Row 2: 大小 · 格式
-            Text(
-                text = "${FormatUtil.formatFileSize(item.size)} · ${item.mimeType}",
-                color = Color(0xFF999999),
-                fontSize = 12.sp,
-                maxLines = 1
-            )
-            Spacer(Modifier.height(4.dp))
-            // Row 3: 相册名（可点击 → 打开重命名对话框）
-            Text(
-                text = albumDisplayName,
-                color = Color(0xFFBBBBBB),
-                fontSize = 12.sp,
-                maxLines = 1,
-                modifier = Modifier.clickable { onAlbumNameClick() }
-            )
-            Spacer(Modifier.height(4.dp))
-            // Row 4: 目录路径（自动换行，不限制行数）
-            if (filePath.isNotEmpty()) {
-                Text(
-                    text = filePath,
-                    color = Color(0xFF777777),
-                    fontSize = 11.sp,
-                    softWrap = true
-                )
-            }
-            // TAG 行（首个 + 号，最多两行自动换行）
-            Spacer(Modifier.height(4.dp))
-            MediaTagRow(
-                tags = mediaTags,
-                onAddClick = onManageTags,
-                onTagClick = onManageTags
-            )
-            // Row 5: 操作按钮（右下角）
-            Spacer(Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
+            // ── 可滚动内容区 ──
+            val scrollState = rememberScrollState()
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(scrollState)
             ) {
-                IconButton(
-                    onClick = onMoveToAlbum,
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_folder),
-                        contentDescription = "移动到相册",
-                        tint = Color(0xFF64B5F6),
-                        modifier = Modifier.size(18.dp)
+                // 1: 文件名(可点击) + 创建时间
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = item.fileName,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f).clickable { showRenameDialog = true }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = formatDate(item.dateAdded),
+                        color = Color(0xFF999999),
+                        fontSize = 11.sp,
+                        maxLines = 1
                     )
                 }
-                IconButton(
-                    onClick = onDeleteClick,
-                    modifier = Modifier.size(28.dp)
+                Spacer(Modifier.height(6.dp))
+                // 2: 大小 · 格式
+                Text(
+                    text = "${FormatUtil.formatFileSize(item.size)} · ${item.mimeType}",
+                    color = Color(0xFF999999),
+                    fontSize = 12.sp,
+                    maxLines = 1
+                )
+                Spacer(Modifier.height(4.dp))
+                // 3: TAG 左 + 操作按钮右（同一行）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        painter = androidx.compose.ui.res.painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "永久删除",
-                        tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(18.dp)
+                    // 左侧 TAG 水平滚动条（不换行）
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // + 按钮
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF33AA33))
+                                .clickable { onManageTags() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("+", color = Color.White, fontSize = 12.sp)
+                        }
+                        // TAG chips
+                        mediaTags.forEach { tag ->
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF3366AA),
+                                modifier = Modifier.height(22.dp).clickable { onManageTags() }
+                            ) {
+                                Box(Modifier.fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                                    Text(tag.name, color = Color.White, fontSize = 10.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    // 右侧操作按钮
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onMoveToAlbum,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_folder),
+                                contentDescription = "移动到相册",
+                                tint = Color(0xFF64B5F6),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onDeleteClick,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                                contentDescription = "永久删除",
+                                tint = Color(0xFFFF5252),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                // 4: 相册名（可点击）
+                Text(
+                    text = albumDisplayName,
+                    color = Color(0xFFBBBBBB),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    modifier = Modifier.clickable { onAlbumNameClick() }
+                )
+                Spacer(Modifier.height(4.dp))
+                // 5: 目录路径（折叠 maxLines=2，点击展开/收起）
+                if (filePath.isNotEmpty()) {
+                    Text(
+                        text = filePath,
+                        color = Color(0xFF777777),
+                        fontSize = 11.sp,
+                        maxLines = if (filePathExpanded) Int.MAX_VALUE else 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { filePathExpanded = !filePathExpanded }
                     )
                 }
             }
@@ -941,67 +1007,4 @@ private fun InfoCard(
         )
     }
 
-}
-
-
-// ══════════════════════════════════════
-//  媒体 TAG 行（首个 + 号，最多两行自动换行，溢出后显示展开）
-// ══════════════════════════════════════
-
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-@androidx.compose.runtime.Composable
-private fun MediaTagRow(
-    tags: List<TagEntity>,
-    onAddClick: () -> Unit,
-    onTagClick: () -> Unit
-) {
-    var showExpanded by remember { mutableStateOf(false) }
-
-    androidx.compose.foundation.layout.FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        maxLines = if (showExpanded) Int.MAX_VALUE else 2
-    ) {
-        // + 号按钮
-        Box(
-            modifier = Modifier
-                .size(22.dp)
-                .clip(androidx.compose.foundation.shape.CircleShape)
-                .background(Color(0xFF33AA33))
-                .clickable { onAddClick() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("+", color = Color.White, fontSize = 12.sp)
-        }
-
-        tags.forEach { tag ->
-            Surface(
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
-                color = Color(0xFF3366AA),
-                modifier = Modifier.height(22.dp).clickable { onTagClick() }
-            ) {
-                Box(Modifier.fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        tag.name,
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        maxLines = 1
-                    )
-                }
-            }
-        }
-
-        // 溢出 → 展开按钮
-        if (tags.size >= 6 && !showExpanded) {
-            Surface(
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
-                color = Color(0xFF555555),
-                modifier = Modifier.height(22.dp).clickable { showExpanded = true }
-            ) {
-                Box(Modifier.fillMaxHeight().padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-                    Text("展开", color = Color.White, fontSize = 10.sp)
-                }
-            }
-        }
-    }
 }
