@@ -280,6 +280,9 @@ fun MediaGridScreen(
             !viewModel.shouldHideMedia(item.filePath, mTags, aTags)
         }
     }
+    // 列表数据版本号：tagFilteredItems 变化时递增，用于多选拖拽检测旧 position 过期
+    var mediaDatasetVersion by remember { mutableIntStateOf(0) }
+    LaunchedEffect(tagFilteredItems) { mediaDatasetVersion++ }
 
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
@@ -406,6 +409,8 @@ fun MediaGridScreen(
                                 // ── 滑动手势多选（替代 adapter 的 onLongClick）──
                                 val dragState = object {
                                     var dragStartIdx = -1
+                                    var dragStartUri = ""       // 稳定锚点 URI
+                                    var dragStartVersion = 0    // 长按时的数据版本
                                     var isDragging = false
                                     var longPressConsumed = false  // 长按触发后拦截 click
                                     var notifyMin = -1             // 本次拖拽通知范围起点
@@ -430,10 +435,12 @@ fun MediaGridScreen(
                                                     if (pos < 0) return@postDelayed
                                                     dragState.dragStartIdx = pos
                                                     dragState.isDragging = true
+                                                    val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
+                                                    dragState.dragStartUri = item.uri.toString()
+                                                    dragState.dragStartVersion = mediaDatasetVersion
                                                     dragState.notifyMin = -1
                                                     dragState.notifyMax = -1
                                                     dragState.longPressConsumed = true
-                                                    val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
                                                     if (!isMediaMultiSelect) {
                                                         isMediaMultiSelect = true
                                                         committedSelection = emptySet()
@@ -500,6 +507,20 @@ fun MediaGridScreen(
                                                 }
                                                 val currentAdapter = rv.adapter as? SimpleGridAdapter ?: return
                                                 val items = currentAdapter.items
+                                                // ── 版本变化时用 URI 重新定位起点，防列表刷新后 position 漂移 ──
+                                                if (dragState.dragStartVersion != mediaDatasetVersion) {
+                                                    val reFound = items.indexOfFirst { it.uri.toString() == dragState.dragStartUri }
+                                                    if (reFound >= 0) {
+                                                        dragState.dragStartIdx = reFound
+                                                        dragState.dragStartVersion = mediaDatasetVersion
+                                                    } else {
+                                                        // 起点项已不在列表中（被 MOVE/删除），中止本次拖拽
+                                                        dragState.isDragging = false
+                                                        dragState.dragStartIdx = -1
+                                                        isDragInProgress = false
+                                                        return
+                                                    }
+                                                }
                                                 // 按方向计算显示选中集
                                                 val displayUris: Set<String>
                                                 if (pos >= dragState.dragStartIdx) {
@@ -599,6 +620,17 @@ fun MediaGridScreen(
                                 } else {
                                     adapter.notifyDataSetChanged()
                                     scroller.refresh()
+                                }
+                                // ── 列表刷新后对齐多选状态：清除已不存在的 URI ──
+                                if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
+                                    val currentUris = tagFilteredItems.map { it.uri.toString() }.toSet()
+                                    val staleUris = selectedMediaUris - currentUris
+                                    if (staleUris.isNotEmpty()) {
+                                        val remaining = selectedMediaUris.intersect(currentUris)
+                                        selectedMediaUris = remaining
+                                        committedSelection = remaining
+                                        adapter.selectedUris = remaining
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxSize().padding(padding)
@@ -900,6 +932,10 @@ fun MediaGridScreen(
                         }
                         // 来自中转站 badge：中转站已有内容，直接粘贴
                         viewModel.pasteToAlbum(mode, targetDir, targetName, albumId.ifEmpty { null })
+                        // MOVE 后多选态中的文件已不在当前相册，退出多选防旧 position 残留
+                        if (mode == PasteMode.MOVE && isMediaMultiSelect) {
+                            exitMediaMultiSelect()
+                        }
                     },
                     onCreateFolder = { name, onResult ->
                         folderCreateScope.launch(Dispatchers.IO) {
