@@ -812,9 +812,47 @@ fun PreviewScreen(
                     .padding(end = 12.dp)
                     .width(40.dp)
                     .height(TRACK_HEIGHT + 40.dp)
+                    .pointerInput(Unit) {
+                        var expanded = false
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (!expanded) {
+                                // 收起状态 → 点击展开
+                                expanded = true
+                                showVolumeSlider = true
+                                down.consume()
+                            } else {
+                                // 展开状态 → 判断是 tap 还是 drag
+                                var dragStarted = false
+                                do {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull() ?: break
+                                    if (change.pressed) {
+                                        val dy = kotlin.math.abs(change.position.y - down.position.y)
+                                        if (!dragStarted && dy > 20f) {
+                                            dragStarted = true
+                                        }
+                                        if (dragStarted) {
+                                            val h = size.height.toFloat()
+                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
+                                            onVolumeChange(newVolume)
+                                        }
+                                        change.consume()
+                                    } else {
+                                        // UP
+                                        if (!dragStarted) {
+                                            expanded = false
+                                            showVolumeSlider = false
+                                        }
+                                        break
+                                    }
+                                } while (true)
+                            }
+                        }
+                    }
             ) {
                 if (showVolumeSlider) {
-                    // 竖向轨道 + 拖动手势
+                    // 竖向轨道
                     Box(
                         modifier = Modifier
                             .width(TRACK_WIDTH)
@@ -822,21 +860,6 @@ fun PreviewScreen(
                             .align(Alignment.Center)
                             .clip(RoundedCornerShape(2.dp))
                             .background(Color.White.copy(alpha = 0.3f))
-                            .pointerInput(Unit) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false)
-                                    do {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull() ?: break
-                                        if (change.pressed) {
-                                            val h = size.height.toFloat()
-                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
-                                            onVolumeChange(newVolume)
-                                            change.consume()
-                                        } else break
-                                    } while (true)
-                                }
-                            }
                     ) {
                         // 填充部分（从底部到当前音量）
                         Box(
@@ -850,7 +873,7 @@ fun PreviewScreen(
                     }
                 }
 
-                // 音量图标按钮（单击展开/收起滑条，图标反映当前音量状态）
+                // 音量图标按钮（仅作为视觉指示，手势由父容器统一处理）
                 Box(
                     modifier = Modifier
                         .size(BUTTON_SIZE)
@@ -859,8 +882,7 @@ fun PreviewScreen(
                             (TRACK_HEIGHT * (0.5f - volumeLevel) / 2f).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
                         } else 0.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.25f))
-                        .clickable { showVolumeSlider = !showVolumeSlider },
+                        .background(Color.White.copy(alpha = 0.25f)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -874,8 +896,6 @@ fun PreviewScreen(
                     )
                 }
             }
-            // 跟随 mute 按钮同步更新临时记忆（用于收起后恢复）
-            if (volumeLevel > 0f) Unit  // 静音逻辑由 VideoPlayer 按钮处理
         }
 
         // ── 媒体 TAG 管理对话框 ──
