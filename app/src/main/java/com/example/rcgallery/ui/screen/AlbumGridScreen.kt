@@ -131,7 +131,8 @@ private enum class AlbumSortMode(val label: String) {
     SIZE("相册大小"),
     IMAGE_COUNT("图片数量"),
     VIDEO_COUNT("视频数量"),
-    RECENT_ACCESS("近期访问")
+    RECENT_ACCESS("近期访问"),
+    RECENTLY_MOVED("最近移动")
 }
 
 /** 根据排序模式生成 Comparator<Album> */
@@ -142,6 +143,7 @@ private fun albumSortComparator(mode: AlbumSortMode): Comparator<Album> = when (
     AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
     AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
     AlbumSortMode.RECENT_ACCESS -> compareByDescending<Album> { 0L }  // 简写：不在本函数内处理
+    AlbumSortMode.RECENTLY_MOVED -> compareByDescending<Album> { 0L }  // 简写：不在本函数内处理
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -158,6 +160,7 @@ fun AlbumGridScreen(
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
     val persistentRules by viewModel.persistentRules.collectAsStateWithLifecycle()
     val recentAccessMap by viewModel.recentAccessMap.collectAsStateWithLifecycle()
+    val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
 
     // ── 层级相册 ──
     val parentEntities by viewModel.parentEntities.collectAsStateWithLifecycle()
@@ -204,6 +207,7 @@ fun AlbumGridScreen(
             "image_count" -> AlbumSortMode.IMAGE_COUNT
             "video_count" -> AlbumSortMode.VIDEO_COUNT
             "recent" -> AlbumSortMode.RECENT_ACCESS
+            "recently_moved" -> AlbumSortMode.RECENTLY_MOVED
             else -> AlbumSortMode.DATE
         })
     }
@@ -251,21 +255,35 @@ fun AlbumGridScreen(
         }
     }
 
-    // 本地排序：星标相册永久置顶，再按当前排序模式排列（只针对真实相册，不混入父级占位对象）
-    val albums = remember(rawAlbums, starredIds, albumSortMode, recentAccessMap) {
-        rawAlbums.sortedWith(
-            compareByDescending<Album> { it.bucketId in starredIds }
-                .then(when (albumSortMode) {
-                    AlbumSortMode.DATE -> compareByDescending { it.dateAdded }
-                    AlbumSortMode.NAME -> compareBy { it.bucketName }
-                    AlbumSortMode.SIZE -> compareByDescending { it.totalSize }
-                    AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
-                    AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
-                    AlbumSortMode.RECENT_ACCESS ->
-                        compareByDescending<Album> { recentAccessMap[it.directoryPath] }
-                            .then(compareByDescending { it.dateAdded })
-                })
-        )
+    // 本地排序：根据排序模式排列相册
+    // RECENT_ACCESS 和 RECENTLY_MOVED 是时间相关排序，星标不置顶以免干扰时间顺序
+    val albums = remember(rawAlbums, starredIds, albumSortMode, recentAccessMap, recentMoveAlbums) {
+        when (albumSortMode) {
+            AlbumSortMode.RECENTLY_MOVED -> {
+                val moveMap = recentMoveAlbums.associate { it.directoryPath to it.movedAt }
+                rawAlbums.sortedWith(
+                    compareByDescending<Album> { moveMap[it.directoryPath] ?: 0L }
+                        .then(compareByDescending { it.dateAdded })
+                )
+            }
+            AlbumSortMode.RECENT_ACCESS ->
+                rawAlbums.sortedWith(
+                    compareByDescending<Album> { recentAccessMap[it.directoryPath] }
+                        .then(compareByDescending { it.dateAdded })
+                )
+            else ->
+                rawAlbums.sortedWith(
+                    compareByDescending<Album> { it.bucketId in starredIds }
+                        .then(when (albumSortMode) {
+                            AlbumSortMode.DATE -> compareByDescending { it.dateAdded }
+                            AlbumSortMode.NAME -> compareBy { it.bucketName }
+                            AlbumSortMode.SIZE -> compareByDescending { it.totalSize }
+                            AlbumSortMode.IMAGE_COUNT -> compareByDescending { it.imageCount }
+                            AlbumSortMode.VIDEO_COUNT -> compareByDescending { it.videoCount }
+                            else -> compareByDescending { it.dateAdded }
+                        })
+                )
+        }
     }
 
     // 搜索建议：取 albums（排序后原始列表）中匹配的相册名，最多 8 条供下拉展示
@@ -588,6 +606,7 @@ fun AlbumGridScreen(
                             AlbumSortMode.IMAGE_COUNT -> "image_count"
                             AlbumSortMode.VIDEO_COUNT -> "video_count"
                             AlbumSortMode.RECENT_ACCESS -> "recent"
+                            AlbumSortMode.RECENTLY_MOVED -> "recently_moved"
                         }).apply()
                     },
                     isDateView = isDateView,
