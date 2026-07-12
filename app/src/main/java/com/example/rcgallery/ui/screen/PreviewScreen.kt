@@ -295,7 +295,7 @@ fun PreviewScreen(
     // 日志：当前页面变更
     LaunchedEffect("page:${pagerState.currentPage}") {
         showInfo = false  // 翻页关闭信息面板
-        AppLogger.d("Preview", "page=${pagerState.currentPage} total=${mediaItems.size} uri=${currentItem?.uri?.lastPathSegment ?: "?"}")
+        AppLogger.d("Preview", "page=${pagerState.currentPage} uri=${currentItem?.uri?.lastPathSegment} name=${currentItem?.fileName} size=${mediaItems.size}")
         currentItem?.let { viewModel.recordViewHistory(it) }
     }
 
@@ -701,6 +701,8 @@ fun PreviewScreen(
                                 return@awaitEachGesture
                             }
 
+                            AppLogger.d("Seek", "DOWN page=$curPage uri=${currentItem?.uri?.lastPathSegment} pos=$basePos dur=$totalDur seek=${seekHandler != null} posP=${posProvider != null} durP=${durProvider != null}")
+
                             // 只暴露给顶层的最小状态
                             isDraggingSeek = true
                             seekIndicatorPosition = basePos
@@ -731,6 +733,7 @@ fun PreviewScreen(
                                     change.consume()
                                 } else {
                                     // UP：跳转到最终位置 + 震动反馈
+                                    AppLogger.d("Seek", "UP page=$curPage uri=${currentItem?.uri?.lastPathSegment} final=${seekIndicatorPosition} currentPage=${pagerState.currentPage}")
                                     seekHandler(seekIndicatorPosition)
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     isDraggingSeek = false

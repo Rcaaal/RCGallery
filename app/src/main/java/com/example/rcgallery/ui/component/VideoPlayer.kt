@@ -149,7 +149,10 @@ fun VideoPlayer(
     // 使用 poll 状态（playerPosition/playerDuration），不直读 ExoPlayer（防异步 prepare 后 duration=0）
     val callbackUri = uri
     SideEffect {
-        onRegisterSeekHandler { pos -> exoPlayer.seekTo(pos) }
+        onRegisterSeekHandler { pos ->
+            AppLogger.d("VideoPlayer", "seekTo uri=${callbackUri.lastPathSegment} pos=$pos before=${exoPlayer.currentPosition} state=${exoPlayer.playbackState} ready=${exoPlayer.playWhenReady}")
+            exoPlayer.seekTo(pos)
+        }
         onRegisterPositionProvider { playerPosition.toLong() }
         onRegisterDurationProvider { playerDuration.toLong() }
     }
@@ -209,11 +212,13 @@ fun VideoPlayer(
             hasError = false; exoPlayer.prepare(); exoPlayer.playWhenReady = true
             savedPositions.remove(uri)?.let { exoPlayer.seekTo(it) }
             pvRef.value?.let { pv -> pv.controllerShowTimeoutMs = 3000 }
+            AppLogger.d("VideoPlayer", "active=$isActive uri=${uri.lastPathSegment} playWhenReady=${exoPlayer.playWhenReady} state=${exoPlayer.playbackState} pos=${exoPlayer.currentPosition} dur=${exoPlayer.duration}")
         } else {
             val pos = exoPlayer.currentPosition
             if (pos > 1000) savedPositions[uri] = pos
             exoPlayer.playWhenReady = false; exoPlayer.stop(); exoPlayer.setPlaybackSpeed(1f)
             speedBoosted[0] = false; speedText = ""
+            AppLogger.d("VideoPlayer", "active=$isActive uri=${uri.lastPathSegment} pos=$pos saved=${pos > 1000}")
         }
     }
 
@@ -250,6 +255,7 @@ fun VideoPlayer(
         while (isActive) {
             playerPosition = exoPlayer.currentPosition.coerceAtLeast(0).toFloat()
             playerDuration = exoPlayer.duration.coerceAtLeast(1).toFloat()
+            AppLogger.d("VideoPlayer", "poll uri=${uri.lastPathSegment} pos=${exoPlayer.currentPosition} dur=${exoPlayer.duration} state=${exoPlayer.playbackState} ready=${exoPlayer.playWhenReady}")
             delay(PROGRESS_POLL_MS)
         }
     }
