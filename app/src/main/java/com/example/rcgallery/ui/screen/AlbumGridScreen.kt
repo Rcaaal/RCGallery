@@ -257,10 +257,12 @@ fun AlbumGridScreen(
 
     // 本地排序：根据排序模式排列相册
     // RECENT_ACCESS 和 RECENTLY_MOVED 是时间相关排序，星标不置顶以免干扰时间顺序
-    val albums = remember(rawAlbums, starredIds, albumSortMode, recentAccessMap, recentMoveAlbums) {
+    // recentAccessMap/recentMoveAlbums 通过 .value 在 remember 内捕获快照，
+    // 不作为 key，避免每次点击相册更新访问时间后重新排序导致位置错位
+    val albums = remember(rawAlbums, starredIds, albumSortMode) {
         when (albumSortMode) {
             AlbumSortMode.RECENTLY_MOVED -> {
-                val moveMap = recentMoveAlbums.associate { it.directoryPath to it.movedAt }
+                val moveMap = viewModel.recentMoveAlbums.value.associate { it.directoryPath to it.movedAt }
                 rawAlbums.sortedWith(
                     compareByDescending<Album> { moveMap[it.directoryPath] ?: 0L }
                         .then(compareByDescending { it.dateAdded })
@@ -268,7 +270,7 @@ fun AlbumGridScreen(
             }
             AlbumSortMode.RECENT_ACCESS ->
                 rawAlbums.sortedWith(
-                    compareByDescending<Album> { recentAccessMap[it.directoryPath] }
+                    compareByDescending<Album> { viewModel.recentAccessMap.value[it.directoryPath] }
                         .then(compareByDescending { it.dateAdded })
                 )
             else ->
@@ -1545,6 +1547,8 @@ private fun AlbumGridContent(
                 if (isListMode && parentEntities.isNotEmpty()) {
                     val isSearching = searchQuery.isNotBlank()
                     // 统一排序：父级和普通相册在同一排序器中对等比较
+                    // RECENT_ACCESS/RECENTLY_MOVED 不执行星标置顶
+                    val shouldStarPin = albumSortMode != AlbumSortMode.RECENT_ACCESS && albumSortMode != AlbumSortMode.RECENTLY_MOVED
                     // 排序键：空父级 > 星标 > 在 albums 中的位置
                     // 封装为 Triple(isEmptyParent, isStarred, position)
                     data class SortKey(val isEmptyParent: Boolean, val isStarred: Boolean, val position: Int)
@@ -1564,13 +1568,13 @@ private fun AlbumGridContent(
                         val isEmpty = childIds.isEmpty()
                         val firstChildPos = if (isEmpty) Int.MAX_VALUE
                             else albums.indexOfFirst { it.bucketId in childIds }.let { if (it < 0) Int.MAX_VALUE else it }
-                        items.add(parent to SortKey(isEmpty, "parent:${parent.id}" in starredIds, firstChildPos))
+                        items.add(parent to SortKey(isEmpty, shouldStarPin && "parent:${parent.id}" in starredIds, firstChildPos))
                     }
 
                     // 普通相册（不属于任何父级）
                     for ((idx, album) in albums.withIndex()) {
                         if (album.bucketId !in allChildBucketIds) {
-                            items.add(album to SortKey(false, album.bucketId in starredIds, idx))
+                            items.add(album to SortKey(false, shouldStarPin && album.bucketId in starredIds, idx))
                         }
                     }
 
@@ -1599,10 +1603,11 @@ private fun AlbumGridContent(
                                     } else {
                                         albums.filter { it.bucketId in childIds }
                                     }
-                                    val sortedChildren = childrenToShow.sortedWith(
+                                    val childrenSortComparator = if (shouldStarPin) {
                                         compareByDescending<Album> { it.bucketId in starredIds }
                                             .then(albumSortComparator(albumSortMode))
-                                    )
+                                    } else albumSortComparator(albumSortMode)
+                                    val sortedChildren = childrenToShow.sortedWith(childrenSortComparator)
                                     sortedChildren.forEach { result.add(ChildRow(it.bucketId, item.name, item.id)) }
                                 }
                             }
