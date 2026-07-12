@@ -125,6 +125,37 @@ fun PreviewScreen(
     // ── 快删 Snackbar ──
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // ── 移至回收站并翻到下一个（提取为公共函数，按钮和 VideoPlayer 共用）──
+    fun moveCurrentToTrash() {
+        val trashItem = mediaItems.getOrNull(pagerState.currentPage) ?: return
+        if (showInfo) showInfo = false
+        viewModel.moveToTrash(trashItem)
+        val deletedPage = pagerState.currentPage
+        val wasLastPage = deletedPage >= mediaItems.lastIndex
+        mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
+        scope.launch {
+            if (!wasLastPage && mediaItems.isNotEmpty()) {
+                delay(50)
+                pagerState.animateScrollToPage(deletedPage.coerceAtMost(mediaItems.lastIndex))
+            }
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = "已移至回收站",
+                actionLabel = "撤销",
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                viewModel.restoreFromTrash(trashItem.uri.toString())
+                viewModel.addMediaItemBack(trashItem)
+                mediaItems = (listOf(trashItem) + mediaItems)
+                    .sortedByDescending { it.dateAdded }
+            }
+            if (wasLastPage) {
+                onBackClick()
+            }
+        }
+    }
+
     // ── 直接永久删除（不经过回收站）──
     var showPermanentDeleteConfirm by remember { mutableStateOf(false) }
     var isPermanentDeleting by remember { mutableStateOf(false) }
@@ -467,40 +498,7 @@ fun PreviewScreen(
                                     hideUiOverlays = pipOverlayHidden,
                                     keepControllerVisible = showInfo && item.isVideo,
                                     onShowInfoClick = { showInfo = true },
-                                    onMoveToTrash = {
-                                        val trashItem = mediaItems.getOrNull(pagerState.currentPage)
-                                        if (trashItem != null) {
-                                            if (showInfo) showInfo = false
-                                            viewModel.moveToTrash(trashItem)
-                                            val deletedPage = pagerState.currentPage
-                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
-                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
-                                            scope.launch {
-                                                // 先翻到下一页
-                                                if (!wasLastPage && mediaItems.isNotEmpty()) {
-                                                    delay(50)
-                                                    pagerState.animateScrollToPage(deletedPage.coerceAtMost(mediaItems.lastIndex))
-                                                }
-                                                // 再显示 Snackbar
-                                                snackbarHostState.currentSnackbarData?.dismiss()
-                                                val result = snackbarHostState.showSnackbar(
-                                                    message = "已移至回收站",
-                                                    actionLabel = "撤销",
-                                                    duration = SnackbarDuration.Short
-                                                )
-                                                if (result == SnackbarResult.ActionPerformed) {
-                                                    viewModel.restoreFromTrash(trashItem.uri.toString())
-                                                    viewModel.addMediaItemBack(trashItem)
-                                                    // 撤销后恢复本地快照
-                                                    mediaItems = (listOf(trashItem) + mediaItems)
-                                                        .sortedByDescending { it.dateAdded }
-                                                }
-                                                if (wasLastPage) {
-                                                    onBackClick()
-                                                }
-                                            }
-                                        }
-                                    }
+                                    onMoveToTrash = { moveCurrentToTrash() }
                                 )
                             } else {
                                 ZoomableImage3(
@@ -771,12 +769,12 @@ fun PreviewScreen(
                     modifier = Modifier.size(40.dp)
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.2f))
-                        .clickable { showPermanentDeleteConfirm = true },
+                        .clickable { moveCurrentToTrash() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "永久删除",
+                        contentDescription = "移至回收站",
                         tint = Color(0xFFFF5252),
                         modifier = Modifier.size(20.dp)
                     )
