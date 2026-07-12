@@ -161,6 +161,7 @@ fun SmbPreviewScreen(
                         isActive = page == pagerState.currentPage,
                         volumeLevel = volumeLevel,
                         savedPositions = savedPositions,
+                        onVolumeChange = { volumeLevel = it },
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,
                         dataSourceFactory = SmbDataSource.Factory(),
