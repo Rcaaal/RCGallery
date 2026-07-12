@@ -45,6 +45,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.smb.SmbDataSource
 import com.example.rcgallery.data.smb.SmbFileInfo
@@ -52,6 +54,7 @@ import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.ui.component.VideoPlayer
+import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -106,7 +109,8 @@ fun SmbPreviewScreen(
     // ── PiP ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
     var pipTriggered by remember { mutableStateOf(false) }
-    var volumeLevel by remember { mutableFloatStateOf(1f) }
+    val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
+    val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
     // 通知 MainActivity 隐藏/显示底部导航栏
@@ -159,9 +163,9 @@ fun SmbPreviewScreen(
                     VideoPlayer(
                         uri = Uri.parse(file.path),
                         isActive = page == pagerState.currentPage,
-                        volumeLevel = volumeLevel,
+                        volumeLevel = volumeState.level,
                         savedPositions = savedPositions,
-                        onVolumeChange = { volumeLevel = it },
+                        onToggleMute = { playbackSettingsVM.toggleMute() },
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,
                         dataSourceFactory = SmbDataSource.Factory(),

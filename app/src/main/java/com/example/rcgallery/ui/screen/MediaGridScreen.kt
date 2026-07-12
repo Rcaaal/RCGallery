@@ -147,8 +147,7 @@ fun MediaGridScreen(
         BackHandler { selectedPhotoIndex = -1 }
     }
 
-    // 音量：相册级别记忆（退出相册后自动重置）
-    var volumeLevel by remember { mutableFloatStateOf(1f) }
+    // 音量：共享 PlaybackSettingsViewModel（MainActivity 作用域）
 
     // ── 显示模式（持久化：退出重进保留）──
     val mediaPrefs = activity.getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
@@ -833,8 +832,6 @@ fun MediaGridScreen(
                         selectedPhotoIndex = -1
                     },
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
-                    volumeLevel = volumeLevel,
-                    onVolumeChange = { volumeLevel = it },
                     items = tagFilteredItems,
                     albumId = albumId
                 )

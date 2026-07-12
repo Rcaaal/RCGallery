@@ -71,7 +71,7 @@ fun VideoPlayer(
     uri: Uri,
     isActive: Boolean,
     volumeLevel: Float = 1f,
-    onVolumeChange: (Float) -> Unit = {},
+    onToggleMute: () -> Unit = {},
     savedPositions: MutableMap<Uri, Long> = remember { mutableMapOf() },
     onRegisterSeekHandler: ((Long) -> Unit) -> Unit = {},
     onRegisterPositionProvider: (() -> Long) -> Unit = {},
@@ -413,7 +413,7 @@ fun VideoPlayer(
             if (!hideUiOverlays) {
                 Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 128.dp).size(40.dp)
                     .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape)
-                    .clickable { onVolumeChange(if (volumeLevel > 0f) 0f else 1f) }, contentAlignment = Alignment.Center) {
+                    .clickable { onToggleMute() }, contentAlignment = Alignment.Center) {
                     Icon(painter = painterResource(if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up else com.example.rcgallery.R.drawable.ic_volume_off),
                         contentDescription = if (volumeLevel > 0f) "有声音" else "静音", modifier = Modifier.size(22.dp))
                 }

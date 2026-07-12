@@ -58,6 +58,7 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.viewmodel.PasteMode
+import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
@@ -71,14 +72,14 @@ fun PreviewScreen(
     initialIndex: Int = 0,
     onBackClick: () -> Unit = {},
     onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
-    volumeLevel: Float = 1f,
-    onVolumeChange: (Float) -> Unit = {},
     items: List<com.example.rcgallery.model.MediaItem> = emptyList(),  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
     albumId: String = ""  // 来源相册 ID，MOVE 后用于刷新源相册媒体列表
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
+    val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
+    val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
     // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
     // 不自动从父级同步（防 ContentObserver 异步替换导致 index 错位）。
     var mediaItems by remember { mutableStateOf(items) }
@@ -489,8 +490,8 @@ fun PreviewScreen(
                                 VideoPlayer(
                                     uri = item.uri,
                                     isActive = page == pagerState.currentPage,
-                                    volumeLevel = volumeLevel,
-                                    onVolumeChange = onVolumeChange,
+                                    volumeLevel = volumeState.level,
+                                    onToggleMute = { playbackSettingsVM.toggleMute() },
                                     savedPositions = savedPositions,
                                     onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
                                     onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
@@ -835,7 +836,7 @@ fun PreviewScreen(
                                         if (dragStarted) {
                                             val h = size.height.toFloat()
                                             val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
-                                            onVolumeChange(newVolume)
+                                            playbackSettingsVM.setVolume(newVolume)
                                         }
                                         change.consume()
                                     } else {
@@ -865,7 +866,7 @@ fun PreviewScreen(
                         Box(
                             modifier = Modifier
                                 .width(TRACK_WIDTH)
-                                .fillMaxHeight(volumeLevel)
+                                .fillMaxHeight(volumeState.level)
                                 .align(Alignment.BottomCenter)
                                 .clip(RoundedCornerShape(2.dp))
                                 .background(Color.White.copy(alpha = 0.7f))
@@ -879,7 +880,7 @@ fun PreviewScreen(
                         .size(BUTTON_SIZE)
                         .align(Alignment.Center)
                         .offset(y = if (showVolumeSlider) {
-                            (TRACK_HEIGHT * (0.5f - volumeLevel) / 2f).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
+                            (TRACK_HEIGHT * (0.5f - volumeState.level)).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
                         } else 0.dp)
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.25f)),
@@ -887,10 +888,10 @@ fun PreviewScreen(
                 ) {
                     Icon(
                         painter = painterResource(
-                            if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up
+                            if (volumeState.level > 0f) com.example.rcgallery.R.drawable.ic_volume_up
                             else com.example.rcgallery.R.drawable.ic_volume_off
                         ),
-                        contentDescription = if (volumeLevel > 0f) "有声音" else "静音",
+                        contentDescription = if (volumeState.level > 0f) "有声音" else "静音",
                         tint = Color.White,
                         modifier = Modifier.size(18.dp)
                     )
