@@ -31,12 +31,14 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
     // ── 持久化 ──
 
     private fun loadVolumeState(): VolumeState {
-        val level = prefs.getFloat(KEY_LEVEL, DEFAULT_LEVEL)
-        // 使用 -1f 作为"未保存过"的哨兵，首次启动时读取系统媒体音量
-        var lastNonZero = prefs.getFloat(KEY_LAST_NON_ZERO, SENTINEL_NO_PREF)
-        if (lastNonZero == SENTINEL_NO_PREF) {
-            lastNonZero = readSystemVolume()
+        // 版本迁移：PREF_VERSION 不存在说明是首次加载（含升级），忽略旧值，使用默认值
+        if (!prefs.contains(KEY_PREF_VERSION)) {
+            prefs.edit().putInt(KEY_PREF_VERSION, CURRENT_VERSION).apply()
+            val initialLastNonZero = readSystemVolume()
+            return VolumeState(level = DEFAULT_LEVEL, lastNonZero = initialLastNonZero)
         }
+        val level = prefs.getFloat(KEY_LEVEL, DEFAULT_LEVEL)
+        val lastNonZero = prefs.getFloat(KEY_LAST_NON_ZERO, MIN_NON_ZERO)
         return VolumeState(level = level, lastNonZero = lastNonZero)
     }
 
@@ -90,8 +92,9 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
         private const val PREFS_NAME = "playback_settings"
         private const val KEY_LEVEL = "volume_level"
         private const val KEY_LAST_NON_ZERO = "volume_last_non_zero"
+        private const val KEY_PREF_VERSION = "pref_version"
+        private const val CURRENT_VERSION = 1
         private const val DEFAULT_LEVEL = 0f
         private const val MIN_NON_ZERO = 0.05f
-        private const val SENTINEL_NO_PREF = -1f
     }
 }

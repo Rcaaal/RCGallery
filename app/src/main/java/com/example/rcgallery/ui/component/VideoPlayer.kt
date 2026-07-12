@@ -84,6 +84,7 @@ fun VideoPlayer(
     onMoveToTrash: () -> Unit = {},
     onRegisterSpeedSettingsTrigger: (() -> Unit) -> Unit = {},
     dataSourceFactory: DataSource.Factory? = null,
+    onControllerVisibilityChanged: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
@@ -280,7 +281,11 @@ fun VideoPlayer(
                     }
                     val pv = PlayerView(ctx, pvAttrs).apply {
                         player = exoPlayer; useController = true; keepScreenOn = true; controllerShowTimeoutMs = 3000
-                        setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v -> controllerVisible = v == android.view.View.VISIBLE })
+                        setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v ->
+                            val vis = v == android.view.View.VISIBLE
+                            controllerVisible = vis
+                            onControllerVisibilityChanged(vis)
+                        })
                     }
                     pvRef.value = pv
 
@@ -343,8 +348,9 @@ fun VideoPlayer(
                                     lastTapTime[0] = now
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
                                 } else {
-                                    lastTapTime[0] = now; pv.dispatchTouchEvent(MotionEvent.obtain(ev))
-                                    v.postDelayed({ if (lastTapTime[0] != 0L) { lastTapTime[0] = 0L; pv.showController() } }, DOUBLE_TAP_TIMEOUT_MS)
+                                    // 单点 → 立即弹出控制栏，3 秒自动隐藏
+                                    pv.showController()
+                                    pv.controllerShowTimeoutMs = 3000
                                 }
                                 true
                             }

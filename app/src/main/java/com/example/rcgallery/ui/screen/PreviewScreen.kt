@@ -80,6 +80,8 @@ fun PreviewScreen(
     val viewModel: GalleryViewModel = viewModel(activity)
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
+    // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
+    var controllerVisible by remember { mutableStateOf(false) }
     // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
     // 不自动从父级同步（防 ContentObserver 异步替换导致 index 错位）。
     var mediaItems by remember { mutableStateOf(items) }
@@ -492,6 +494,7 @@ fun PreviewScreen(
                                     isActive = page == pagerState.currentPage,
                                     volumeLevel = volumeState.level,
                                     onToggleMute = { playbackSettingsVM.toggleMute() },
+                                    onControllerVisibilityChanged = { controllerVisible = it },
                                     savedPositions = savedPositions,
                                     onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
                                     onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
@@ -800,102 +803,59 @@ fun PreviewScreen(
         // ── Debug 设置面板（橙色齿轮，右上角）──
         SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
 
-        // ── 右侧音量滑条（小圆按钮点击展开/收起，拖动调音量，PiP 隐藏）──
-        if (!pipOverlayHidden) {
-            var showVolumeSlider by remember { mutableStateOf(false) }
-            val TRACK_HEIGHT = 140.dp
-            val TRACK_WIDTH = 4.dp
-            val BUTTON_SIZE = 32.dp
-
+        // ── 右侧音量滑条（跟随 VideoPlayer 控制栏显隐，拖动调音量）──
+        val SLIDER_HEIGHT = 140.dp
+        val SLIDER_WIDTH = 4.dp
+        if (controllerVisible && !pipOverlayHidden && mediaItems.getOrNull(pagerState.currentPage)?.isVideo == true) {
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 12.dp)
                     .width(40.dp)
-                    .height(TRACK_HEIGHT + 40.dp)
+                    .height(SLIDER_HEIGHT)
                     .pointerInput(Unit) {
-                        var expanded = false
                         awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            if (!expanded) {
-                                // 收起状态 → 点击展开
-                                expanded = true
-                                showVolumeSlider = true
-                                down.consume()
-                            } else {
-                                // 展开状态 → 判断是 tap 还是 drag
-                                var dragStarted = false
-                                do {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull() ?: break
-                                    if (change.pressed) {
-                                        val dy = kotlin.math.abs(change.position.y - down.position.y)
-                                        if (!dragStarted && dy > 20f) {
-                                            dragStarted = true
-                                        }
-                                        if (dragStarted) {
-                                            val h = size.height.toFloat()
-                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
-                                            playbackSettingsVM.setVolume(newVolume)
-                                        }
-                                        change.consume()
-                                    } else {
-                                        // UP
-                                        if (!dragStarted) {
-                                            expanded = false
-                                            showVolumeSlider = false
-                                        }
-                                        break
-                                    }
-                                } while (true)
-                            }
+                            awaitFirstDown(requireUnconsumed = false)
+                            do {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (change.pressed) {
+                                    val newVolume = (1f - change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
+                                    playbackSettingsVM.setVolume(newVolume)
+                                    change.consume()
+                                } else break
+                            } while (true)
                         }
                     }
             ) {
-                if (showVolumeSlider) {
-                    // 竖向轨道
-                    Box(
-                        modifier = Modifier
-                            .width(TRACK_WIDTH)
-                            .height(TRACK_HEIGHT)
-                            .align(Alignment.Center)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White.copy(alpha = 0.3f))
-                    ) {
-                        // 填充部分（从底部到当前音量）
-                        Box(
-                            modifier = Modifier
-                                .width(TRACK_WIDTH)
-                                .fillMaxHeight(volumeState.level)
-                                .align(Alignment.BottomCenter)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Color.White.copy(alpha = 0.7f))
-                        )
-                    }
-                }
-
-                // 音量图标按钮（仅作为视觉指示，手势由父容器统一处理）
+                // 轨道背景
                 Box(
                     modifier = Modifier
-                        .size(BUTTON_SIZE)
+                        .width(SLIDER_WIDTH)
+                        .height(SLIDER_HEIGHT)
                         .align(Alignment.Center)
-                        .offset(y = if (showVolumeSlider) {
-                            (TRACK_HEIGHT * (0.5f - volumeState.level)).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
-                        } else 0.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.25f)),
-                    contentAlignment = Alignment.Center
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color.White.copy(alpha = 0.3f))
                 ) {
-                    Icon(
-                        painter = painterResource(
-                            if (volumeState.level > 0f) com.example.rcgallery.R.drawable.ic_volume_up
-                            else com.example.rcgallery.R.drawable.ic_volume_off
-                        ),
-                        contentDescription = if (volumeState.level > 0f) "有声音" else "静音",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                    // 填充部分（从底部到当前音量）
+                    Box(
+                        modifier = Modifier
+                            .width(SLIDER_WIDTH)
+                            .fillMaxHeight(volumeState.level)
+                            .align(Alignment.BottomCenter)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color.White.copy(alpha = 0.7f))
                     )
                 }
+                // 滑块圆点
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .align(Alignment.Center)
+                        .offset(y = (SLIDER_HEIGHT * (0.5f - volumeState.level)).coerceIn(-SLIDER_HEIGHT / 2f, SLIDER_HEIGHT / 2f))
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.7f))
+                )
             }
         }
 
