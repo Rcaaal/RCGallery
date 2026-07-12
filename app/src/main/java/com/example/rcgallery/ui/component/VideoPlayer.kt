@@ -84,6 +84,7 @@ fun VideoPlayer(
     onMoveToTrash: () -> Unit = {},
     onRegisterSpeedSettingsTrigger: (() -> Unit) -> Unit = {},
     dataSourceFactory: DataSource.Factory? = null,
+    onTap: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
@@ -342,9 +343,10 @@ fun VideoPlayer(
                                 } else if (controllerVisible) {
                                     lastTapTime[0] = now
                                     pv.dispatchTouchEvent(MotionEvent.obtain(ev))
+                                    onTap()
                                 } else {
                                     lastTapTime[0] = now; pv.dispatchTouchEvent(MotionEvent.obtain(ev))
-                                    v.postDelayed({ if (lastTapTime[0] != 0L) { lastTapTime[0] = 0L; pv.showController() } }, DOUBLE_TAP_TIMEOUT_MS)
+                                    v.postDelayed({ if (lastTapTime[0] != 0L) { lastTapTime[0] = 0L; pv.showController(); onTap() } }, DOUBLE_TAP_TIMEOUT_MS)
                                 }
                                 true
                             }

@@ -80,6 +80,14 @@ fun PreviewScreen(
     val viewModel: GalleryViewModel = viewModel(activity)
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
+    // ── 控制栏显示状态（点击画面切换，4 秒无操作自动隐藏）──
+    var controlsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible) {
+            delay(4000)
+            controlsVisible = false
+        }
+    }
     // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
     // 不自动从父级同步（防 ContentObserver 异步替换导致 index 错位）。
     var mediaItems by remember { mutableStateOf(items) }
@@ -492,6 +500,7 @@ fun PreviewScreen(
                                     isActive = page == pagerState.currentPage,
                                     volumeLevel = volumeState.level,
                                     onToggleMute = { playbackSettingsVM.toggleMute() },
+                                    onTap = { controlsVisible = !controlsVisible },
                                     savedPositions = savedPositions,
                                     onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
                                     onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
@@ -735,10 +744,14 @@ fun PreviewScreen(
                                     }
                                     change.consume()
                                 } else {
-                                    // UP：跳转到最终位置 + 震动反馈
-                                    AppLogger.d("Seek", "UP page=$curPage uri=${currentItem?.uri?.lastPathSegment} final=${seekIndicatorPosition} currentPage=${pagerState.currentPage}")
-                                    seekHandler(seekIndicatorPosition)
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    // UP：有拖动则跳转，无拖动则切换控制栏
+                                    if (seekStarted) {
+                                        AppLogger.d("Seek", "UP page=$curPage uri=${currentItem?.uri?.lastPathSegment} final=${seekIndicatorPosition} currentPage=${pagerState.currentPage}")
+                                        seekHandler(seekIndicatorPosition)
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    } else {
+                                        controlsVisible = !controlsVisible
+                                    }
                                     isDraggingSeek = false
                                     pagerScrollEnabled = true
                                     break
@@ -756,146 +769,133 @@ fun PreviewScreen(
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
 
-        // ── 左侧竖排按钮组（视频播放设置 + 删除，统一 40dp 圆形半透明白底）──
-        if (!pipOverlayHidden) {
-            Column(
-                modifier = Modifier.align(Alignment.TopStart)
-                    .padding(start = 12.dp, top = 60.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // 播放速度设置按钮
-                Box(
-                    modifier = Modifier.size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.2f))
-                        .clickable { speedSettingsTrigger.value?.invoke() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                        contentDescription = "播放设置",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                // 删除按钮
-                Box(
-                    modifier = Modifier.size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.2f))
-                        .clickable { moveCurrentToTrash() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "移至回收站",
-                        tint = Color(0xFFFF5252),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-
         // ── Debug 设置面板（橙色齿轮，右上角）──
         SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
 
-        // ── 右侧音量滑条（小圆按钮点击展开/收起，拖动调音量，PiP 隐藏）──
-        if (!pipOverlayHidden) {
-            var showVolumeSlider by remember { mutableStateOf(false) }
+        // ── 底部控制栏 + 右侧音量滑条（控制栏可见时显示，PiP 隐藏）──
+        if (controlsVisible && !pipOverlayHidden) {
+            // 底部半透明操作栏（在 seek 区之上）
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = SEEK_ZONE_DP.dp + 8.dp)
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 24.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 音量静音按钮
+                    Box(
+                        modifier = Modifier.size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.25f))
+                            .clickable { playbackSettingsVM.toggleMute() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                if (volumeState.level > 0f) com.example.rcgallery.R.drawable.ic_volume_up
+                                else com.example.rcgallery.R.drawable.ic_volume_off
+                            ),
+                            contentDescription = if (volumeState.level > 0f) "静音" else "取消静音",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    // 播放速度设置（仅在视频时显示）
+                    if (mediaItems.getOrNull(pagerState.currentPage)?.isVideo == true) {
+                        Box(
+                            modifier = Modifier.size(38.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.25f))
+                                .clickable { speedSettingsTrigger.value?.invoke() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                                contentDescription = "播放设置",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    // 删除按钮
+                    Box(
+                        modifier = Modifier.size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.25f))
+                            .clickable { moveCurrentToTrash() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                            contentDescription = "移至回收站",
+                            tint = Color(0xFFFF5252),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+
+            // 右侧竖向音量滑条（控制栏可见时显示，拖动调音量）
             val TRACK_HEIGHT = 140.dp
             val TRACK_WIDTH = 4.dp
-            val BUTTON_SIZE = 32.dp
-
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 12.dp)
                     .width(40.dp)
-                    .height(TRACK_HEIGHT + 40.dp)
+                    .height(TRACK_HEIGHT)
                     .pointerInput(Unit) {
-                        var expanded = false
                         awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            if (!expanded) {
-                                // 收起状态 → 点击展开
-                                expanded = true
-                                showVolumeSlider = true
-                                down.consume()
-                            } else {
-                                // 展开状态 → 判断是 tap 还是 drag
-                                var dragStarted = false
-                                do {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull() ?: break
-                                    if (change.pressed) {
-                                        val dy = kotlin.math.abs(change.position.y - down.position.y)
-                                        if (!dragStarted && dy > 20f) {
-                                            dragStarted = true
-                                        }
-                                        if (dragStarted) {
-                                            val h = size.height.toFloat()
-                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
-                                            playbackSettingsVM.setVolume(newVolume)
-                                        }
-                                        change.consume()
-                                    } else {
-                                        // UP
-                                        if (!dragStarted) {
-                                            expanded = false
-                                            showVolumeSlider = false
-                                        }
-                                        break
-                                    }
-                                } while (true)
-                            }
+                            awaitFirstDown(requireUnconsumed = false)
+                            do {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (change.pressed) {
+                                    val h = size.height.toFloat()
+                                    val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
+                                    playbackSettingsVM.setVolume(newVolume)
+                                    change.consume()
+                                } else break
+                            } while (true)
                         }
                     }
             ) {
-                if (showVolumeSlider) {
-                    // 竖向轨道
+                // 轨道背景
+                Box(
+                    modifier = Modifier
+                        .width(TRACK_WIDTH)
+                        .height(TRACK_HEIGHT)
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color.White.copy(alpha = 0.3f))
+                ) {
+                    // 填充部分（从底部到当前音量）
                     Box(
                         modifier = Modifier
                             .width(TRACK_WIDTH)
-                            .height(TRACK_HEIGHT)
-                            .align(Alignment.Center)
+                            .fillMaxHeight(volumeState.level)
+                            .align(Alignment.BottomCenter)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White.copy(alpha = 0.3f))
-                    ) {
-                        // 填充部分（从底部到当前音量）
-                        Box(
-                            modifier = Modifier
-                                .width(TRACK_WIDTH)
-                                .fillMaxHeight(volumeState.level)
-                                .align(Alignment.BottomCenter)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Color.White.copy(alpha = 0.7f))
-                        )
-                    }
-                }
-
-                // 音量图标按钮（仅作为视觉指示，手势由父容器统一处理）
-                Box(
-                    modifier = Modifier
-                        .size(BUTTON_SIZE)
-                        .align(Alignment.Center)
-                        .offset(y = if (showVolumeSlider) {
-                            (TRACK_HEIGHT * (0.5f - volumeState.level)).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
-                        } else 0.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.25f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(
-                            if (volumeState.level > 0f) com.example.rcgallery.R.drawable.ic_volume_up
-                            else com.example.rcgallery.R.drawable.ic_volume_off
-                        ),
-                        contentDescription = if (volumeState.level > 0f) "有声音" else "静音",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                            .background(Color.White.copy(alpha = 0.7f))
                     )
                 }
+                // 滑块圆点
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .align(Alignment.Center)
+                        .offset(y = (TRACK_HEIGHT * (0.5f - volumeState.level)).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f))
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.7f))
+                )
             }
         }
 
