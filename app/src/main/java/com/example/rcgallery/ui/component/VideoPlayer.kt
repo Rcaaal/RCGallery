@@ -406,7 +406,21 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 速度/长按设置弹窗（齿轮按钮触―发）──
+            // ── 播放速度设置按钮（常驻左上角，不随控制栏显隐）──
+            if (!hideUiOverlays) {
+                Icon(
+                    painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                    contentDescription = "播放设置",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 12.dp, top = 12.dp)
+                        .size(24.dp)
+                        .clickable { showSpeedSettings = true }
+                )
+            }
+
+            // ── 速度/长按设置弹窗（齿轮按钮触发）──
             if (showSpeedSettings) {
                 // 用本地 mutableState 包裹滑条值，确保 Compose 重组
                 var localSpeed by remember { mutableFloatStateOf(InertiaSettings.longPressSpeed) }
