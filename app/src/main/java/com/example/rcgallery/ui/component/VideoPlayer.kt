@@ -70,8 +70,7 @@ private val speedOptions = listOf(2f, 3f, 4f, 5f, 10f)
 fun VideoPlayer(
     uri: Uri,
     isActive: Boolean,
-    volumeEnabled: Boolean,
-    onVolumeToggle: () -> Unit,
+    volumeLevel: Float = 1f,
     savedPositions: MutableMap<Uri, Long> = remember { mutableMapOf() },
     onRegisterSeekHandler: ((Long) -> Unit) -> Unit = {},
     onRegisterPositionProvider: (() -> Long) -> Unit = {},
@@ -119,7 +118,7 @@ fun VideoPlayer(
             //    防止 codec 在无 surface 时初始化导致死机
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
-            volume = if (isActive && volumeEnabled) 1f else 0f
+            volume = if (isActive) volumeLevel.coerceIn(0f, 1f) else 0f
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     AppLogger.e("VideoPlayer", "playback error uri=${uri.lastPathSegment} error=$error")
@@ -222,7 +221,7 @@ fun VideoPlayer(
         }
     }
 
-    LaunchedEffect(volumeEnabled) { exoPlayer.volume = if (volumeEnabled) 1f else 0f }
+    LaunchedEffect(volumeLevel) { exoPlayer.volume = volumeLevel.coerceIn(0f, 1f) }
 
     // PiP 进入前强制隐藏 PlayerView 控制器（防止控制栏闪烁 + SurfaceView 布局计算干扰 PiP 画面）
     LaunchedEffect(hideUiOverlays) {
@@ -407,16 +406,7 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 音量按钮（PiP 时隐藏）──
-            if (!hideUiOverlays) {
-                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 128.dp).size(40.dp)
-                    .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape).clickable { onVolumeToggle() }, contentAlignment = Alignment.Center) {
-                    Icon(painter = painterResource(if (volumeEnabled) com.example.rcgallery.R.drawable.ic_volume_up else com.example.rcgallery.R.drawable.ic_volume_off),
-                        contentDescription = if (volumeEnabled) "有声音" else "静音", modifier = Modifier.size(22.dp))
-                }
-            }
-
-            // ── 速度/长按设置弹窗（齿轮按钮触发）──
+            // ── 速度/长按设置弹窗（齿轮按钮触―发）──
             if (showSpeedSettings) {
                 // 用本地 mutableState 包裹滑条值，确保 Compose 重组
                 var localSpeed by remember { mutableFloatStateOf(InertiaSettings.longPressSpeed) }

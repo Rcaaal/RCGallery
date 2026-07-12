@@ -106,7 +106,7 @@ fun SmbPreviewScreen(
     // ── PiP ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
     var pipTriggered by remember { mutableStateOf(false) }
-    var volumeEnabled by remember { mutableStateOf(false) }
+    var volumeLevel by remember { mutableFloatStateOf(1f) }
     val scope = rememberCoroutineScope()
 
     // 通知 MainActivity 隐藏/显示底部导航栏
@@ -159,8 +159,7 @@ fun SmbPreviewScreen(
                     VideoPlayer(
                         uri = Uri.parse(file.path),
                         isActive = page == pagerState.currentPage,
-                        volumeEnabled = volumeEnabled,
-                        onVolumeToggle = { volumeEnabled = !volumeEnabled },
+                        volumeLevel = volumeLevel,
                         savedPositions = savedPositions,
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,

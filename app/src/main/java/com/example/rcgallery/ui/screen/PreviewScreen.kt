@@ -71,8 +71,8 @@ fun PreviewScreen(
     initialIndex: Int = 0,
     onBackClick: () -> Unit = {},
     onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
-    volumeEnabled: Boolean = false,
-    onVolumeToggle: () -> Unit = {},
+    volumeLevel: Float = 1f,
+    onVolumeChange: (Float) -> Unit = {},
     items: List<com.example.rcgallery.model.MediaItem> = emptyList(),  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
     albumId: String = ""  // 来源相册 ID，MOVE 后用于刷新源相册媒体列表
 ) {
@@ -488,8 +488,7 @@ fun PreviewScreen(
                                 VideoPlayer(
                                     uri = item.uri,
                                     isActive = page == pagerState.currentPage,
-                                    volumeEnabled = volumeEnabled,
-                                    onVolumeToggle = onVolumeToggle,
+                                    volumeLevel = volumeLevel,
                                     savedPositions = savedPositions,
                                     onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
                                     onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
@@ -783,6 +782,97 @@ fun PreviewScreen(
                     )
                 }
             }
+        }
+
+        // ── 右侧音量控制（常驻小圆按钮 + 展开竖向滑条）──
+        // PiP 时隐藏
+        if (!pipOverlayHidden) {
+            var showVolumeSlider by remember { mutableStateOf(false) }
+            var lastNonZeroVolume by remember { mutableFloatStateOf(1f) }
+            val TRACK_HEIGHT = 140.dp
+            val TRACK_WIDTH = 4.dp
+            val BUTTON_SIZE = 32.dp
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 12.dp)
+                    .width(40.dp)
+                    .height(TRACK_HEIGHT + 40.dp)
+                    .then(
+                        if (showVolumeSlider) {
+                            Modifier.pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        if (change.pressed) {
+                                            // change.position 相对于此 Box 左上角
+                                            val h = size.height.toFloat()
+                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
+                                            onVolumeChange(newVolume)
+                                            change.consume()
+                                        } else break
+                                    } while (true)
+                                }
+                            }
+                        } else Modifier
+                    )
+            ) {
+                if (showVolumeSlider) {
+                    // 竖向轨道
+                    Box(
+                        modifier = Modifier
+                            .width(TRACK_WIDTH)
+                            .height(TRACK_HEIGHT)
+                            .align(Alignment.Center)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color.White.copy(alpha = 0.3f))
+                    ) {
+                        // 填充部分（从底部到当前音量）
+                        Box(
+                            modifier = Modifier
+                                .width(TRACK_WIDTH)
+                                .fillMaxHeight(volumeLevel)
+                                .align(Alignment.BottomCenter)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color.White.copy(alpha = 0.7f))
+                        )
+                    }
+                }
+
+                // 音量按钮（也是滑条拖动时的 thumb）
+                Box(
+                    modifier = Modifier
+                        .size(BUTTON_SIZE)
+                        .align(Alignment.Center)
+                        .offset(y = if (showVolumeSlider) {
+                            (TRACK_HEIGHT * (0.5f - volumeLevel) / 2f).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
+                        } else 0.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.25f))
+                        .clickable {
+                            showVolumeSlider = !showVolumeSlider
+                            if (!showVolumeSlider && volumeLevel == 0f) {
+                                onVolumeChange(lastNonZeroVolume)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(
+                            if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up
+                            else com.example.rcgallery.R.drawable.ic_volume_off
+                        ),
+                        contentDescription = if (volumeLevel > 0f) "有声音" else "静音",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            // 记住非零音量
+            if (volumeLevel > 0f) lastNonZeroVolume = volumeLevel
         }
 
         // ── 媒体 TAG 管理对话框 ──
