@@ -9,13 +9,17 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -36,7 +40,10 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -93,6 +100,17 @@ fun PreviewScreen(
     )
     var pagerScrollEnabled by remember { mutableStateOf(true) }
     val savedPositions = remember { mutableMapOf<Uri, Long>() }
+
+    // ── 视频全屏 seek 状态（由 PreviewScreen 全屏层处理，不再通过 VideoPlayer overlay）──
+    val SEEK_ZONE_DP = 150   // 底部 seek 区域高度(dp)
+    val SEEK_THROTTLE_MS = 40L
+    val screenWidth = remember { context.resources.displayMetrics.widthPixels }
+    var isDraggingSeek by remember { mutableStateOf(false) }
+    var seekIndicatorPosition by remember { mutableLongStateOf(0L) }
+    // 每页独立的回调映射（防 pager 翻页时多个 VideoPlayer 互相覆盖，手势过程状态在 pointerInput 内局部化）
+    val seekToPlayer = remember { mutableMapOf<Int, (Long) -> Unit>() }
+    val getPlayerPositions = remember { mutableMapOf<Int, () -> Long>() }
+    val getPlayerDurations = remember { mutableMapOf<Int, () -> Long>() }
 
     // ── PiP 覆盖层管理 ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
@@ -442,7 +460,9 @@ fun PreviewScreen(
                                     volumeEnabled = volumeEnabled,
                                     onVolumeToggle = onVolumeToggle,
                                     savedPositions = savedPositions,
-                                    onControlZoneActive = { pagerScrollEnabled = !it },
+                                    onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
+                                    onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
+                                    onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
                                     onRequestPip = { pipTriggered = true },
                                     hideUiOverlays = pipOverlayHidden,
                                     keepControllerVisible = showInfo && item.isVideo,
@@ -544,6 +564,14 @@ fun PreviewScreen(
                                 )
                             }
                         }
+                    // 页面离开时清理回调映射，防残留
+                    DisposableEffect(page) {
+                        onDispose {
+                            seekToPlayer.remove(page)
+                            getPlayerPositions.remove(page)
+                            getPlayerDurations.remove(page)
+                        }
+                    }
                     }   // ← key(uri) end
                 }   // ← page lambda end
             }   // ← Box weight end
@@ -644,6 +672,86 @@ fun PreviewScreen(
             }
             }
         }
+
+        // ── 视频底部 seek 区（全屏层，仅视频活跃时生效，Compose pointerInput 精确消费）──
+        // 手势跟踪状态在 pointerInput 内部局部化，不触发顶层重组
+        val isVideoSeekActive = currentItem?.isVideo == true && pagerState.currentPage == mediaItems.indexOf(currentItem)
+        if (isVideoSeekActive) {
+            val haptic = LocalHapticFeedback.current
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(SEEK_ZONE_DP.dp)
+                    .align(Alignment.BottomCenter)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val curPage = pagerState.currentPage
+                            val seekHandler = seekToPlayer[curPage]
+                            val durProvider = getPlayerDurations[curPage]
+                            val posProvider = getPlayerPositions[curPage]
+                            if (seekHandler == null || durProvider == null || posProvider == null) {
+                                AppLogger.e("Preview", "seek callbacks not ready: seek=${seekHandler != null} dur=${durProvider != null} pos=${posProvider != null}")
+                                return@awaitEachGesture
+                            }
+
+                            // DOWN：读取并缓存初始值（局部变量，不触发重组）
+                            val basePos = posProvider()
+                            val totalDur = durProvider()
+                            if (totalDur < 1000L) {
+                                AppLogger.d("Preview", "seek skipped — player not ready (dur=$totalDur)")
+                                return@awaitEachGesture
+                            }
+
+                            // 只暴露给顶层的最小状态
+                            isDraggingSeek = true
+                            seekIndicatorPosition = basePos
+                            pagerScrollEnabled = false
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+
+                            // 局部手势跟踪变量（不参与 Compose 状态）
+                            val originRawX = down.position.x
+                            var lastSeekTimeMs = 0L
+                            var seekStarted = false
+
+                            do {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+                                if (change.pressed) {
+                                    if (!seekStarted) {
+                                        seekStarted = true
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                    val dx = change.position.x - originRawX
+                                    val np = (basePos + ((dx / screenWidth) * totalDur).toLong()).coerceIn(0, totalDur)
+                                    seekIndicatorPosition = np
+                                    val now = SystemClock.elapsedRealtime()
+                                    if (now - lastSeekTimeMs >= SEEK_THROTTLE_MS) {
+                                        seekHandler(np)
+                                        lastSeekTimeMs = now
+                                    }
+                                    change.consume()
+                                } else {
+                                    // UP：跳转到最终位置 + 震动反馈
+                                    seekHandler(seekIndicatorPosition)
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    isDraggingSeek = false
+                                    pagerScrollEnabled = true
+                                    break
+                                }
+                            } while (true)
+                        }
+                    }
+            )
+        }
+
+        // ── 浮动时间提示（独立组件，仅订阅 isDraggingSeek + seekIndicatorPosition）──
+        VideoSeekIndicator(
+            visible = isDraggingSeek,
+            positionMs = seekIndicatorPosition,
+            totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
+        )
+
         SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
 
         // ── 媒体 TAG 管理对话框 ──
@@ -756,6 +864,33 @@ fun PreviewScreen(
                     }
                 },
                 dismissButton = {}
+            )
+        }
+    }
+}
+
+// ══════════════════════════════════════
+//  视频 seek 浮动时间提示（独立组件，最小重组范围）
+// ══════════════════════════════════════
+@Composable
+private fun VideoSeekIndicator(visible: Boolean, positionMs: Long, totalDurationMs: Long) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        val posMin = positionMs / 60000; val posSec = (positionMs % 60000) / 1000
+        val durMin = totalDurationMs / 60000; val durSec = (totalDurationMs % 60000) / 1000
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = "${posMin}:${posSec.toString().padStart(2, '0')} / ${durMin}:${durSec.toString().padStart(2, '0')}",
+                modifier = Modifier
+                    .background(Color(0x80000000), shape = CircleShape)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
             )
         }
     }

@@ -234,7 +234,7 @@ fun AlbumGridScreen(
         }
     }
 
-    /** 退出搜索模式（统一出口：回车确认、点击相册、返回键、关闭按钮都走这里） */
+    /** 退出搜索模式（关闭按钮、返回键等明确退出入口） */
     fun exitSearch() {
         searchQuery = ""
         isSearchActive = false
@@ -552,8 +552,9 @@ fun AlbumGridScreen(
                     searchFocusRequester = searchFocusRequester,
                     onAlbumClick = { album ->
                         AppLogger.d("AlbumGrid", "click album=${album.bucketName} id=${album.bucketId} count=${album.count}")
-                        // 点击相册先退出搜索态，再打开相册
-                        exitSearch()
+                        // 点击相册时不退出搜索态，只隐藏键盘、清焦点
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
                         viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
                         selectedAlbumId = album.bucketId
                         selectedAlbumName = album.bucketName

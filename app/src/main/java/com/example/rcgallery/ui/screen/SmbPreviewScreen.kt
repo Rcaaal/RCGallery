@@ -162,7 +162,6 @@ fun SmbPreviewScreen(
                         volumeEnabled = volumeEnabled,
                         onVolumeToggle = { volumeEnabled = !volumeEnabled },
                         savedPositions = savedPositions,
-                        onControlZoneActive = { pagerScrollEnabled = !it },
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,
                         dataSourceFactory = SmbDataSource.Factory(),
