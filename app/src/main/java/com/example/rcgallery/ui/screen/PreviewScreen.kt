@@ -111,6 +111,7 @@ fun PreviewScreen(
     val seekToPlayer = remember { mutableMapOf<Int, (Long) -> Unit>() }
     val getPlayerPositions = remember { mutableMapOf<Int, () -> Long>() }
     val getPlayerDurations = remember { mutableMapOf<Int, () -> Long>() }
+    val speedSettingsTrigger = remember { mutableStateOf<(() -> Unit)?>(null) }
 
     // ── PiP 覆盖层管理 ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
@@ -489,10 +490,12 @@ fun PreviewScreen(
                                     uri = item.uri,
                                     isActive = page == pagerState.currentPage,
                                     volumeLevel = volumeLevel,
+                                    onVolumeChange = onVolumeChange,
                                     savedPositions = savedPositions,
                                     onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
                                     onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
                                     onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
+                                    onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
                                     onRequestPip = { pipTriggered = true },
                                     hideUiOverlays = pipOverlayHidden,
                                     keepControllerVisible = showInfo && item.isVideo,
@@ -752,7 +755,7 @@ fun PreviewScreen(
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
 
-        // ── 左侧竖排按钮组（设置 + 删除，统一 40dp 圆形背景）──
+        // ── 左侧竖排按钮组（视频播放设置 + 删除，统一 40dp 圆形半透明白底）──
         if (!pipOverlayHidden) {
             Column(
                 modifier = Modifier.align(Alignment.TopStart)
@@ -760,12 +763,21 @@ fun PreviewScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                SettingsOverlay(
-                    gearModifier = Modifier.size(40.dp),
-                    visible = true,
-                    gearSize = 40.dp,
-                    gearBackground = Color.White.copy(alpha = 0.2f)
-                )
+                // 播放速度设置按钮
+                Box(
+                    modifier = Modifier.size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable { speedSettingsTrigger.value?.invoke() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
+                        contentDescription = "播放设置",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
                 // 删除按钮
                 Box(
                     modifier = Modifier.size(40.dp)
@@ -784,10 +796,12 @@ fun PreviewScreen(
             }
         }
 
-        // ── 右侧音量控制（小圆按钮 + 竖向滑条，PiP 时隐藏）──
-        // 按钮点击 = 静音/取消静音切换；拖动滑条 = 连续调音量
+        // ── Debug 设置面板（橙色齿轮，右上角）──
+        SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
+
+        // ── 右侧音量滑条（小圆按钮点击展开/收起，拖动调音量，PiP 隐藏）──
         if (!pipOverlayHidden) {
-            var lastNonZeroVolume by remember { mutableFloatStateOf(1f) }
+            var showVolumeSlider by remember { mutableStateOf(false) }
             val TRACK_HEIGHT = 140.dp
             val TRACK_WIDTH = 4.dp
             val BUTTON_SIZE = 32.dp
@@ -798,58 +812,55 @@ fun PreviewScreen(
                     .padding(end = 12.dp)
                     .width(40.dp)
                     .height(TRACK_HEIGHT + 40.dp)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            do {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull() ?: break
-                                if (change.pressed) {
-                                    val h = size.height.toFloat()
-                                    val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
-                                    onVolumeChange(newVolume)
-                                    change.consume()
-                                } else break
-                            } while (true)
-                        }
-                    }
             ) {
-                // 竖向轨道
-                Box(
-                    modifier = Modifier
-                        .width(TRACK_WIDTH)
-                        .height(TRACK_HEIGHT)
-                        .align(Alignment.Center)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Color.White.copy(alpha = 0.3f))
-                ) {
-                    // 填充部分（从底部到当前音量）
+                if (showVolumeSlider) {
+                    // 竖向轨道 + 拖动手势
                     Box(
                         modifier = Modifier
                             .width(TRACK_WIDTH)
-                            .fillMaxHeight(volumeLevel)
-                            .align(Alignment.BottomCenter)
+                            .height(TRACK_HEIGHT)
+                            .align(Alignment.Center)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White.copy(alpha = 0.7f))
-                    )
+                            .background(Color.White.copy(alpha = 0.3f))
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    do {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        if (change.pressed) {
+                                            val h = size.height.toFloat()
+                                            val newVolume = (1f - change.position.y / h).coerceIn(0f, 1f)
+                                            onVolumeChange(newVolume)
+                                            change.consume()
+                                        } else break
+                                    } while (true)
+                                }
+                            }
+                    ) {
+                        // 填充部分（从底部到当前音量）
+                        Box(
+                            modifier = Modifier
+                                .width(TRACK_WIDTH)
+                                .fillMaxHeight(volumeLevel)
+                                .align(Alignment.BottomCenter)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(Color.White.copy(alpha = 0.7f))
+                        )
+                    }
                 }
 
-                // 音量按钮（单击 = 静音切换）
+                // 音量图标按钮（单击展开/收起滑条，图标反映当前音量状态）
                 Box(
                     modifier = Modifier
                         .size(BUTTON_SIZE)
                         .align(Alignment.Center)
-                        .offset(y = (TRACK_HEIGHT * (0.5f - volumeLevel) / 2f).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f))
+                        .offset(y = if (showVolumeSlider) {
+                            (TRACK_HEIGHT * (0.5f - volumeLevel) / 2f).coerceIn(-TRACK_HEIGHT / 2f, TRACK_HEIGHT / 2f)
+                        } else 0.dp)
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.25f))
-                        .clickable {
-                            if (volumeLevel > 0f) {
-                                lastNonZeroVolume = volumeLevel
-                                onVolumeChange(0f)
-                            } else {
-                                onVolumeChange(lastNonZeroVolume)
-                            }
-                        },
+                        .clickable { showVolumeSlider = !showVolumeSlider },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -863,8 +874,8 @@ fun PreviewScreen(
                     )
                 }
             }
-        // 跟随滑条/静音切换更新非零值记忆
-        if (volumeLevel > 0f) lastNonZeroVolume = volumeLevel
+            // 跟随 mute 按钮同步更新临时记忆（用于收起后恢复）
+            if (volumeLevel > 0f) Unit  // 静音逻辑由 VideoPlayer 按钮处理
         }
 
         // ── 媒体 TAG 管理对话框 ──

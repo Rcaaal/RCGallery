@@ -71,6 +71,7 @@ fun VideoPlayer(
     uri: Uri,
     isActive: Boolean,
     volumeLevel: Float = 1f,
+    onVolumeChange: (Float) -> Unit = {},
     savedPositions: MutableMap<Uri, Long> = remember { mutableMapOf() },
     onRegisterSeekHandler: ((Long) -> Unit) -> Unit = {},
     onRegisterPositionProvider: (() -> Long) -> Unit = {},
@@ -81,6 +82,7 @@ fun VideoPlayer(
     keepControllerVisible: Boolean = false,
     onShowInfoClick: () -> Unit = {},
     onMoveToTrash: () -> Unit = {},
+    onRegisterSpeedSettingsTrigger: (() -> Unit) -> Unit = {},
     dataSourceFactory: DataSource.Factory? = null,
 ) {
     val context = LocalContext.current
@@ -154,6 +156,7 @@ fun VideoPlayer(
         }
         onRegisterPositionProvider { playerPosition.toLong() }
         onRegisterDurationProvider { playerDuration.toLong() }
+        onRegisterSpeedSettingsTrigger { showSpeedSettings = true }
     }
 
     // MediaSession → PiP 窗口自动显示暂停/播放按钮
@@ -406,18 +409,14 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 播放速度设置按钮（常驻左上角，不随控制栏显隐）──
+            // ── 音量按钮（底部右侧，PiP 时隐藏）──
             if (!hideUiOverlays) {
-                Icon(
-                    painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                    contentDescription = "播放设置",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 12.dp, top = 12.dp)
-                        .size(24.dp)
-                        .clickable { showSpeedSettings = true }
-                )
+                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 128.dp).size(40.dp)
+                    .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape)
+                    .clickable { onVolumeChange(if (volumeLevel > 0f) 0f else 1f) }, contentAlignment = Alignment.Center) {
+                    Icon(painter = painterResource(if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up else com.example.rcgallery.R.drawable.ic_volume_off),
+                        contentDescription = if (volumeLevel > 0f) "有声音" else "静音", modifier = Modifier.size(22.dp))
+                }
             }
 
             // ── 速度/长按设置弹窗（齿轮按钮触发）──
