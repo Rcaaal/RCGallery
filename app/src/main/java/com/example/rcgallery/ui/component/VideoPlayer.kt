@@ -401,34 +401,6 @@ fun VideoPlayer(
                 }
             }
 
-            // ── 设置按钮（左上角，常驻不随控制栏显隐）──
-            if (!hideUiOverlays) {
-                Icon(
-                    painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
-                    contentDescription = "播放设置",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(start = 12.dp, top = 12.dp)
-                        .size(24.dp)
-                        .clickable { showSpeedSettings = true }
-                )
-            }
-
-            // ── 删除按钮（常驻右上角，不随控制面板显隐，纯图标无背景）──
-            if (!hideUiOverlays) {
-                Icon(
-                    painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                    contentDescription = "移至回收站",
-                    tint = Color(0xFFFF5252),
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 8.dp, end = 8.dp)
-                        .size(24.dp)
-                        .clickable { onMoveToTrash() }
-                )
-            }
-
             // ── 音量按钮（PiP 时隐藏）──
             if (!hideUiOverlays) {
                 Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 128.dp).size(40.dp)

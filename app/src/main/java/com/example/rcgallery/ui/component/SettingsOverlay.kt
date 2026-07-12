@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -26,11 +27,15 @@ import androidx.compose.ui.unit.sp
  *
  * @param gearModifier 齿轮按钮的 Modifier（位置由调用方决定）
  * @param visible 是否显示齿轮按钮（Preview 在 PiP 时隐藏）
+ * @param gearSize 齿轮按钮尺寸，默认 28.dp
+ * @param gearBackground 齿轮按钮背景色，默认橙色半透明
  */
 @Composable
 fun SettingsOverlay(
     gearModifier: Modifier = Modifier,
-    visible: Boolean = true
+    visible: Boolean = true,
+    gearSize: Dp = 28.dp,
+    gearBackground: Color = Color(0xCCFF9800)
 ) {
     var showInertiaSettings by remember { mutableStateOf(false) }
     var showLogDialog by remember { mutableStateOf(false) }
@@ -47,16 +52,16 @@ fun SettingsOverlay(
     if (visible) {
         Box(
             modifier = gearModifier
-                .size(28.dp)
+                .size(gearSize)
                 .clip(CircleShape)
-                .background(Color(0xCCFF9800))
+                .background(gearBackground)
                 .clickable { showInertiaSettings = true },
             contentAlignment = Alignment.Center
         ) { Icon(
                 painter = painterResource(com.example.rcgallery.R.drawable.ic_settings),
                 contentDescription = "设置",
                 tint = Color.White,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier.size((gearSize * 0.57f).coerceAtMost(20.dp))
             ) }
     }
 }

@@ -752,7 +752,37 @@ fun PreviewScreen(
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
 
-        SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
+        // ── 左侧竖排按钮组（设置 + 删除，统一 40dp 圆形背景）──
+        if (!pipOverlayHidden) {
+            Column(
+                modifier = Modifier.align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 60.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                SettingsOverlay(
+                    gearModifier = Modifier.size(40.dp),
+                    visible = true,
+                    gearSize = 40.dp,
+                    gearBackground = Color.White.copy(alpha = 0.2f)
+                )
+                // 删除按钮
+                Box(
+                    modifier = Modifier.size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable { showPermanentDeleteConfirm = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                        contentDescription = "永久删除",
+                        tint = Color(0xFFFF5252),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
 
         // ── 媒体 TAG 管理对话框 ──
         if (showMediaTagDialog && currentItem != null) {
