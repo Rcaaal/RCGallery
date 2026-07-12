@@ -2173,18 +2173,16 @@ private class GridVH private constructor(
             root.addView(countTv)
 
             root.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                if (pos >= 0) {
-                    val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onClick(it) }
-                }
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val bucketId = root.tag as? String ?: return@setOnClickListener
+                adapter.albumMap[bucketId]?.let { onClick(it) }
             }
             root.setOnLongClickListener {
-                val pos = root.tag as? Int ?: return@setOnLongClickListener true
-                if (pos >= 0) {
-                    val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
-                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onLongClick(it) }
-                }
+                val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnLongClickListener true
+                val bucketId = root.tag as? String ?: return@setOnLongClickListener true
+                adapter.albumMap[bucketId]?.let { onLongClick(it) }
                 true
             }
             return GridVH(root, starContainer, starWrapper, starIv)
@@ -2192,7 +2190,7 @@ private class GridVH private constructor(
     }
 
     fun bind(item: Album, pos: Int, starredIds: Set<String>, selectedIds: Set<String> = emptySet(), columns: Int = 3, parentBadgeMap: Map<String, String> = emptyMap()) {
-        itemView.tag = pos
+        itemView.tag = item.bucketId
         starContainer.tag = item.bucketId
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
         iv.load(item.coverUri) { size(180); crossfade(false) }
@@ -2442,18 +2440,16 @@ private class ListVH private constructor(
             }
 
             root.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                if (pos >= 0) {
-                    val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onClick(it) }
-                }
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val bucketId = root.tag as? String ?: return@setOnClickListener
+                adapter.albumMap[bucketId]?.let { onClick(it) }
             }
             root.setOnLongClickListener {
-                val pos = root.tag as? Int ?: return@setOnLongClickListener true
-                if (pos >= 0) {
-                    val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
-                    (rv.adapter as? AlbumGridAdapter)?.items?.getOrNull(pos)?.let { onLongClick(it) }
-                }
+                val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnLongClickListener true
+                val bucketId = root.tag as? String ?: return@setOnLongClickListener true
+                adapter.albumMap[bucketId]?.let { onLongClick(it) }
                 true
             }
             return ListVH(root, starContainer, starIv, onManageTags)
@@ -2461,7 +2457,7 @@ private class ListVH private constructor(
     }
 
     fun bind(item: Album, pos: Int, starredIds: Set<String>, albumTagsMap: Map<String, List<TagEntity>> = emptyMap()) {
-        itemView.tag = pos
+        itemView.tag = item.bucketId
         starContainer.tag = item.bucketId
         val row = (itemView as LinearLayout).getChildAt(0) as LinearLayout
         val iv = row.getChildAt(0) as ImageView
@@ -2753,19 +2749,16 @@ private class ParentHeaderVH(
 
             // ⋮ 菜单点击
             menuBtn.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
+                val parentId = root.tag as? Long ?: return@setOnClickListener
                 val popup = android.widget.PopupMenu(ctx, menuBtn)
                 popup.menu.add(0, 1, 0, "重命名")
                 popup.menu.add(0, 2, 0, "添加子相册")
                 popup.menu.add(0, 3, 0, "解散父级")
                 popup.setOnMenuItemClickListener { menuItem ->
                     when (menuItem.itemId) {
-                        1 -> { onParentLongClick?.invoke(item.parentId); true }
-                        2 -> { onAddChildClick?.invoke(item.parentId); true }
-                        3 -> { onDeleteParentClick?.invoke(item.parentId); true }
+                        1 -> { onParentLongClick?.invoke(parentId); true }
+                        2 -> { onAddChildClick?.invoke(parentId); true }
+                        3 -> { onDeleteParentClick?.invoke(parentId); true }
                         else -> false
                     }
                 }
@@ -2774,11 +2767,8 @@ private class ParentHeaderVH(
 
             // ── 点击展开/折叠 ──
             root.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
-                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ParentHeader ?: return@setOnClickListener
-                onParentClick?.invoke(item.parentId)
+                val parentId = root.tag as? Long ?: return@setOnClickListener
+                onParentClick?.invoke(parentId)
             }
 
             return ParentHeaderVH(root, starContainer, starIv, tagRow, tagChips)
@@ -2786,7 +2776,7 @@ private class ParentHeaderVH(
     }
 
     fun bind(item: ParentHeader, pos: Int, starredIds: Set<String>, parentSharedTagMap: Map<Long, List<TagEntity>> = emptyMap(), onManageSharedTag: ((Long) -> Unit)? = null) {
-        itemView.tag = pos
+        itemView.tag = item.parentId
         starContainer.tag = "parent:${item.parentId}"
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
         title?.text = item.parentName
@@ -2958,21 +2948,19 @@ private class ChildRowVH(
 
             // ── 点击进入相册 ──
             root.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
                 val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ChildRow ?: return@setOnClickListener
-                val album = adapter.albumMap[item.bucketId]
-                if (album != null) onClick(album)
+                val bucketId = root.tag as? String ?: return@setOnClickListener
+                adapter.albumMap[bucketId]?.let { onClick(it) }
             }
 
             // ✕ 按钮点击
             removeBtn.setOnClickListener {
-                val pos = root.tag as? Int ?: return@setOnClickListener
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
                 val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
-                val item = adapter.parentItems.getOrNull(pos) as? ChildRow ?: return@setOnClickListener
-                onRemoveChildClick?.invoke(item.parentId, item.bucketId)
+                val bucketId = root.tag as? String ?: return@setOnClickListener
+                val childRow = adapter.parentItems.filterIsInstance<ChildRow>().find { it.bucketId == bucketId } ?: return@setOnClickListener
+                onRemoveChildClick?.invoke(childRow.parentId, childRow.bucketId)
             }
 
             return ChildRowVH(root)
@@ -2980,7 +2968,7 @@ private class ChildRowVH(
     }
 
     fun bind(item: Album, pos: Int, parentName: String? = null) {
-        itemView.tag = pos
+        itemView.tag = item.bucketId
         val iv = itemView.findViewById<ImageView>(android.R.id.icon)
         iv?.load(item.coverUri) { size(160); crossfade(false) }
         val title = itemView.findViewById<android.widget.TextView>(android.R.id.title)
