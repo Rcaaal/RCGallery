@@ -54,6 +54,7 @@ import com.example.rcgallery.PipState
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.ui.component.SettingsOverlay
+import com.example.rcgallery.ui.component.SystemVolumeSliderOverlay
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.ui.component.AlbumPickDialog
@@ -80,6 +81,13 @@ fun PreviewScreen(
     val viewModel: GalleryViewModel = viewModel(activity)
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
+
+    // ── 进入静音：预览页进入时自动将系统媒体音量压到 0，退出时恢复 ──
+    DisposableEffect(Unit) {
+        playbackSettingsVM.muteSystemOnEnter()
+        onDispose { playbackSettingsVM.restoreSystemVolume() }
+    }
+
     // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
     var controllerVisible by remember { mutableStateOf(false) }
     // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
@@ -454,6 +462,7 @@ fun PreviewScreen(
                         title = {},
                         navigationIcon = {
                             TextButton(onClick = {
+                                playbackSettingsVM.restoreSystemVolume()
                                 onBackClick()
                             }) { Text("← 返回", color = Color.White) }
                         },
@@ -492,7 +501,7 @@ fun PreviewScreen(
                                 VideoPlayer(
                                     uri = item.uri,
                                     isActive = page == pagerState.currentPage,
-                                    volumeLevel = volumeState.level,
+                                        volumeLevel = volumeState.level,
                                     onToggleMute = { playbackSettingsVM.toggleMute() },
                                     onControllerVisibilityChanged = { controllerVisible = it },
                                     savedPositions = savedPositions,
@@ -803,63 +812,17 @@ fun PreviewScreen(
         // ── Debug 设置面板（橙色齿轮，右上角）──
         SettingsOverlay(gearModifier = Modifier.align(Alignment.TopEnd).padding(top = 60.dp, end = 48.dp), visible = !pipOverlayHidden)
 
-        // ── 右侧音量滑条（跟随 VideoPlayer 控制栏显隐，拖动调音量）──
-        val SLIDER_HEIGHT = 140.dp
-        val SLIDER_WIDTH = 4.dp
-        if (controllerVisible && !pipOverlayHidden && mediaItems.getOrNull(pagerState.currentPage)?.isVideo == true) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 12.dp)
-                    .width(40.dp)
-                    .height(SLIDER_HEIGHT)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
-                            do {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull() ?: break
-                                if (change.pressed) {
-                                    val newVolume = (1f - change.position.y / size.height.toFloat()).coerceIn(0f, 1f)
-                                    playbackSettingsVM.setVolume(newVolume)
-                                    change.consume()
-                                } else break
-                            } while (true)
-                        }
-                    }
-            ) {
-                // 轨道背景
-                Box(
-                    modifier = Modifier
-                        .width(SLIDER_WIDTH)
-                        .height(SLIDER_HEIGHT)
-                        .align(Alignment.Center)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Color.White.copy(alpha = 0.3f))
-                ) {
-                    // 填充部分（从底部到当前音量）
-                    Box(
-                        modifier = Modifier
-                            .width(SLIDER_WIDTH)
-                            .fillMaxHeight(volumeState.level)
-                            .align(Alignment.BottomCenter)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(Color.White.copy(alpha = 0.7f))
-                    )
-                }
-                // 滑块圆点
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .align(Alignment.Center)
-                        .offset(y = (SLIDER_HEIGHT * (0.5f - volumeState.level)).coerceIn(-SLIDER_HEIGHT / 2f, SLIDER_HEIGHT / 2f))
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.7f))
-                )
-            }
-        }
+        // ── 右侧音量滑条（公共组件，同 SMB 保持一致）──
+        SystemVolumeSliderOverlay(
+            visible = controllerVisible,
+            pipOverlayHidden = pipOverlayHidden,
+            isActiveVideo = mediaItems.getOrNull(pagerState.currentPage)?.isVideo == true,
+            volumeLevel = volumeState.level,
+            playbackSettingsVM = playbackSettingsVM,
+            modifier = Modifier.align(Alignment.CenterEnd)
+        )
 
-        // ── 媒体 TAG 管理对话框 ──
+        // ── 媒体 TAG 管理对话框──
         if (showMediaTagDialog && currentItem != null) {
             TagManageDialog(
                 title = "管理标签 - ${currentItem?.fileName ?: ""}",

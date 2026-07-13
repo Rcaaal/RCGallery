@@ -12,6 +12,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -29,6 +31,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -53,6 +56,7 @@ import com.example.rcgallery.data.smb.SmbFileInfo
 import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.InertiaSettings
+import com.example.rcgallery.ui.component.SystemVolumeSliderOverlay
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import kotlinx.coroutines.Dispatchers
@@ -84,7 +88,9 @@ private const val TAG = "SMB-PREVIEW"
 fun SmbPreviewScreen(
     initialIndex: Int = 0,
     items: List<SmbFileInfo> = emptyList(),
-    onDismiss: () -> Unit = {}
+    onDismiss: () -> Unit = {},
+    /** 文件改名后通知父级同步刷新数据（oldPath, newPath, newName）。 */
+    onFileRenamed: (oldPath: String, newPath: String, newName: String) -> Unit = { _, _, _ -> }
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
@@ -106,12 +112,27 @@ fun SmbPreviewScreen(
     // ── 删除对话框状态 ──
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
+    // ── 文件改名状态 ──
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
+    var isRenaming by remember { mutableStateOf(false) }
+
     // ── PiP ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
     var pipTriggered by remember { mutableStateOf(false) }
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
+
+    // ── 进入静音：预览页进入时自动将系统媒体音量压到 0，退出时恢复 ──
+    DisposableEffect(Unit) {
+        playbackSettingsVM.muteSystemOnEnter()
+        onDispose { playbackSettingsVM.restoreSystemVolume() }
+    }
+
     val scope = rememberCoroutineScope()
+
+    // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
+    var controllerVisible by remember { mutableStateOf(false) }
 
     // 通知 MainActivity 隐藏/显示底部导航栏
     LaunchedEffect(Unit) { PipState.isSmbPreviewActive = true }
@@ -166,6 +187,7 @@ fun SmbPreviewScreen(
                         volumeLevel = volumeState.level,
                         savedPositions = savedPositions,
                         onToggleMute = { playbackSettingsVM.toggleMute() },
+                        onControllerVisibilityChanged = { controllerVisible = it },
                         onRequestPip = { pipTriggered = true },
                         hideUiOverlays = pipOverlayHidden,
                         dataSourceFactory = SmbDataSource.Factory(),
@@ -196,7 +218,10 @@ fun SmbPreviewScreen(
         // ── 顶部导航栏（后声明，触摸优先级高于 HorizontalPager 内的 AndroidView）──
         if (!pipOverlayHidden) {
             TextButton(
-                onClick = onDismiss,
+                onClick = {
+                    playbackSettingsVM.restoreSystemVolume()
+                    onDismiss()
+                },
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
             ) { Text("← 返回", color = Color.White) }
 
@@ -217,11 +242,27 @@ fun SmbPreviewScreen(
                         fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 48.dp)
+                        modifier = Modifier
+                            .padding(horizontal = 48.dp)
+                            .clickable {
+                                val dotIdx = currentFile.name.lastIndexOf('.')
+                                renameText = if (dotIdx > 0) currentFile.name.substring(0, dotIdx) else currentFile.name
+                                showRenameDialog = true
+                            }
                     )
                 }
             }
         }
+
+        // ── 右侧音量滑条（公共组件，同 PreviewScreen 保持一致）──
+        SystemVolumeSliderOverlay(
+            visible = controllerVisible,
+            pipOverlayHidden = pipOverlayHidden,
+            isActiveVideo = mutableItems.getOrNull(pagerState.currentPage)?.isVideo == true,
+            volumeLevel = volumeState.level,
+            playbackSettingsVM = playbackSettingsVM,
+            modifier = Modifier.align(Alignment.CenterEnd)
+        )
 
         // ── 删除确认对话框 ──
         if (showDeleteConfirm) {
@@ -256,6 +297,71 @@ fun SmbPreviewScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+                }
+            )
+        }
+
+        // ── 文件改名对话框 ──
+        if (showRenameDialog) {
+            val currentFile = mutableItems.getOrNull(pagerState.currentPage)
+            val dotIdx = currentFile?.name?.lastIndexOf('.') ?: -1
+            val extOnly = if (dotIdx > 0) currentFile!!.name.substring(dotIdx) else ""
+            AlertDialog(
+                onDismissRequest = { if (!isRenaming) showRenameDialog = false },
+                title = { Text("重命名文件") },
+                text = {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { if (!isRenaming) renameText = it },
+                        singleLine = true,
+                        label = { Text("文件名") },
+                        suffix = { Text(extOnly, color = Color.Gray) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val file = currentFile ?: return@Button
+                            val newName = renameText.trim()
+                            if (newName.isEmpty()) return@Button
+                            isRenaming = true
+                            scope.launch {
+                                val oldPath = file.path
+                                val dirEnd = oldPath.lastIndexOf('/') + 1
+                                val newPath = oldPath.substring(0, dirEnd) + newName + extOnly
+
+                                // 保存当前视频播放位置（路径变更后 key 重建）
+                                val oldUri = Uri.parse(oldPath)
+                                val savedPos = savedPositions[oldUri] ?: 0L
+
+                                val result = withContext(Dispatchers.IO) {
+                                    SmbRepository.getInstance().renameFile(oldPath, newPath)
+                                }
+                                result.onSuccess {
+                                    val idx = mutableItems.indexOfFirst { it.path == oldPath }
+                                    if (idx >= 0) {
+                                        // 恢复播放位置（新 URI → VideoPlayer 重建后读到）
+                                        if (savedPos > 1000) savedPositions[Uri.parse(newPath)] = savedPos
+                                        mutableItems = mutableItems.toMutableList().apply {
+                                            set(idx, file.copy(name = newName + extOnly, path = newPath))
+                                        }
+                                    }
+                                    showRenameDialog = false
+                                    Toast.makeText(context, "已重命名", Toast.LENGTH_SHORT).show()
+                                    // 通知父级同步刷新列表
+                                    onFileRenamed(oldPath, newPath, newName + extOnly)
+                                }.onFailure { e ->
+                                    Toast.makeText(context, "重命名失败: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                                isRenaming = false
+                            }
+                        },
+                        enabled = !isRenaming
+                    ) { Text(if (isRenaming) "重命名中..." else "确认") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { if (!isRenaming) showRenameDialog = false }) { Text("取消") }
                 }
             )
         }

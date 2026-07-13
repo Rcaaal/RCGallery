@@ -121,7 +121,7 @@ fun VideoPlayer(
             //    防止 codec 在无 surface 时初始化导致死机
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_ONE
-            volume = if (isActive) volumeLevel.coerceIn(0f, 1f) else 0f
+            volume = 1f  // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定满音量
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     AppLogger.e("VideoPlayer", "playback error uri=${uri.lastPathSegment} error=$error")
@@ -225,7 +225,7 @@ fun VideoPlayer(
         }
     }
 
-    LaunchedEffect(volumeLevel) { exoPlayer.volume = volumeLevel.coerceIn(0f, 1f) }
+    // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定 volume=1f，无需 LaunchedEffect(volumeLevel)
 
     // PiP 进入前强制隐藏 PlayerView 控制器（防止控制栏闪烁 + SurfaceView 布局计算干扰 PiP 画面）
     LaunchedEffect(hideUiOverlays) {

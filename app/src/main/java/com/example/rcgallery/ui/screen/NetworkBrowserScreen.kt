@@ -292,7 +292,10 @@ fun NetworkBrowserScreen(
                 SmbPreviewScreen(
                     initialIndex = idx,
                     items = files,
-                    onDismiss = { previewState = null }
+                    onDismiss = { previewState = null },
+                    onFileRenamed = { oldPath, newPath, newName ->
+                        viewModel.smbApplyFileRename(oldPath, newPath, newName)
+                    }
                 )
             } else {
                 previewState = null

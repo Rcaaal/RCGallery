@@ -2046,6 +2046,21 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /**
+     * SMB 文件改名后更新当前 FolderContent 状态（不上服务器重新扫描）。
+     * 用于 SmbPreviewScreen 改名成功后即时刷新列表显示。
+     */
+    fun smbApplyFileRename(oldPath: String, newPath: String, newName: String) {
+        val current = _smbBrowseState.value
+        if (current is SmbBrowseState.FolderContent) {
+            _smbBrowseState.value = current.copy(
+                mediaFiles = current.mediaFiles.map { info ->
+                    if (info.path == oldPath) info.copy(name = newName, path = newPath) else info
+                }
+            )
+        }
+    }
+
     /** 最近移动过的相册 */
     data class RecentMoveAlbum(
         val directoryPath: String,
