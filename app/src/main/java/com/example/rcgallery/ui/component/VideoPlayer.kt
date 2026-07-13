@@ -85,6 +85,7 @@ fun VideoPlayer(
     onRegisterSpeedSettingsTrigger: (() -> Unit) -> Unit = {},
     dataSourceFactory: DataSource.Factory? = null,
     onControllerVisibilityChanged: (Boolean) -> Unit = {},
+    onFirstFrameRendered: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
@@ -104,6 +105,9 @@ fun VideoPlayer(
     var playerPosition by remember { mutableFloatStateOf(0f) }
     var playerDuration by remember { mutableFloatStateOf(1f) }
     val lastTapTime = remember { longArrayOf(0L) }
+
+    // 稳定持最新 onFirstFrameRendered 回调，供 remember 内 Player.Listener 使用
+    val currentOnFirstFrameRenderedState = rememberUpdatedState(onFirstFrameRendered)
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -142,6 +146,9 @@ fun VideoPlayer(
                     } else {
                         AppLogger.d("PiP", "onVideoSizeChanged: invalid ${videoSize.width}x${videoSize.height}")
                     }
+                }
+                override fun onRenderedFirstFrame() {
+                    currentOnFirstFrameRenderedState.value()
                 }
             })
         }

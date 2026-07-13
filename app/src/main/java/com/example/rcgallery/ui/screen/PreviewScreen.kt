@@ -14,6 +14,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -501,26 +502,41 @@ fun PreviewScreen(
                         key(item?.uri ?: page) {
                         if (item != null) {
                             if (item.isVideo) {
-                                if (isCurrentPage) {
-                                    VideoPlayer(
-                                        uri = item.uri,
-                                        isActive = true,
+                                var showVideoCover by remember { mutableStateOf(true) }
+                                // 翻回当前页时 Player 重建 → 重置封面盖住黑屏
+                                LaunchedEffect(isCurrentPage) {
+                                    if (isCurrentPage && !showVideoCover) {
+                                        showVideoCover = true
+                                    }
+                                }
+
+                                Box {
+                                    // 底层：Player（当前页才创建）
+                                    if (isCurrentPage) {
+                                        VideoPlayer(
+                                            uri = item.uri,
+                                            isActive = true,
                                             volumeLevel = volumeState.level,
-                                        onToggleMute = { playbackSettingsVM.toggleMute() },
-                                        onControllerVisibilityChanged = { controllerVisible = it },
-                                        savedPositions = savedPositions,
-                                        onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
-                                        onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
-                                        onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
-                                        onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
-                                        onRequestPip = { pipTriggered = true },
-                                        hideUiOverlays = pipOverlayHidden,
-                                        keepControllerVisible = showInfo && item.isVideo,
-                                        onShowInfoClick = { showInfo = true },
-                                        onMoveToTrash = { moveCurrentToTrash() }
+                                            onToggleMute = { playbackSettingsVM.toggleMute() },
+                                            onControllerVisibilityChanged = { controllerVisible = it },
+                                            savedPositions = savedPositions,
+                                            onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
+                                            onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
+                                            onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
+                                            onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
+                                            onRequestPip = { pipTriggered = true },
+                                            hideUiOverlays = pipOverlayHidden,
+                                            keepControllerVisible = showInfo && item.isVideo,
+                                            onShowInfoClick = { showInfo = true },
+                                            onMoveToTrash = { moveCurrentToTrash() },
+                                            onFirstFrameRendered = { showVideoCover = false }
+                                        )
+                                    }
+                                    // 顶层：封面盖住 Player 黑屏，第一帧成功后淡出
+                                    VideoCoverOverlay(
+                                        showVideoCover = showVideoCover,
+                                        uri = item.uri
                                     )
-                                } else {
-                                    VideoThumbnailCover(uri = item.uri)
                                 }
                             } else {
                                 ZoomableImage3(
@@ -969,6 +985,20 @@ private fun VideoSeekIndicator(visible: Boolean, positionMs: Long, totalDuration
                 color = Color.White
             )
         }
+    }
+}
+
+// ══════════════════════════════════════
+//  视频封面覆盖层（独立 Composable，避免外层 ColumnScope.AnimatedVisibility 冲突）
+// ══════════════════════════════════════
+@Composable
+private fun VideoCoverOverlay(showVideoCover: Boolean, uri: Uri) {
+    AnimatedVisibility(
+        visible = showVideoCover,
+        exit = fadeOut(animationSpec = tween(200)),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        VideoThumbnailCover(uri = uri)
     }
 }
 
