@@ -331,6 +331,8 @@ fun PreviewScreen(
     // 日志：当前页面变更
     LaunchedEffect("page:${pagerState.currentPage}") {
         showInfo = false  // 翻页关闭信息面板
+        showTopRenameDialog = false  // 翻页关闭顶部改名弹窗
+        topRenameText = ""
         // 非视频页强制隐藏控制栏，防止视频遗留按钮残留
         if (currentItem?.isVideo != true) controllerVisible = false
         AppLogger.d("Preview", "page=${pagerState.currentPage} uri=${currentItem?.uri?.lastPathSegment} name=${currentItem?.fileName} size=${mediaItems.size}")
