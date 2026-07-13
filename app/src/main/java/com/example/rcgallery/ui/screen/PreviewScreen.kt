@@ -633,11 +633,14 @@ fun PreviewScreen(
                                 .clickable { showInfo = false }
                         )
                     }
-                    // InfoCard 0.3
+                    // InfoCard 0.3 — 贴底摆放，避开系统手势条
                     Box(
                         modifier = Modifier
                             .weight(0.3f)
                             .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(bottom = 4.dp),
+                        contentAlignment = Alignment.BottomCenter
                     ) {
                         key(renameVersion) {
                         InfoCard(
@@ -667,16 +670,19 @@ fun PreviewScreen(
                         }
                     }
                 } else {
-                    // ── 图片信息卡片：0.3 + 无额外装饰（#249 前布局）──
+                    // ── 图片信息卡片：0.3，贴底摆放，避开系统手势条 ──
                     Box(
                         modifier = Modifier
                             .weight(0.3f)
                             .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(bottom = 4.dp)
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures { _, dragAmount ->
                                     if (dragAmount > 0) showInfo = false
                                 }
-                            }
+                            },
+                        contentAlignment = Alignment.BottomCenter
                     ) {
                         key(renameVersion) {
                         InfoCard(
