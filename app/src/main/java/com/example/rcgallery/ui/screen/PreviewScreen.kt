@@ -138,10 +138,28 @@ fun PreviewScreen(
     var showInfo by remember { mutableStateOf(false) }
     // 文件重命名版本号——每改名一次 +1，用于 key() 强制 InfoCard 刷新
     var renameVersion by remember { mutableIntStateOf(0) }
+    var showTopRenameDialog by remember { mutableStateOf(false) }
+    var topRenameText by remember { mutableStateOf("") }
     // 返回键直接退出预览（不拦截），信息面板通过点击图片或翻页关闭
 
     // ── 快删 Snackbar ──
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // ── 文件重命名通用 helper（封面标题 / InfoCard 共用）──
+    fun renameCurrentFile(newFileName: String) {
+        val pageIdx = pagerState.currentPage
+        val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
+        mediaItems = mediaItems.mapIndexed { i, item ->
+            if (i == pageIdx) {
+                val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
+                item.copy(fileName = newFileName, filePath = newPath)
+            } else {
+                item
+            }
+        }
+        renameVersion++
+        if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
+    }
 
     // ── 移至回收站并翻到下一个（提取为公共函数，按钮和 VideoPlayer 共用）──
     fun moveCurrentToTrash() {
@@ -670,20 +688,7 @@ fun PreviewScreen(
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
                             onMoveToAlbum = { showAlbumPickDialog = true },
-                            onFileRenamed = { newFileName ->
-                                val pageIdx = pagerState.currentPage
-                                val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
-                                mediaItems = mediaItems.mapIndexed { i, item ->
-                                    if (i == pageIdx) {
-                                        val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
-                                        item.copy(fileName = newFileName, filePath = newPath)
-                                    } else {
-                                        item
-                                    }
-                                }
-                                renameVersion++
-                                if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
-                            },
+                            onFileRenamed = { newFileName -> renameCurrentFile(newFileName) },
                             mediaTags = currentMediaTags,
                             onManageTags = { showMediaTagDialog = true }
                         )
@@ -712,20 +717,7 @@ fun PreviewScreen(
                             onAlbumNameClick = { showAlbumRenameDialog = true },
                             onDeleteClick = { showPermanentDeleteConfirm = true },
                             onMoveToAlbum = { showAlbumPickDialog = true },
-                            onFileRenamed = { newFileName ->
-                                val pageIdx = pagerState.currentPage
-                                val targetUri = mediaItems.getOrNull(pageIdx)?.uri?.toString()
-                                mediaItems = mediaItems.mapIndexed { i, item ->
-                                    if (i == pageIdx) {
-                                        val newPath = item.filePath.substringBeforeLast("/") + "/" + newFileName
-                                        item.copy(fileName = newFileName, filePath = newPath)
-                                    } else {
-                                        item
-                                    }
-                                }
-                                renameVersion++
-                                if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
-                            },
+                            onFileRenamed = { newFileName -> renameCurrentFile(newFileName) },
                             mediaTags = currentMediaTags,
                             onManageTags = { showMediaTagDialog = true }
                         )
@@ -817,6 +809,30 @@ fun PreviewScreen(
             positionMs = seekIndicatorPosition,
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
+
+        // ── 顶部标题区（页码 + 可点击文件名，PiP 时隐藏）──
+        if (!pipOverlayHidden && currentItem != null) {
+            Column(
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 48.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "${pagerState.currentPage + 1}/${mediaItems.size}",
+                    color = Color(0xFFBBBBBB),
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = currentItem?.fileName ?: "",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    modifier = Modifier.clickable {
+                        topRenameText = currentItem?.fileName ?: ""
+                        showTopRenameDialog = true
+                    }
+                )
+            }
+        }
 
         // ── 左侧竖排按钮组（删除 → 设置 → 播放模式，统一 40dp 圆形半透明白底），仅视频时显示 ──
         if (!pipOverlayHidden && currentItem?.isVideo == true) {
@@ -949,6 +965,40 @@ fun PreviewScreen(
                         }
                     }
                 }
+            )
+        }
+
+        // ── 顶部改名对话框 ──
+        if (showTopRenameDialog && currentItem != null) {
+            val dotIndex = currentItem!!.fileName.lastIndexOf('.')
+            val baseNameOnly = if (dotIndex > 0) currentItem!!.fileName.substring(0, dotIndex) else currentItem!!.fileName
+            val extOnly = if (dotIndex > 0) currentItem!!.fileName.substring(dotIndex) else ""
+            var editText by remember { mutableStateOf(baseNameOnly) }
+            AlertDialog(
+                onDismissRequest = { showTopRenameDialog = false },
+                title = { Text("重命名文件") },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = editText,
+                            onValueChange = { editText = it },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            label = { Text("文件名") }
+                        )
+                        Text(extOnly, color = Color.Gray, fontSize = 14.sp)
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val newName = editText.trim()
+                        if (newName.isNotEmpty()) {
+                            renameCurrentFile("$newName$extOnly")
+                            showTopRenameDialog = false
+                        }
+                    }) { Text("确认") }
+                },
+                dismissButton = { TextButton(onClick = { showTopRenameDialog = false }) { Text("取消") } }
             )
         }
 
