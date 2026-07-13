@@ -3,6 +3,7 @@ package com.example.rcgallery.ui.screen
 import android.graphics.ImageDecoder
 import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.TransitionDrawable
 import android.net.Uri
 import android.widget.ImageView
 import androidx.compose.animation.core.LinearEasing
@@ -117,7 +118,8 @@ fun ZoomableImage3(
 
     // ── LaunchedEffect 解码（自动取消：uri/loadTier 变化或页面离开 → 协程取消）──
     LaunchedEffect(uri, loadTier) {
-        drawable = null  // 立即清旧图，防止 stale image 闪烁
+        // 不主动清 drawable：保留旧图显示，等新图 decode 完成后替换
+        // 防止 Preview→Full 切换时原子替换导致"画质跳变"闪烁
         hasDecodeError = false
         try {
             val result = withContext(Dispatchers.IO) {
@@ -327,10 +329,31 @@ fun ZoomableImage3(
                     // ImageDecoder 失败时用 Coil 兜底加载
                     iv.load(uri) { crossfade(false) }
                 } else {
-                    iv.setImageDrawable(drawable)
-                    val ad = drawable
-                    if (ad is AnimatedImageDrawable && !ad.isRunning) {
-                        ad.start()
+                    val newDrawable = drawable
+                    if (newDrawable != null) {
+                        val currentDrawable = iv.drawable
+                        // 解包 TransitionDrawable，取实际当前图层
+                        val actualCurrent = if (currentDrawable is TransitionDrawable) {
+                            currentDrawable.findDrawableByLayerId(currentDrawable.numberOfLayers - 1)
+                        } else {
+                            currentDrawable
+                        }
+                        if (actualCurrent != null
+                            && actualCurrent !== newDrawable
+                            && actualCurrent !is AnimatedImageDrawable
+                            && newDrawable !is AnimatedImageDrawable
+                        ) {
+                            // 旧图→新图交叉淡入：消除 Preview→Full 画质跳变
+                            val td = TransitionDrawable(arrayOf(actualCurrent, newDrawable))
+                            iv.setImageDrawable(td)
+                            td.startTransition(200)
+                        } else {
+                            // 首次加载 / GIF / 同图 → 直接设置
+                            iv.setImageDrawable(newDrawable)
+                            if (newDrawable is AnimatedImageDrawable && !newDrawable.isRunning) {
+                                newDrawable.start()
+                            }
+                        }
                     }
                 }
             },
