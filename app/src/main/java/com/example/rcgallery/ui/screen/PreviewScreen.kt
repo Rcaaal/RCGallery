@@ -1160,6 +1160,24 @@ private fun InfoCard(
                             )
                         }
                         IconButton(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = item.mimeType
+                                    putExtra(Intent.EXTRA_STREAM, item.uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "分享到"))
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_share),
+                                contentDescription = "分享",
+                                tint = Color(0xFFBBBBBB),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
                             onClick = onDeleteClick,
                             modifier = Modifier.size(28.dp)
                         ) {
