@@ -36,4 +36,7 @@ object InertiaSettings {
 
     /** 上划/下滑速度阈值（px）：值越小越容易触发。默认 5，范围 1~15 */
     @JvmStatic var swipeVelocityThreshold: Float = 5f
+
+    /** 静音按钮底部偏移（dp）：值越大按钮越往上抬。默认 52，范围 0~160 */
+    @JvmStatic var muteButtonBottomDp: Float = 52f
 }

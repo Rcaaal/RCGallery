@@ -110,6 +110,17 @@ fun InertiaSettingsPanel(
 
                 HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
 
+                // ── 静音按钮底部偏移 ──
+                var muteBtn by remember { mutableFloatStateOf(InertiaSettings.muteButtonBottomDp) }
+                Text("静音按钮偏移: ${muteBtn.toInt()} dp", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Slider(
+                    value = muteBtn,
+                    onValueChange = { muteBtn = it; InertiaSettings.muteButtonBottomDp = it },
+                    valueRange = 0f..160f, steps = 31
+                )
+
+                HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+
                 // ── 日志入口按钮（从设置面板打开调试日志）──
                 Row(
                     modifier = Modifier.fillMaxWidth(),

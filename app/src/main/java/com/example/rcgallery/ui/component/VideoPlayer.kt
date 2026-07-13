@@ -59,6 +59,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.example.rcgallery.PipState
 import com.example.rcgallery.util.AppLogger
+import com.example.rcgallery.ui.component.InertiaSettings
 import kotlinx.coroutines.delay
 
 private const val SPEED_TEXT_HIDE_DELAY_MS = 800L
@@ -438,7 +439,7 @@ fun VideoPlayer(
 
             // ── 音量按钮（底部右侧，PiP 时隐藏）──
             if (!hideUiOverlays) {
-                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 52.dp).size(40.dp)
+                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = InertiaSettings.muteButtonBottomDp.dp).size(40.dp)
                     .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape)
                     .clickable { onToggleMute() }, contentAlignment = Alignment.Center) {
                     Icon(painter = painterResource(if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up else com.example.rcgallery.R.drawable.ic_volume_off),
