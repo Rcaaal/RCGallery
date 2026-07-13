@@ -818,8 +818,8 @@ fun PreviewScreen(
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
 
-        // ── 左侧竖排按钮组（删除 → 设置 → 播放模式，统一 40dp 圆形半透明白底）──
-        if (!pipOverlayHidden) {
+        // ── 左侧竖排按钮组（删除 → 设置 → 播放模式，统一 40dp 圆形半透明白底），仅视频时显示 ──
+        if (!pipOverlayHidden && currentItem?.isVideo == true) {
             Column(
                 modifier = Modifier.align(Alignment.TopStart)
                     .padding(start = 12.dp, top = 60.dp),

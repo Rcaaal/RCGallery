@@ -112,11 +112,11 @@ fun InertiaSettingsPanel(
 
                 // ── 静音按钮底部偏移 ──
                 var muteBtn by remember { mutableFloatStateOf(InertiaSettings.muteButtonBottomDp) }
-                Text("静音按钮偏移: ${muteBtn.toInt()} dp", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Text("静音按钮偏移: ${"%.1f".format(muteBtn)} dp", fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                 Slider(
                     value = muteBtn,
                     onValueChange = { muteBtn = it; InertiaSettings.muteButtonBottomDp = it },
-                    valueRange = 0f..160f, steps = 31
+                    valueRange = 130f..135f, steps = 9
                 )
 
                 HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
