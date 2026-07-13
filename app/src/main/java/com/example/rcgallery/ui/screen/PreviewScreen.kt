@@ -66,6 +66,7 @@ import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.FormatUtil
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -940,6 +941,17 @@ fun PreviewScreen(
                 albums = allAlbums,
                 recentMoveAlbums = recentDirs,
                 onDismiss = { showAlbumPickDialog = false },
+                onCreateFolder = { name, onResult ->
+                    scope.launch(Dispatchers.IO) {
+                        val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                        val dir = java.io.File(dcim, name)
+                        val path = if (dir.mkdirs() || dir.exists()) {
+                            viewModel.loadAlbums()
+                            dir.absolutePath
+                        } else null
+                        onResult(path)
+                    }
+                },
                 onAlbumSelected = { targetDir, targetName, mode ->
                     showAlbumPickDialog = false
                     if (singleItem != null) {
