@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.Player
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.ui.component.InertiaSettings
@@ -125,6 +126,9 @@ fun PreviewScreen(
     val getPlayerPositions = remember { mutableMapOf<Int, () -> Long>() }
     val getPlayerDurations = remember { mutableMapOf<Int, () -> Long>() }
     val speedSettingsTrigger = remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    // ── 播放模式 ──
+    var playMode by remember { mutableStateOf(PlayMode.LoopCurrent) }
 
     // ── PiP 覆盖层管理 ──
     var pipOverlayHidden by remember { mutableStateOf(false) }
@@ -529,7 +533,21 @@ fun PreviewScreen(
                                             keepControllerVisible = showInfo && item.isVideo,
                                             onShowInfoClick = { showInfo = true },
                                             onMoveToTrash = { moveCurrentToTrash() },
-                                            onFirstFrameRendered = { showVideoCover = false }
+                                            onFirstFrameRendered = { showVideoCover = false },
+                                            repeatMode = if (playMode == PlayMode.LoopCurrent) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF,
+                                            onPlaybackEnded = {
+                                                if (playMode == PlayMode.NextVideo) {
+                                                    val current = pagerState.currentPage
+                                                    for (i in (current + 1) until mediaItems.size) {
+                                                        if (mediaItems[i].isVideo) {
+                                                            scope.launch {
+                                                                pagerState.animateScrollToPage(i)
+                                                            }
+                                                            break
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         )
                                     }
                                     // 顶层：封面盖住 Player 黑屏，第一帧成功后淡出
@@ -798,7 +816,7 @@ fun PreviewScreen(
             totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
         )
 
-        // ── 左侧竖排按钮组（视频播放设置 + 删除，统一 40dp 圆形半透明白底）──
+        // ── 左侧竖排按钮组（删除 → 设置 → 播放模式，统一 40dp 圆形半透明白底）──
         if (!pipOverlayHidden) {
             Column(
                 modifier = Modifier.align(Alignment.TopStart)
@@ -806,6 +824,21 @@ fun PreviewScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // 删除按钮
+                Box(
+                    modifier = Modifier.size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.2f))
+                        .clickable { moveCurrentToTrash() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
+                        contentDescription = "移至回收站",
+                        tint = Color(0xFFFF5252),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
                 // 播放速度设置按钮
                 Box(
                     modifier = Modifier.size(40.dp)
@@ -821,18 +854,24 @@ fun PreviewScreen(
                         modifier = Modifier.size(20.dp)
                     )
                 }
-                // 删除按钮
+                // 播放模式按钮（点击切换 LoopCurrent ↔ NextVideo）
+                val isLoopCurrent = playMode == PlayMode.LoopCurrent
                 Box(
                     modifier = Modifier.size(40.dp)
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.2f))
-                        .clickable { moveCurrentToTrash() },
+                        .clickable {
+                            playMode = if (isLoopCurrent) PlayMode.NextVideo else PlayMode.LoopCurrent
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        painter = painterResource(com.example.rcgallery.R.drawable.ic_trash),
-                        contentDescription = "移至回收站",
-                        tint = Color(0xFFFF5252),
+                        painter = painterResource(
+                            if (isLoopCurrent) com.example.rcgallery.R.drawable.ic_play_once
+                            else com.example.rcgallery.R.drawable.ic_play_loop
+                        ),
+                        contentDescription = if (isLoopCurrent) "循环当前视频" else "自动播放下一个",
+                        tint = Color.White,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -1007,6 +1046,9 @@ private fun VideoCoverOverlay(showVideoCover: Boolean, uri: Uri) {
         VideoThumbnailCover(uri = uri)
     }
 }
+
+// ── 播放模式 ──
+private enum class PlayMode { LoopCurrent, NextVideo }
 
 // ══════════════════════════════════════
 //  图片信息卡片（紧凑 4 行布局 + 重命名）

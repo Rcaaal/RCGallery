@@ -86,6 +86,8 @@ fun VideoPlayer(
     dataSourceFactory: DataSource.Factory? = null,
     onControllerVisibilityChanged: (Boolean) -> Unit = {},
     onFirstFrameRendered: () -> Unit = {},
+    repeatMode: Int = Player.REPEAT_MODE_ONE,
+    onPlaybackEnded: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
@@ -106,8 +108,9 @@ fun VideoPlayer(
     var playerDuration by remember { mutableFloatStateOf(1f) }
     val lastTapTime = remember { longArrayOf(0L) }
 
-    // 稳定持最新 onFirstFrameRendered 回调，供 remember 内 Player.Listener 使用
+    // 稳定持最新 onFirstFrameRendered / onPlaybackEnded 回调，供 remember 内 Player.Listener 使用
     val currentOnFirstFrameRenderedState = rememberUpdatedState(onFirstFrameRendered)
+    val currentOnPlaybackEndedState = rememberUpdatedState(onPlaybackEnded)
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context)
@@ -124,7 +127,7 @@ fun VideoPlayer(
             // ❌ 不在 remember 中 prepare() — 等 TextureView surface 就绪后再 prepare
             //    防止 codec 在无 surface 时初始化导致死机
             playWhenReady = false
-            repeatMode = Player.REPEAT_MODE_ONE
+            // repeatMode 由 LaunchedEffect(repeatMode) 动态同步，不在 remember 中固定
             volume = 1f  // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定满音量
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
@@ -149,6 +152,11 @@ fun VideoPlayer(
                 }
                 override fun onRenderedFirstFrame() {
                     currentOnFirstFrameRenderedState.value()
+                }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_ENDED) {
+                        currentOnPlaybackEndedState.value()
+                    }
                 }
             })
         }
@@ -230,6 +238,12 @@ fun VideoPlayer(
             speedBoosted[0] = false; speedText = ""
             AppLogger.d("VideoPlayer", "active=$isActive uri=${uri.lastPathSegment} pos=$pos saved=${pos > 1000}")
         }
+    }
+
+    // ── 播放模式动态同步：LoopCurrent → ONE，NextVideo → OFF ──
+    LaunchedEffect(repeatMode) {
+        exoPlayer.repeatMode = repeatMode
+        AppLogger.d("VideoPlayer", "repeatMode=$repeatMode")
     }
 
     // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定 volume=1f，无需 LaunchedEffect(volumeLevel)
@@ -424,7 +438,7 @@ fun VideoPlayer(
 
             // ── 音量按钮（底部右侧，PiP 时隐藏）──
             if (!hideUiOverlays) {
-                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 128.dp).size(40.dp)
+                Box(modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 52.dp).size(40.dp)
                     .background(color = Color.White.copy(alpha = 0.3f), shape = CircleShape)
                     .clickable { onToggleMute() }, contentAlignment = Alignment.Center) {
                     Icon(painter = painterResource(if (volumeLevel > 0f) com.example.rcgallery.R.drawable.ic_volume_up else com.example.rcgallery.R.drawable.ic_volume_off),

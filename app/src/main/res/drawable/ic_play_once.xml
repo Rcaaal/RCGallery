@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- 循环箭头 + 数字1：单次循环当前视频 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M286.95,286.95h450.1v134.61l178.78,-178.78L737.05,64v134.61H198.61v269.22h88.34V286.95zM737.05,737.05h-450.1V602.44L108.17,781.22 286.95,960V825.39h538.44V556.17h-88.34v180.88zM556.17,646.61V377.39H512l-90.44,44.17v46.27h67.3v178.78h67.31z" />
+</vector>
