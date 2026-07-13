@@ -596,15 +596,13 @@ fun MediaGridScreen(
                                 val adapter = rv.adapter as SimpleGridAdapter
                                 val prevMode = adapter.currentMode
                                 val currentMode = mediaDisplayMode
+                                val modeChanged = prevMode != currentMode
                                 adapter.items = tagFilteredItems
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
                                 adapter.selectedUris = selectedMediaUris
                                 adapter.isMultiSelectMode = isMediaMultiSelect
-                                adapter.notifyDataSetChanged()
-                                scroller.refresh()
-                                // 之后不再重复 notify — 上面的调用已是全量刷新
-                                if (prevMode != currentMode) {
+                                if (modeChanged) {
                                     adapter.currentMode = currentMode
                                     val spanCount = when (currentMode) {
                                         is MediaDisplayMode.Grid -> currentMode.columns
@@ -614,10 +612,9 @@ fun MediaGridScreen(
                                     if (lm == null || lm.spanCount != spanCount) {
                                         rv.layoutManager = GridLayoutManager(rv.context, spanCount)
                                     }
-                                    adapter.notifyDataSetChanged()
-                                    scroller.refresh()
-                                } else {
-                                    adapter.notifyDataSetChanged()
+                                }
+                                adapter.notifyDataSetChanged()
+                                if (modeChanged) {
                                     scroller.refresh()
                                 }
                                 // ── 列表刷新后对齐多选状态：清除已不存在的 URI ──
@@ -1394,10 +1391,13 @@ private class SimpleGridAdapter(
                 tv.visibility = android.view.View.VISIBLE
             } else { tv.visibility = android.view.View.GONE }
             updateStarSize(columns)
+            val hideStar = columns == 4 || columns == 5
             // 多选模式（含 0 已选但模式开启中）：隐藏星标，显示对号
             val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
-            starContainer.visibility = if (inMultiSelect) android.view.View.GONE else android.view.View.VISIBLE
+            starContainer.visibility = if (inMultiSelect || hideStar) android.view.View.GONE else android.view.View.VISIBLE
+            starContainer.isClickable = !hideStar
+            starContainer.isEnabled = !hideStar
             val checkmark = itemView.findViewById<FrameLayout>(android.R.id.checkbox)
             if (checkmark != null) {
                 checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE

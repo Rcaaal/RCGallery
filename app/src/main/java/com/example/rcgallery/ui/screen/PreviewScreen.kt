@@ -85,6 +85,7 @@ fun PreviewScreen(
     val viewModel: GalleryViewModel = viewModel(activity)
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
+    val starredUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
 
     // ── 进入静音：预览页进入时自动将系统媒体音量压到 0，退出时恢复 ──
     DisposableEffect(Unit) {
@@ -693,7 +694,11 @@ fun PreviewScreen(
                             onMoveToAlbum = { showAlbumPickDialog = true },
                             onFileRenamed = { newFileName -> renameCurrentFile(newFileName) },
                             mediaTags = currentMediaTags,
-                            onManageTags = { showMediaTagDialog = true }
+                            onManageTags = { showMediaTagDialog = true },
+                            isStarred = currentItem?.uri?.toString() in starredUris,
+                            onToggleStar = {
+                                currentItem?.let { viewModel.toggleMediaStar(it.uri.toString()) }
+                            }
                         )
                         }
                     }
@@ -722,7 +727,11 @@ fun PreviewScreen(
                             onMoveToAlbum = { showAlbumPickDialog = true },
                             onFileRenamed = { newFileName -> renameCurrentFile(newFileName) },
                             mediaTags = currentMediaTags,
-                            onManageTags = { showMediaTagDialog = true }
+                            onManageTags = { showMediaTagDialog = true },
+                            isStarred = currentItem?.uri?.toString() in starredUris,
+                            onToggleStar = {
+                                currentItem?.let { viewModel.toggleMediaStar(it.uri.toString()) }
+                            }
                         )
                         }
                     }
@@ -1136,7 +1145,9 @@ private fun InfoCard(
     onMoveToAlbum: () -> Unit = {},
     onFileRenamed: (String) -> Unit = {},
     mediaTags: List<TagEntity> = emptyList(),
-    onManageTags: () -> Unit = {}
+    onManageTags: () -> Unit = {},
+    isStarred: Boolean = false,
+    onToggleStar: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -1262,6 +1273,18 @@ private fun InfoCard(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // 星标按钮
+                        IconButton(
+                            onClick = onToggleStar,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_star),
+                                contentDescription = if (isStarred) "取消星标" else "添加星标",
+                                tint = if (isStarred) Color(0xFFFFD600) else Color(0xFFBBBBBB),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                         IconButton(
                             onClick = onMoveToAlbum,
                             modifier = Modifier.size(28.dp)

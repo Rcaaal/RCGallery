@@ -1683,6 +1683,7 @@ private fun AlbumGridContent(
                     val scroller = container.getChildAt(1) as FastScrollerView
                     val adapter = rv.adapter as AlbumGridAdapter
                     val prevMode = adapter.currentMode
+                    val modeChanged = prevMode != displayMode
                     adapter.items = albums
                     adapter.albumMap = albums.associateBy { it.bucketId }
                     adapter.starredIds = starredIds
@@ -1691,9 +1692,7 @@ private fun AlbumGridContent(
                     adapter.parentBadgeMap = parentBadgeMap
                     adapter.parentSharedTagMap = parentSharedTagMap
                     adapter.parentItems = parentItems
-                    adapter.notifyDataSetChanged()
-                    // 之后不再重复调用 notifyDataSetChanged — 上面的调用已是全量刷新
-                    if (prevMode != displayMode) {
+                    if (modeChanged) {
                         adapter.currentMode = displayMode
                         val spanCount = when (displayMode) {
                             is AlbumDisplayMode.Grid -> displayMode.columns
@@ -1703,10 +1702,10 @@ private fun AlbumGridContent(
                         if (lm == null || lm.spanCount != spanCount) {
                             rv.layoutManager = GridLayoutManager(rv.context, spanCount)
                         }
-                        adapter.notifyDataSetChanged()
+                    }
+                    adapter.notifyDataSetChanged()
+                    if (modeChanged) {
                         scroller.refresh()
-                    } else {
-                        adapter.notifyDataSetChanged()
                     }
                 },
                 modifier = Modifier.fillMaxSize()
@@ -2200,9 +2199,12 @@ private class GridVH private constructor(
             android.graphics.PorterDuff.Mode.SRC_IN
         )
         // 多选模式：隐藏星标，显示对号
+        val hideStar = columns == 4 || columns == 5
         val inMultiSelect = selectedIds.isNotEmpty()
         val isSelected = item.bucketId in selectedIds
-        starContainer.visibility = if (inMultiSelect) android.view.View.GONE else android.view.View.VISIBLE
+        starContainer.visibility = if (inMultiSelect || hideStar) android.view.View.GONE else android.view.View.VISIBLE
+        starContainer.isClickable = !hideStar
+        starContainer.isEnabled = !hideStar
         val checkmark = itemView.findViewById<FrameLayout>(android.R.id.checkbox)
         if (checkmark != null) {
             checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
