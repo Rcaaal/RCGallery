@@ -2,6 +2,7 @@ package com.example.rcgallery.ui.screen
 
 import android.graphics.ImageDecoder
 import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.widget.ImageView
 import androidx.compose.animation.core.LinearEasing
@@ -23,17 +24,21 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.load
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.absoluteValue
 import kotlin.math.min
+import kotlin.math.max
 import kotlin.math.roundToInt
+
+/** 图片加载质量档位。Preview 用于邻页低采样，Full 用于当前页高质量。 */
+enum class LoadTier { Full, Preview }
 
 private const val DOUBLE_TAP_ZOOM = 2.5f
 private const val EDGE_THRESHOLD_PX = 3f
@@ -80,28 +85,61 @@ private fun maxScrollY(viewH: Float, fit: FitRender, scale: Float): Float {
 /**
  * 可缩放图片。统一手势处理，不 consume 未缩放的单指事件 → HorizontalPager 正常翻页；
  * 双击/双指缩放/缩放后拖拽 则 consume。
+ *
+ * @param loadTier 加载质量档位：Full 用 1920px 降采样，Preview 用 480px 降采样
  */
 @Composable
 fun ZoomableImage3(
     uri: Uri,
+    loadTier: LoadTier = LoadTier.Full,
     onEdgeSwipe: (direction: Int) -> Unit,
     onSwipeDownToBack: () -> Unit = {},
     onSwipeUpToShowInfo: () -> Unit = {},
     onSingleTap: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     var lastTapTime by remember { mutableLongStateOf(0L) }
     var inertiaState by remember { mutableStateOf<InertiaParams?>(null) }
-    var intrinsicSize by remember { mutableStateOf(Size.Zero) }
-    val scope = rememberCoroutineScope()
+    // 原始尺寸（从 OnHeaderDecodedListener 的 info.size 取），手势计算专用
+    var rawIntrinsicSize by remember { mutableStateOf(Size.Zero) }
+    var drawable by remember { mutableStateOf<Drawable?>(null) }
+    var hasDecodeError by remember { mutableStateOf(false) }
 
     // ── rememberUpdatedState：确保 pointerInput 内在回调重组时不捕获陈旧值 ──
     val currentOnEdgeSwipe by rememberUpdatedState(onEdgeSwipe)
     val currentOnSwipeDownToBack by rememberUpdatedState(onSwipeDownToBack)
     val currentOnSwipeUpToShowInfo by rememberUpdatedState(onSwipeUpToShowInfo)
     val currentOnSingleTap by rememberUpdatedState(onSingleTap)
+
+    // ── LaunchedEffect 解码（自动取消：uri/loadTier 变化或页面离开 → 协程取消）──
+    LaunchedEffect(uri, loadTier) {
+        drawable = null  // 立即清旧图，防止 stale image 闪烁
+        hasDecodeError = false
+        try {
+            val result = withContext(Dispatchers.IO) {
+                val source = ImageDecoder.createSource(context.contentResolver, uri)
+                var rawSize = Size.Zero
+                val maxDim = if (loadTier == LoadTier.Full) 1920 else 480
+                val d = ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+                    rawSize = Size(info.size.width.toFloat(), info.size.height.toFloat())
+                    val sample = maxOf(1, maxOf(info.size.width, info.size.height) / maxDim)
+                    decoder.setTargetSampleSize(sample)
+                    AppLogger.d("Zoom", "decode tier=$loadTier raw=${info.size.width}x${info.size.height} sample=$sample")
+                }
+                Pair(d, rawSize)
+            }
+            rawIntrinsicSize = result.second
+            drawable = result.first
+        } catch (e: Exception) {
+            AppLogger.d("Zoom", "decode error uri=${uri.lastPathSegment} err=${e.message}")
+            // 标记错误，update 中用 Coil fallback
+            hasDecodeError = true
+        }
+    }
 
     val animSpec = inertiaState?.let { state ->
         tween<Float>(durationMillis = state.durationMs, easing = LinearEasing)
@@ -121,7 +159,8 @@ fun ZoomableImage3(
         modifier = Modifier
             .fillMaxSize()
             .clipToBounds()
-            .pointerInput(intrinsicSize) {
+            // key 用 rawIntrinsicSize（仅在首次解码时 set 一次），不随档位变化 → pointerInput 不会因升级重启
+            .pointerInput(rawIntrinsicSize) {
                 awaitEachGesture {
                     // 等待按下，requireUnconsumed=false 不 consume → HorizontalPager 原文传递
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -147,7 +186,7 @@ fun ZoomableImage3(
                         } else {
                             val newScale = DOUBLE_TAP_ZOOM
                             scale = newScale
-                            val fit = computeFitRender(size, intrinsicSize)
+                            val fit = computeFitRender(size, rawIntrinsicSize)
                             val mx = maxScrollX(size.width.toFloat(), fit, newScale)
                             val my = maxScrollY(size.height.toFloat(), fit, newScale)
                             offsetX = ((size.width / 2f - downX) * (newScale - 1f) / newScale).coerceIn(-mx, mx)
@@ -182,10 +221,10 @@ fun ZoomableImage3(
                             if (ns <= 1f) {
                                 offsetX = 0f; offsetY = 0f
                             } else {
-                                val fit = computeFitRender(size, intrinsicSize)
+                                val fit = computeFitRender(size, rawIntrinsicSize)
                                 val mx = maxScrollX(size.width.toFloat(), fit, ns)
                                 val my = maxScrollY(size.height.toFloat(), fit, ns)
-                                AppLogger.d("Zoom", "pinch scale=$ns mx=$mx my=$my size=$size intrinsic=$intrinsicSize fitOff=(${fit.offsetX},${fit.offsetY})")
+                                AppLogger.d("Zoom", "pinch scale=$ns mx=$mx my=$my size=$size intrinsic=$rawIntrinsicSize fitOff=(${fit.offsetX},${fit.offsetY})")
                                 offsetX = offsetX.coerceIn(-mx, mx)
                                 offsetY = offsetY.coerceIn(-my, my)
                             }
@@ -194,15 +233,13 @@ fun ZoomableImage3(
                             hadMovement = true
                         } else if (zoomed) {
                             // ── 已缩放 + 单指拖拽：consume ──
-                            val fit = computeFitRender(size, intrinsicSize)
+                            val fit = computeFitRender(size, rawIntrinsicSize)
                             val maxX = maxScrollX(size.width.toFloat(), fit, scale)
                             val maxY = maxScrollY(size.height.toFloat(), fit, scale)
                             if (frameCount % 5 == 0) {
                                 AppLogger.d("Zoom", "drag scale=$scale maxX=$maxX maxY=$maxY off=(${offsetX.roundToInt()},${offsetY.roundToInt()}) pan=(${pan.x.roundToInt()},${pan.y.roundToInt()}) fitOff=(${fit.offsetX},${fit.offsetY})")
                             }
 
-                            // 方案 C：边缘翻页仅当 X 为主轴向时才触发（|X| >= |Y| * 1.5），
-                            // 斜向到边缘允许 Y 继续滑动
                             if (offsetX >= maxX - EDGE_THRESHOLD_PX && pan.x > InertiaSettings.edgeSwipeMinPx && pan.x.absoluteValue >= pan.y.absoluteValue * 1.5f) {
                                 didEdgeSwipe = true; currentOnEdgeSwipe(-1); break
                             } else if (offsetX <= -maxX + EDGE_THRESHOLD_PX && pan.x < -InertiaSettings.edgeSwipeMinPx && pan.x.absoluteValue >= pan.y.absoluteValue * 1.5f) {
@@ -222,7 +259,6 @@ fun ZoomableImage3(
                             smoothY = smoothY * 0.5f + pan.y * 0.5f
                             frameCount++
                             if (pan.x != 0f || pan.y != 0f) hadMovement = true
-                            // 检测到垂直主导（Y >= X*1.5）且超过阈值 → 开始 consume，阻止 Pager 翻页
                             if (frameCount >= 3 && smoothY.absoluteValue >= smoothX.absoluteValue * 1.5f) {
                                 verticalDominant = true
                             }
@@ -233,7 +269,6 @@ fun ZoomableImage3(
                     } while (event.changes.any { it.pressed })
 
                     // ── 下滑返回（未缩放）──
-                    // 要求 Y 是强主导方向（|Y| >= |X| * 1.5），防止斜向 45° 误触发
                     val swipeThresh = InertiaSettings.swipeVelocityThreshold
                     if (scale <= 1f && frameCount > 0 &&
                         smoothY > swipeThresh &&
@@ -252,17 +287,17 @@ fun ZoomableImage3(
                         return@awaitEachGesture
                     }
 
-                    // ── 记录 lastTapTime：有位移的不是 tap，清除双击计时 ──
+                    // ── 记录 lastTapTime ──
                     if (!hadMovement) {
                         lastTapTime = now
-                        currentOnSingleTap()  // 单击返回给外层（关闭信息栏等）
+                        currentOnSingleTap()
                     } else {
                         lastTapTime = 0L
                     }
 
-                    // ── 惯性（方案 C：X/Y 独立计算，不再二选一取主轴向）──
+                    // ── 惯性 ──
                     if (scale > 1f && !didEdgeSwipe && frameCount > 0) {
-                        val fit = computeFitRender(size, intrinsicSize)
+                        val fit = computeFitRender(size, rawIntrinsicSize)
                         val maxX = maxScrollX(size.width.toFloat(), fit, scale)
                         val maxY = maxScrollY(size.height.toFloat(), fit, scale)
 
@@ -288,47 +323,14 @@ fun ZoomableImage3(
                 }
             },
             update = { iv ->
-                val loadUri = uri.toString()
-                if (iv.tag != loadUri) {
-                    iv.tag = loadUri
-                    scope.launch {
-                        try {
-                            val drawable = withContext(Dispatchers.IO) {
-                                val source = ImageDecoder.createSource(iv.context.contentResolver, uri)
-                                // ★ 降采样到 1920px 最大边，防止大图 OOM
-                                val maxDim = 1920
-                                ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
-                                    val ratio = min(
-                                        maxDim.toFloat() / maxOf(info.size.width, info.size.height),
-                                        1f
-                                    )
-                                    if (ratio < 1f) {
-                                        decoder.setTargetSize(
-                                            (info.size.width * ratio).toInt(),
-                                            (info.size.height * ratio).toInt()
-                                        )
-                                        AppLogger.d("Zoom", "downsample: ${info.size.width}x${info.size.height} → ${(info.size.width*ratio).toInt()}x${(info.size.height*ratio).toInt()}")
-                                    }
-                                }
-                            }
-                            // 已回主线程 — 检查 URI 是否已变（防异步竞争）
-                            if (iv.tag != loadUri) return@launch
-                            iv.setImageDrawable(drawable)
-                            if (drawable is AnimatedImageDrawable && !drawable.isRunning) {
-                                drawable.start()
-                            }
-                            if (drawable.intrinsicWidth > 0 && drawable.intrinsicHeight > 0) {
-                                intrinsicSize = Size(
-                                    drawable.intrinsicWidth.toFloat(),
-                                    drawable.intrinsicHeight.toFloat()
-                                )
-                                AppLogger.d("Zoom", "decode OK uri=${uri.lastPathSegment} intrinsic=${drawable.intrinsicWidth}x${drawable.intrinsicHeight}")
-                            }
-                        } catch (e: Exception) {
-                            if (iv.tag != loadUri) return@launch
-                            AppLogger.d("Zoom", "ImageDecoder fallback uri=${uri.lastPathSegment} err=${e.message}")
-                            iv.load(uri) { crossfade(false) }
-                        }
+                if (hasDecodeError) {
+                    // ImageDecoder 失败时用 Coil 兜底加载
+                    iv.load(uri) { crossfade(false) }
+                } else {
+                    iv.setImageDrawable(drawable)
+                    val ad = drawable
+                    if (ad is AnimatedImageDrawable && !ad.isRunning) {
+                        ad.start()
                     }
                 }
             },

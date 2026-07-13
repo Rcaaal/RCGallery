@@ -57,6 +57,7 @@ import com.example.rcgallery.ui.component.SettingsOverlay
 import com.example.rcgallery.ui.component.SystemVolumeSliderOverlay
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
+import com.example.rcgallery.ui.component.VideoThumbnailCover
 import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
@@ -490,34 +491,41 @@ fun PreviewScreen(
                     HorizontalPager(
                         state = pagerState,
                         userScrollEnabled = pagerScrollEnabled,
-                        beyondViewportPageCount = 0,
+                        beyondViewportPageCount = 1,
                         modifier = Modifier.fillMaxSize(),
                         pageSpacing = 0.dp
                     ) { page ->
                         val item = mediaItems.getOrNull(page)
+                        val isCurrentPage = page == pagerState.currentPage
+                        val loadTier = if (isCurrentPage) LoadTier.Full else LoadTier.Preview
                         key(item?.uri ?: page) {
                         if (item != null) {
                             if (item.isVideo) {
-                                VideoPlayer(
-                                    uri = item.uri,
-                                    isActive = page == pagerState.currentPage,
-                                        volumeLevel = volumeState.level,
-                                    onToggleMute = { playbackSettingsVM.toggleMute() },
-                                    onControllerVisibilityChanged = { controllerVisible = it },
-                                    savedPositions = savedPositions,
-                                    onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
-                                    onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
-                                    onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
-                                    onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
-                                    onRequestPip = { pipTriggered = true },
-                                    hideUiOverlays = pipOverlayHidden,
-                                    keepControllerVisible = showInfo && item.isVideo,
-                                    onShowInfoClick = { showInfo = true },
-                                    onMoveToTrash = { moveCurrentToTrash() }
-                                )
+                                if (isCurrentPage) {
+                                    VideoPlayer(
+                                        uri = item.uri,
+                                        isActive = true,
+                                            volumeLevel = volumeState.level,
+                                        onToggleMute = { playbackSettingsVM.toggleMute() },
+                                        onControllerVisibilityChanged = { controllerVisible = it },
+                                        savedPositions = savedPositions,
+                                        onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
+                                        onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
+                                        onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
+                                        onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
+                                        onRequestPip = { pipTriggered = true },
+                                        hideUiOverlays = pipOverlayHidden,
+                                        keepControllerVisible = showInfo && item.isVideo,
+                                        onShowInfoClick = { showInfo = true },
+                                        onMoveToTrash = { moveCurrentToTrash() }
+                                    )
+                                } else {
+                                    VideoThumbnailCover(uri = item.uri)
+                                }
                             } else {
                                 ZoomableImage3(
                                     uri = item.uri,
+                                    loadTier = loadTier,
                                     onEdgeSwipe = { direction ->
                                         val nextPage = pagerState.currentPage + direction
                                         if (nextPage < 0) {
