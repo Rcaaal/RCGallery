@@ -8,6 +8,7 @@ import jcifs.smb.SmbFile
 import jcifs.smb.SmbFileInputStream
 import jcifs.smb.SmbFileOutputStream
 import jcifs.smb.SmbRandomAccessFile
+import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
@@ -44,13 +45,9 @@ class SmbRepository {
                 System.setProperty("jcifs.smb.client.disableSMB1", "true")
                 // 禁用签名偏好，提升大文件传输性能
                 System.setProperty("jcifs.smb.client.signingPreferred", "false")
-                // ── SMB2 读性能调优 ──
-                // 增大每次 SMB2 READ 请求上限到 8MB（默认 1MB），
-                // 减少 RAF.read(8MB) 内部的 SMB 事务次数（8 次→1 次）
-                System.setProperty("jcifs.smb.client.smb2MaxReadSize", "8388608")
-                // 增加 SMB2 credit 数量（默认通常 16）,启用请求流水线(pipelining)，
-                // 多个 SMB2 READ 请求可并行发出，不必等前一个响应
-                System.setProperty("jcifs.smb.client.smb2Credits", "128")
+                // jcifs-ng 2.1.9 uses this value as the SMB2 READ request size.
+                // Its default is about 64KB, which severely limits high-latency Wi-Fi throughput.
+                System.setProperty("jcifs.smb.client.rcv_buf_size", "1048576")
                 propsSet = true
             }
         }
@@ -475,9 +472,10 @@ class SmbRepository {
         url: String,
         output: OutputStream,
         onProgress: ((bytesCopied: Long, totalBytes: Long) -> Unit)? = null,
-        bufferSize: Int = 256 * 1024
+        bufferSize: Int = 1024 * 1024
     ): Result<Long> = withContext(Dispatchers.IO) {
         try {
+            val startedAtNs = System.nanoTime()
             val ctx = getContextForPath(url)
             val smbFile = SmbFile(url, ctx)
             if (!smbFile.exists()) throw IllegalStateException("SMB source does not exist: $url")
@@ -494,6 +492,14 @@ class SmbRepository {
                 }
             }
             output.flush()
+            val elapsedSeconds = ((System.nanoTime() - startedAtNs) / 1_000_000_000.0)
+                .coerceAtLeast(0.001)
+            val throughputMbps = totalCopied / (1024.0 * 1024.0) / elapsedSeconds
+            AppLogger.d(
+                "SMB-Transfer",
+                "read complete: bytes=$totalCopied seconds=${"%.2f".format(elapsedSeconds)} " +
+                    "speed=${"%.1f".format(throughputMbps)}MB/s buffer=${bufferSize / 1024}KB"
+            )
             Result.success(totalCopied)
         } catch (error: CancellationException) {
             throw error
