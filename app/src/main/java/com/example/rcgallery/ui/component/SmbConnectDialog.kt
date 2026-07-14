@@ -7,6 +7,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -24,6 +26,19 @@ fun SmbConnectDialog(
 ) {
     var host by remember { mutableStateOf("") }
     var hostError by remember { mutableStateOf<String?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun connect() {
+        val trimmed = host.trim()
+        if (trimmed.isEmpty()) {
+            hostError = "请输入 IP 地址"
+            return
+        }
+        keyboardController?.hide()
+        focusManager.clearFocus()
+        onConnect(trimmed)
+    }
 
     AlertDialog(
         onDismissRequest = { if (!isLoading) onDismiss() },
@@ -52,11 +67,7 @@ fun SmbConnectDialog(
                         imeAction = ImeAction.Go
                     ),
                     keyboardActions = KeyboardActions(
-                        onGo = {
-                            if (host.isNotBlank()) {
-                                onConnect(host.trim())
-                            }
-                        }
+                        onGo = { connect() }
                     ),
                     enabled = !isLoading,
                     modifier = Modifier.fillMaxWidth()
@@ -84,14 +95,7 @@ fun SmbConnectDialog(
         },
         confirmButton = {
             Button(
-                onClick = {
-                    val trimmed = host.trim()
-                    if (trimmed.isEmpty()) {
-                        hostError = "请输入 IP 地址"
-                        return@Button
-                    }
-                    onConnect(trimmed)
-                },
+                onClick = { connect() },
                 enabled = !isLoading && host.isNotBlank()
             ) {
                 Text("连接")

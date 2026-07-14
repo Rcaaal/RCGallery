@@ -61,6 +61,7 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.ui.component.VideoThumbnailCover
 import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.ui.component.AutoFocusRenameTextField
 import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import com.example.rcgallery.util.AppLogger
@@ -356,6 +357,36 @@ fun PreviewScreen(
     if (showAlbumRenameDialog && currentItem != null) {
         val currentAlbumName = currentItem?.albumName ?: "未知"
         var editText by remember { mutableStateOf(currentAlbumName) }
+        fun confirmAlbumRename() {
+            val newName = editText.trim()
+            if (newName.isEmpty()) return
+            val bucketId = currentItem?.albumId ?: return
+            showAlbumRenameDialog = false
+            if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                viewModel.renameNow(bucketId, newName) { ok ->
+                    if (ok) {
+                        mediaItems = mediaItems.map { item ->
+                            if (item.albumId == bucketId) item.copy(albumName = newName) else item
+                        }
+                    }
+                    Toast.makeText(
+                        context,
+                        if (ok) "相册已重命名" else "重命名失败，请重试",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } else {
+                try {
+                    manageStorageLauncher.launch(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:${context.packageName}")
+                        }
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
         AlertDialog(
             onDismissRequest = { showAlbumRenameDialog = false },
             title = { Text("重命名相册") },
@@ -366,46 +397,16 @@ fun PreviewScreen(
                                else "首次改名需授权，将跳转至系统设置开启权限。"
                     Text(hint, color = Color(0xFF999999), fontSize = 13.sp)
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = editText,
+                    AutoFocusRenameTextField(
+                        initialText = currentAlbumName,
                         onValueChange = { editText = it },
-                        singleLine = true,
-                        label = { Text("新相册名") }
+                        onDone = { confirmAlbumRename() },
+                        label = "新相册名"
                     )
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    val newName = editText.trim()
-                    if (newName.isEmpty()) return@Button
-                    showAlbumRenameDialog = false
-                    val bucketId = currentItem?.albumId ?: return@Button
-                    if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
-                        // 有权限 → 直接改名
-                        viewModel.renameNow(bucketId, newName) { ok ->
-                            if (ok) {
-                                // 同步本地快照中的 albumName
-                                mediaItems = mediaItems.map { item ->
-                                    if (item.albumId == bucketId) item.copy(albumName = newName) else item
-                                }
-                                Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "重命名失败，请重试", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    } else {
-                        // 无权限 → 跳转系统设置
-                        try {
-                            manageStorageLauncher.launch(
-                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                            )
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }) { Text("确认") }
+                Button(onClick = { confirmAlbumRename() }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false }) { Text("取消") } }
         )
@@ -1009,29 +1010,29 @@ fun PreviewScreen(
             val baseNameOnly = if (dotIndex > 0) currentItem!!.fileName.substring(0, dotIndex) else currentItem!!.fileName
             val extOnly = if (dotIndex > 0) currentItem!!.fileName.substring(dotIndex) else ""
             var editText by remember { mutableStateOf(baseNameOnly) }
+            fun confirmTopRename() {
+                val newName = editText.trim()
+                if (newName.isEmpty()) return
+                renameCurrentFile("$newName$extOnly")
+                showTopRenameDialog = false
+            }
             AlertDialog(
                 onDismissRequest = { showTopRenameDialog = false },
                 title = { Text("重命名文件") },
                 text = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = editText,
+                        AutoFocusRenameTextField(
+                            initialText = baseNameOnly,
                             onValueChange = { editText = it },
-                            singleLine = true,
+                            onDone = { confirmTopRename() },
                             modifier = Modifier.weight(1f),
-                            label = { Text("文件名") }
+                            label = "文件名"
                         )
                         Text(extOnly, color = Color.Gray, fontSize = 14.sp)
                     }
                 },
                 confirmButton = {
-                    Button(onClick = {
-                        val newName = editText.trim()
-                        if (newName.isNotEmpty()) {
-                            renameCurrentFile("$newName$extOnly")
-                            showTopRenameDialog = false
-                        }
-                    }) { Text("确认") }
+                    Button(onClick = { confirmTopRename() }) { Text("确认") }
                 },
                 dismissButton = { TextButton(onClick = { showTopRenameDialog = false }) { Text("取消") } }
             )
@@ -1367,53 +1368,52 @@ private fun InfoCard(
     // ── 文件重命名对话框 ──
     if (showRenameDialog) {
         var editText by remember { mutableStateOf(baseNameOnly) }
+        fun confirmFileRename() {
+            val newName = editText.trim()
+            if (newName.isEmpty()) return
+            pendingDisplayName = "$newName$extOnly"
+
+            if (writeGrantedUris?.contains(item.uri) == true) {
+                try {
+                    context.contentResolver.update(item.uri, ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
+                    }, null, null)
+                    showRenameDialog = false
+                    onFileRenamed(pendingDisplayName)
+                } catch (e: Exception) {
+                    Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+
+            try {
+                val pending = MediaStore.createWriteRequest(
+                    context.contentResolver, listOf(item.uri)
+                )
+                renameLauncher.launch(
+                    IntentSenderRequest.Builder(pending.intentSender).build()
+                )
+            } catch (e: Exception) {
+                Toast.makeText(context, "请求授权失败", Toast.LENGTH_SHORT).show()
+            }
+        }
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
             title = { Text("重命名文件") },
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = editText,
+                    AutoFocusRenameTextField(
+                        initialText = baseNameOnly,
                         onValueChange = { editText = it },
-                        singleLine = true,
+                        onDone = { confirmFileRename() },
                         modifier = Modifier.weight(1f),
-                        label = { Text("文件名") }
+                        label = "文件名"
                     )
                     Text(extOnly, color = Color.Gray, fontSize = 14.sp)
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    val newName = editText.trim()
-                    if (newName.isEmpty()) return@Button
-                    pendingDisplayName = "$newName$extOnly"
-
-                    // 已有授权 → 直接更新
-                    if (writeGrantedUris?.contains(item.uri) == true) {
-                        try {
-                            context.contentResolver.update(item.uri, ContentValues().apply {
-                                put(MediaStore.MediaColumns.DISPLAY_NAME, pendingDisplayName)
-                            }, null, null)
-                            showRenameDialog = false
-                            onFileRenamed(pendingDisplayName)
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "重命名失败", Toast.LENGTH_SHORT).show()
-                        }
-                        return@Button
-                    }
-
-                    // 首次 → 只申请当前文件的写入权限（不批量覆盖整张专辑）
-                    try {
-                        val pending = MediaStore.createWriteRequest(
-                            context.contentResolver, listOf(item.uri)
-                        )
-                        renameLauncher.launch(
-                            IntentSenderRequest.Builder(pending.intentSender).build()
-                        )
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "请求授权失败", Toast.LENGTH_SHORT).show()
-                    }
-                }) { Text("确认") }
+                Button(onClick = { confirmFileRename() }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("取消") } }
         )

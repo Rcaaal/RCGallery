@@ -56,6 +56,7 @@ import com.example.rcgallery.data.smb.SmbFileInfo
 import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.InertiaSettings
+import com.example.rcgallery.ui.component.AutoFocusRenameTextField
 import com.example.rcgallery.ui.component.SystemVolumeSliderOverlay
 import com.example.rcgallery.ui.component.VideoPlayer
 import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
@@ -306,57 +307,55 @@ fun SmbPreviewScreen(
             val currentFile = mutableItems.getOrNull(pagerState.currentPage)
             val dotIdx = currentFile?.name?.lastIndexOf('.') ?: -1
             val extOnly = if (dotIdx > 0) currentFile!!.name.substring(dotIdx) else ""
+            fun confirmSmbRename() {
+                val file = currentFile ?: return
+                val newName = renameText.trim()
+                if (newName.isEmpty() || isRenaming) return
+                isRenaming = true
+                scope.launch {
+                    val oldPath = file.path
+                    val dirEnd = oldPath.lastIndexOf('/') + 1
+                    val newPath = oldPath.substring(0, dirEnd) + newName + extOnly
+                    val oldUri = Uri.parse(oldPath)
+                    val savedPos = savedPositions[oldUri] ?: 0L
+
+                    val result = withContext(Dispatchers.IO) {
+                        SmbRepository.getInstance().renameFile(oldPath, newPath)
+                    }
+                    result.onSuccess {
+                        val idx = mutableItems.indexOfFirst { it.path == oldPath }
+                        if (idx >= 0) {
+                            if (savedPos > 1000) savedPositions[Uri.parse(newPath)] = savedPos
+                            mutableItems = mutableItems.toMutableList().apply {
+                                set(idx, file.copy(name = newName + extOnly, path = newPath))
+                            }
+                        }
+                        showRenameDialog = false
+                        Toast.makeText(context, "已重命名", Toast.LENGTH_SHORT).show()
+                        onFileRenamed(oldPath, newPath, newName + extOnly)
+                    }.onFailure { e ->
+                        Toast.makeText(context, "重命名失败: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                    isRenaming = false
+                }
+            }
             AlertDialog(
                 onDismissRequest = { if (!isRenaming) showRenameDialog = false },
                 title = { Text("重命名文件") },
                 text = {
-                    OutlinedTextField(
-                        value = renameText,
+                    AutoFocusRenameTextField(
+                        initialText = renameText,
                         onValueChange = { if (!isRenaming) renameText = it },
-                        singleLine = true,
-                        label = { Text("文件名") },
-                        suffix = { Text(extOnly, color = Color.Gray) },
+                        onDone = { confirmSmbRename() },
+                        label = "文件名",
+                        suffix = extOnly,
+                        enabled = !isRenaming,
                         modifier = Modifier.fillMaxWidth()
                     )
                 },
                 confirmButton = {
                     Button(
-                        onClick = {
-                            val file = currentFile ?: return@Button
-                            val newName = renameText.trim()
-                            if (newName.isEmpty()) return@Button
-                            isRenaming = true
-                            scope.launch {
-                                val oldPath = file.path
-                                val dirEnd = oldPath.lastIndexOf('/') + 1
-                                val newPath = oldPath.substring(0, dirEnd) + newName + extOnly
-
-                                // 保存当前视频播放位置（路径变更后 key 重建）
-                                val oldUri = Uri.parse(oldPath)
-                                val savedPos = savedPositions[oldUri] ?: 0L
-
-                                val result = withContext(Dispatchers.IO) {
-                                    SmbRepository.getInstance().renameFile(oldPath, newPath)
-                                }
-                                result.onSuccess {
-                                    val idx = mutableItems.indexOfFirst { it.path == oldPath }
-                                    if (idx >= 0) {
-                                        // 恢复播放位置（新 URI → VideoPlayer 重建后读到）
-                                        if (savedPos > 1000) savedPositions[Uri.parse(newPath)] = savedPos
-                                        mutableItems = mutableItems.toMutableList().apply {
-                                            set(idx, file.copy(name = newName + extOnly, path = newPath))
-                                        }
-                                    }
-                                    showRenameDialog = false
-                                    Toast.makeText(context, "已重命名", Toast.LENGTH_SHORT).show()
-                                    // 通知父级同步刷新列表
-                                    onFileRenamed(oldPath, newPath, newName + extOnly)
-                                }.onFailure { e ->
-                                    Toast.makeText(context, "重命名失败: ${e.message}", Toast.LENGTH_LONG).show()
-                                }
-                                isRenaming = false
-                            }
-                        },
+                        onClick = { confirmSmbRename() },
                         enabled = !isRenaming
                     ) { Text(if (isRenaming) "重命名中..." else "确认") }
                 },

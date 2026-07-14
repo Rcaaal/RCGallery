@@ -26,6 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,6 +65,8 @@ fun TagListScreen(
     onOverlayChanged: (Boolean) -> Unit = {}
 ) {
     val allTags by viewModel.allTags.collectAsState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     // ── 搜索与 TAG 选择状态 ──
     var searchQuery by remember { mutableStateOf("") }
@@ -525,6 +529,9 @@ fun TagListScreen(
                                             .fillMaxWidth()
                                             .aspectRatio(1f)
                                             .clickable {
+                                                keyboardController?.hide()
+                                                focusManager.clearFocus()
+                                                showSuggestions = false
                                                 viewModel.recordAlbumView(album.bucketId, album.bucketName, album.directoryPath)
                                                 selectedAlbum = album
                                             }
@@ -567,7 +574,12 @@ fun TagListScreen(
                                 collapsedGroups = collapsedGroups,
                                 onMediaClick = { item ->
                                     val idx = flatFilteredMedia.indexOf(item)
-                                    if (idx >= 0) selectedMediaIndex = idx
+                                    if (idx >= 0) {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
+                                        showSuggestions = false
+                                        selectedMediaIndex = idx
+                                    }
                                 },
                                 isMultiSelectMode = isTagMediaMultiSelect,
                                 selectedUris = tagSelectedMediaUris,
@@ -594,7 +606,12 @@ fun TagListScreen(
                                 collapsedGroups = collapsedGroups,
                                 onMediaClick = { item ->
                                     val idx = flatFilteredMedia.indexOf(item)
-                                    if (idx >= 0) selectedMediaIndex = idx
+                                    if (idx >= 0) {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
+                                        showSuggestions = false
+                                        selectedMediaIndex = idx
+                                    }
                                 },
                                 isMultiSelectMode = isTagMediaMultiSelect,
                                 selectedUris = tagSelectedMediaUris,

@@ -60,6 +60,7 @@ import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
 import com.example.rcgallery.ui.component.ClipboardBadge
 import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.ui.component.AutoFocusRenameTextField
 import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.ui.component.FpsMonitor
 import com.example.rcgallery.ui.component.FpsMonitorEnabled
@@ -413,6 +414,31 @@ fun AlbumGridScreen(
         val target = renameTargetAlbum!!
         val currentName = target.bucketName.ifEmpty { "未知" }
         var editText by remember { mutableStateOf(currentName) }
+        fun confirmAlbumRename() {
+            val newName = editText.trim()
+            if (newName.isEmpty()) return
+            showAlbumRenameDialog = false
+            renameTargetAlbum = null
+            if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
+                viewModel.renameNow(target.bucketId, newName) { ok ->
+                    Toast.makeText(
+                        context,
+                        if (ok) "相册已重命名" else "重命名失败，请重试",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } else {
+                try {
+                    renameLauncher.launch(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:${context.packageName}")
+                        }
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
         AlertDialog(
             onDismissRequest = { showAlbumRenameDialog = false },
             title = { Text("重命名相册") },
@@ -423,40 +449,16 @@ fun AlbumGridScreen(
                                else "首次改名需授权，将跳转至系统设置开启权限。"
                     Text(hint, color = Color(0xFF999999), fontSize = 13.sp)
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = editText,
+                    AutoFocusRenameTextField(
+                        initialText = currentName,
                         onValueChange = { editText = it },
-                        singleLine = true,
-                        label = { Text("新相册名") }
+                        onDone = { confirmAlbumRename() },
+                        label = "新相册名"
                     )
                 }
             },
             confirmButton = {
-                Button(onClick = {
-                    val newName = editText.trim()
-                    if (newName.isEmpty()) return@Button
-                    showAlbumRenameDialog = false
-                    renameTargetAlbum = null
-                    if (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()) {
-                        viewModel.renameNow(target.bucketId, newName) { ok ->
-                            if (ok) {
-                                Toast.makeText(context, "相册已重命名", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "重命名失败，请重试", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    } else {
-                        try {
-                            renameLauncher.launch(
-                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                            )
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法跳转授权页面", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }) { Text("确认") }
+                Button(onClick = { confirmAlbumRename() }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false; renameTargetAlbum = null }) { Text("取消") } }
         )
@@ -1076,7 +1078,15 @@ private fun AlbumGridContent(
     // ── 重命名父级对话框 ──
     if (showParentRenameDialog && renameParentId != null) {
         val targetParent = parentEntities.find { it.id == renameParentId }
-        var newName by remember { mutableStateOf(targetParent?.name ?: "") }
+        val currentParentName = targetParent?.name ?: ""
+        var newName by remember { mutableStateOf(currentParentName) }
+        fun confirmParentRename() {
+            val name = newName.trim()
+            if (name.isEmpty() || targetParent == null) return
+            showParentRenameDialog = false
+            renameParentId = null
+            onRenameParent(targetParent.id, name) {}
+        }
         AlertDialog(
             onDismissRequest = { showParentRenameDialog = false; renameParentId = null },
             title = { Text("重命名") },
@@ -1084,24 +1094,16 @@ private fun AlbumGridContent(
                 Column {
                     Text("输入新名称：", fontSize = 13.sp, color = Color.Gray)
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = newName,
+                    AutoFocusRenameTextField(
+                        initialText = currentParentName,
                         onValueChange = { newName = it },
-                        singleLine = true,
+                        onDone = { confirmParentRename() },
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        val name = newName.trim()
-                        if (name.isEmpty() || targetParent == null) return@Button
-                        showParentRenameDialog = false
-                        renameParentId = null
-                        onRenameParent(targetParent.id, name) {}
-                    }
-                ) { Text("确认") }
+                Button(onClick = { confirmParentRename() }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showParentRenameDialog = false; renameParentId = null }) { Text("取消") } }
         )
