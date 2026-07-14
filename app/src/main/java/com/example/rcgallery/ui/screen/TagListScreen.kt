@@ -118,12 +118,13 @@ fun TagListScreen(
     val allAlbums by viewModel.albums.collectAsStateWithLifecycle()
     val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
     var isSearching by remember { mutableStateOf(false) }
+    var tagSearchRefreshVersion by remember { mutableIntStateOf(0) }
     // ── 媒体删除后自动刷新：overlay 关闭重新搜索 ──
     var hasSearchRun by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     // 选中 TAG 变化时自动搜索
-    LaunchedEffect(selectedTags.toList()) {
+    LaunchedEffect(selectedTags.toList(), tagSearchRefreshVersion) {
         val tags = selectedTags.toList()
         if (tags.isEmpty()) {
             searchAlbums = emptyList()
@@ -713,10 +714,14 @@ fun TagListScreen(
                     tagPendingPickItems = emptyList()
                     showTagPickDialog = false
                     if (items.isNotEmpty()) {
-                        if (mode == PasteMode.MOVE) {
+                        val operation = if (mode == PasteMode.MOVE) {
                             viewModel.moveItemsToAlbum(items, targetDir, targetName, null)
                         } else {
                             viewModel.copyItemsToAlbum(items, targetDir, targetName, null)
+                        }
+                        scope.launch {
+                            operation.join()
+                            tagSearchRefreshVersion++
                         }
                     }
                 },
