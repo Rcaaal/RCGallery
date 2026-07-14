@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -42,10 +43,16 @@ import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
 import com.example.rcgallery.ui.component.GalleryThumbnail
 import com.example.rcgallery.ui.component.TagManageDialog
+import com.example.rcgallery.ui.component.buildGalleryThumbnailRequest
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import com.example.rcgallery.viewmodel.PasteMode
 import java.io.File
+import coil.imageLoader
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -68,6 +75,7 @@ fun TagListScreen(
     onOverlayChanged: (Boolean) -> Unit = {}
 ) {
     val allTags by viewModel.allTags.collectAsState()
+    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
@@ -211,6 +219,28 @@ fun TagListScreen(
     val albumGridState = rememberLazyGridState()
     val imageListState = rememberLazyListState()
     val videoListState = rememberLazyListState()
+
+    LaunchedEffect(activeFilter, flatFilteredMedia, selectedAlbum, selectedMediaIndex) {
+        if (selectedAlbum != null || selectedMediaIndex >= 0) return@LaunchedEffect
+        val preloadCount = when (activeFilter) {
+            FilterType.IMAGE -> TAG_IMAGE_PRELOAD_COUNT
+            FilterType.VIDEO -> TAG_VIDEO_PRELOAD_COUNT
+            FilterType.ALBUM -> 0
+        }
+        if (preloadCount == 0 || flatFilteredMedia.isEmpty()) return@LaunchedEffect
+
+        // Let visible requests win first, then warm the rest of the first viewport.
+        delay(TAG_PRELOAD_DELAY_MS)
+        coroutineScope {
+            flatFilteredMedia.take(preloadCount).map { item ->
+                async {
+                    context.imageLoader.execute(
+                        buildGalleryThumbnailRequest(context, item.uri)
+                    )
+                }
+            }.awaitAll()
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -962,3 +992,6 @@ private fun MediaItem.tagAlbumGroupKey(): String {
 
 /** 网格列数 */
 private const val GRID_COLUMNS = 4
+private const val TAG_IMAGE_PRELOAD_COUNT = 32
+private const val TAG_VIDEO_PRELOAD_COUNT = 12
+private const val TAG_PRELOAD_DELAY_MS = 400L

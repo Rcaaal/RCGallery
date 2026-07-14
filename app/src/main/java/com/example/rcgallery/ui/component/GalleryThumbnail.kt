@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.component
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.Image
@@ -15,6 +16,27 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.size.Precision
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+
+const val GALLERY_THUMBNAIL_SIZE = 120
+
+@OptIn(ExperimentalCoroutinesApi::class)
+private val galleryThumbnailDispatcher = Dispatchers.IO.limitedParallelism(2)
+
+fun buildGalleryThumbnailRequest(
+    context: Context,
+    uri: Uri,
+    targetSize: Int = GALLERY_THUMBNAIL_SIZE
+): ImageRequest = ImageRequest.Builder(context)
+    .data(uri)
+    .size(targetSize)
+    .precision(Precision.INEXACT)
+    .bitmapConfig(Bitmap.Config.RGB_565)
+    .dispatcher(galleryThumbnailDispatcher)
+    .crossfade(false)
+    .build()
 
 /**
  * 缩略图组件 — 基于 Coil AsyncImage。
@@ -32,16 +54,11 @@ fun GalleryThumbnail(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     placeholderColor: Color = Color.LightGray.copy(alpha = 0.3f),
-    targetSize: Int = 120
+    targetSize: Int = GALLERY_THUMBNAIL_SIZE
 ) {
     val context = LocalContext.current
     val request = remember(context, uri, targetSize) {
-        ImageRequest.Builder(context)
-            .data(uri)
-            .size(targetSize)
-            .bitmapConfig(Bitmap.Config.RGB_565)
-            .crossfade(false)
-            .build()
+        buildGalleryThumbnailRequest(context, uri, targetSize)
     }
     AsyncImage(
         model = request,
