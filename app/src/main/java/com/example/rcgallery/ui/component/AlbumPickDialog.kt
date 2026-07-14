@@ -114,8 +114,8 @@ fun AlbumPickDialog(
             confirmButton = {
                 Button(onClick = {
                     confirmTarget = null
-                    onDismiss()
                     onAlbumSelected(target.directoryPath, target.bucketName, PasteMode.COPY)
+                    onDismiss()
                 }) {
                     Text("复制到此")
                 }
@@ -129,8 +129,8 @@ fun AlbumPickDialog(
                     Button(
                         onClick = {
                             confirmTarget = null
-                            onDismiss()
                             onAlbumSelected(target.directoryPath, target.bucketName, PasteMode.MOVE)
+                            onDismiss()
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xCCFF9800)
