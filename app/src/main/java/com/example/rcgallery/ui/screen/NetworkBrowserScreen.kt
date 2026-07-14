@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.screen
 
+import android.os.Environment
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -37,6 +38,7 @@ import com.example.rcgallery.data.smb.SmbFileInfo
 import com.example.rcgallery.data.smb.SmbSubFolder
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.SmbConnectDialog
+import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import com.example.rcgallery.viewmodel.PasteMode
@@ -46,6 +48,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * 网络浏览主界面 — 文件夹相册混合模式。
@@ -59,8 +62,12 @@ fun NetworkBrowserScreen(
 ) {
     val smbBrowseState by viewModel.smbBrowseState.collectAsState()
     val smbDevices by viewModel.smbDevices.collectAsState()
+    val localAlbums by viewModel.albums.collectAsStateWithLifecycle()
+    val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
+    val smbLocalTransferFailures by viewModel.smbLocalTransferFailures.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var showConnectDialog by remember { mutableStateOf(false) }
     // 预览状态：(当前索引, 全部媒体文件列表)
@@ -73,6 +80,9 @@ fun NetworkBrowserScreen(
     // 跟踪当前文件夹的 mediaFiles（供 actions 中全选用）
     var currentSmbMediaFiles by remember { mutableStateOf<List<SmbFileInfo>>(emptyList()) }
     var showNewFolderDialog by remember { mutableStateOf(false) }
+    var showLocalTargetPicker by remember { mutableStateOf(false) }
+    var pendingLocalTransferItems by remember { mutableStateOf<List<SmbFileInfo>>(emptyList()) }
+    var localTransferFromClipboard by remember { mutableStateOf(false) }
     fun exitSmbMultiSelect() {
         isSmbMultiSelect = false
         selectedSmbPaths = emptySet()
@@ -246,6 +256,15 @@ fun NetworkBrowserScreen(
                                             exitSmbMultiSelect()
                                         }
                                     )
+                                    SmbActionButton(
+                                        text = "选择本地文件夹 (${selectedSmbPaths.size})",
+                                        containerColor = Color(0xCC2E7D32),
+                                        onClick = {
+                                            pendingLocalTransferItems = selectedFiles
+                                            localTransferFromClipboard = false
+                                            showLocalTargetPicker = true
+                                        }
+                                    )
                                     // ── 批量删除 ──
                                     SmbActionButton(
                                         text = "删除 (${selectedSmbPaths.size})",
@@ -259,12 +278,16 @@ fun NetworkBrowserScreen(
                             if (!isSmbMultiSelect && smbClipboardItems.isNotEmpty()) {
                                 SmbClipboardBadge(
                                     count = smbClipboardItems.size,
-                                    currentFolderPath = s.currentPath,
                                     onPasteCopy = {
                                         viewModel.smbPasteToFolder(PasteMode.COPY, s.currentPath)
                                     },
                                     onPasteMove = {
                                         viewModel.smbPasteToFolder(PasteMode.MOVE, s.currentPath)
+                                    },
+                                    onChooseLocalTarget = {
+                                        pendingLocalTransferItems = smbClipboardItems
+                                        localTransferFromClipboard = true
+                                        showLocalTargetPicker = true
                                     },
                                     onClear = { viewModel.smbClearClipboard() },
                                     modifier = Modifier
@@ -366,6 +389,76 @@ fun NetworkBrowserScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { showNewFolderDialog = false }) { Text("取消") }
+                }
+            )
+        }
+
+        if (showLocalTargetPicker) {
+            AlbumPickDialog(
+                albums = localAlbums,
+                recentMoveAlbums = recentMoveAlbums,
+                onDismiss = {
+                    showLocalTargetPicker = false
+                    pendingLocalTransferItems = emptyList()
+                    localTransferFromClipboard = false
+                },
+                onAlbumSelected = { targetDir, targetName, mode ->
+                    val transferItems = pendingLocalTransferItems
+                    val consumeClipboard = localTransferFromClipboard
+                    showLocalTargetPicker = false
+                    pendingLocalTransferItems = emptyList()
+                    localTransferFromClipboard = false
+                    if (transferItems.isNotEmpty()) {
+                        viewModel.smbTransferToLocal(
+                            items = transferItems,
+                            targetDir = targetDir,
+                            targetName = targetName,
+                            mode = mode,
+                            consumeClipboard = consumeClipboard
+                        )
+                        if (!consumeClipboard) exitSmbMultiSelect()
+                    }
+                },
+                onCreateFolder = { name, onResult ->
+                    scope.launch {
+                        val path = withContext(Dispatchers.IO) {
+                            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                            val directory = File(dcim, name)
+                            if (directory.mkdirs() || directory.exists()) directory.absolutePath else null
+                        }
+                        if (path != null) viewModel.loadAlbums()
+                        onResult(path)
+                    }
+                }
+            )
+        }
+
+        if (smbLocalTransferFailures.isNotEmpty()) {
+            AlertDialog(
+                onDismissRequest = { viewModel.clearSmbLocalTransferFailures() },
+                title = { Text("部分文件未完成") },
+                text = {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(smbLocalTransferFailures.take(8)) { failure ->
+                            Column {
+                                Text(failure.fileName, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Text(
+                                    if (failure.localCopyCreated) {
+                                        "本地副本已保留；SMB 源文件未确认删除。${failure.message}"
+                                    } else {
+                                        failure.message
+                                    },
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.clearSmbLocalTransferFailures() }) {
+                        Text("知道了")
+                    }
                 }
             )
         }
@@ -1391,9 +1484,9 @@ private fun SmbActionButton(
 @Composable
 private fun SmbClipboardBadge(
     count: Int,
-    currentFolderPath: String,
     onPasteCopy: () -> Unit,
     onPasteMove: () -> Unit,
+    onChooseLocalTarget: () -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1437,6 +1530,13 @@ private fun SmbClipboardBadge(
                 onClick = {
                     expanded = false
                     onPasteMove()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("选择本地目标文件夹", fontSize = 14.sp) },
+                onClick = {
+                    expanded = false
+                    onChooseLocalTarget()
                 }
             )
             HorizontalDivider()

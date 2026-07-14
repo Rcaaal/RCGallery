@@ -9,6 +9,7 @@ import jcifs.smb.SmbFileInputStream
 import jcifs.smb.SmbFileOutputStream
 import jcifs.smb.SmbRandomAccessFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -466,6 +467,38 @@ class SmbRepository {
                     output.flush()
                 }
             }
+        }
+    }
+
+    /** Stream an SMB file into a caller-owned output stream without buffering it in memory. */
+    suspend fun copyToOutputStream(
+        url: String,
+        output: OutputStream,
+        onProgress: ((bytesCopied: Long, totalBytes: Long) -> Unit)? = null,
+        bufferSize: Int = 256 * 1024
+    ): Result<Long> = withContext(Dispatchers.IO) {
+        try {
+            val ctx = getContextForPath(url)
+            val smbFile = SmbFile(url, ctx)
+            if (!smbFile.exists()) throw IllegalStateException("SMB source does not exist: $url")
+            val totalSize = smbFile.length()
+            var totalCopied = 0L
+            SmbFileInputStream(smbFile).use { input ->
+                val buffer = ByteArray(bufferSize)
+                while (true) {
+                    val bytesRead = input.read(buffer)
+                    if (bytesRead < 0) break
+                    output.write(buffer, 0, bytesRead)
+                    totalCopied += bytesRead
+                    onProgress?.invoke(totalCopied, totalSize)
+                }
+            }
+            output.flush()
+            Result.success(totalCopied)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Result.failure(error)
         }
     }
 

@@ -33,6 +33,7 @@ import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.TrashEntry
 import com.example.rcgallery.model.findFirstConflict
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -60,6 +61,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 class GalleryViewModel(application: Application) : AndroidViewModel(application) {
@@ -178,6 +180,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _pasteProgress = MutableStateFlow<PasteProgress?>(null)
     val pasteProgress: StateFlow<PasteProgress?> = _pasteProgress.asStateFlow()
+
+    data class SmbLocalTransferFailure(
+        val fileName: String,
+        val message: String,
+        val localCopyCreated: Boolean
+    )
+
+    private val _smbLocalTransferFailures = MutableStateFlow<List<SmbLocalTransferFailure>>(emptyList())
+    val smbLocalTransferFailures: StateFlow<List<SmbLocalTransferFailure>> =
+        _smbLocalTransferFailures.asStateFlow()
+
+    fun clearSmbLocalTransferFailures() {
+        _smbLocalTransferFailures.value = emptyList()
+    }
 
     /** MOVE 回滚失败计数（非 0 表示需要引导用户开启全盘权限） */
     private val _moveRollbackCount = MutableStateFlow(0)
@@ -2049,6 +2065,229 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+    }
+
+    /**
+     * Copy or move SMB media into a local MediaStore album.
+     * MOVE deletes the SMB source only after the local item is committed and verified.
+     */
+    fun smbTransferToLocal(
+        items: List<SmbFileInfo>,
+        targetDir: String,
+        targetName: String,
+        mode: PasteMode,
+        consumeClipboard: Boolean = false
+    ): Job {
+        val transferItems = items.distinctBy { it.path }
+        val browseSnapshot = _smbBrowseState.value
+        return viewModelScope.launch(Dispatchers.IO) {
+            _smbLocalTransferFailures.value = emptyList()
+            val failures = mutableListOf<SmbLocalTransferFailure>()
+            val completedPaths = mutableSetOf<String>()
+            var localCopyCount = 0
+            var sourceDeleteCount = 0
+
+            try {
+                transferItems.forEachIndexed { index, item ->
+                    _pasteProgress.value = PasteProgress(
+                        current = index + 1,
+                        total = transferItems.size,
+                        fileName = item.name,
+                        mode = mode
+                    )
+
+                    val localResult = copySmbItemToMediaStore(item, targetDir)
+                    if (localResult.isFailure) {
+                        val error = localResult.exceptionOrNull()
+                        failures += SmbLocalTransferFailure(
+                            fileName = item.name,
+                            message = error?.localizedMessage ?: "Local copy failed",
+                            localCopyCreated = false
+                        )
+                        AppLogger.e("SMB-Local", "COPY failed: ${item.path}", error)
+                        return@forEachIndexed
+                    }
+
+                    localCopyCount++
+                    if (mode == PasteMode.COPY) {
+                        completedPaths += item.path
+                        AppLogger.d("SMB-Local", "COPY OK: ${item.name} -> $targetDir")
+                        return@forEachIndexed
+                    }
+
+                    val deleteResult = smbRepository.deleteFile(item.path)
+                    if (deleteResult.isSuccess) {
+                        sourceDeleteCount++
+                        completedPaths += item.path
+                        AppLogger.d("SMB-Local", "MOVE OK: ${item.name} -> $targetDir")
+                    } else {
+                        val error = deleteResult.exceptionOrNull()
+                        failures += SmbLocalTransferFailure(
+                            fileName = item.name,
+                            message = error?.localizedMessage ?: "SMB source deletion was not confirmed",
+                            localCopyCreated = true
+                        )
+                        AppLogger.e(
+                            "SMB-Local",
+                            "MOVE source delete failed; verified local copy retained: ${item.path}",
+                            error
+                        )
+                    }
+                }
+            } finally {
+                _pasteProgress.value = null
+            }
+
+            if (consumeClipboard && completedPaths.isNotEmpty()) {
+                _smbClipboardItems.value = _smbClipboardItems.value.filterNot { it.path in completedPaths }
+            }
+            _smbLocalTransferFailures.value = failures
+
+            if (localCopyCount > 0) {
+                loadAlbums()
+                refreshAllMediaIfActive()
+            }
+            if (sourceDeleteCount > 0 && browseSnapshot is SmbBrowseState.FolderContent) {
+                smbRepository.quickScanFolderContent(browseSnapshot.currentPath).onSuccess { result ->
+                    _smbBrowseState.value = browseSnapshot.copy(
+                        subFolders = result.subFolders,
+                        mediaFiles = result.mediaFiles
+                    )
+                }.onFailure { error ->
+                    AppLogger.e("SMB-Local", "Source folder refresh failed", error)
+                }
+            }
+
+            if (localCopyCount > 0 && transferItems.isNotEmpty()) {
+                val firstPath = transferItems.first().path
+                val sourcePath = firstPath.substringBeforeLast("/")
+                val sourceHost = sourcePath.removePrefix("smb://").substringBefore("/").substringBefore("\\")
+                addSmbOperationRecord(
+                    mode = mode.name,
+                    sourceHost = sourceHost,
+                    sourcePath = sourcePath,
+                    sourceFolderName = sourcePath.substringAfterLast("/"),
+                    targetHost = "LOCAL",
+                    targetPath = targetDir,
+                    targetFolderName = targetName,
+                    fileCount = transferItems.size,
+                    successCount = if (mode == PasteMode.MOVE) sourceDeleteCount else localCopyCount
+                )
+            }
+
+            val successCount = if (mode == PasteMode.MOVE) sourceDeleteCount else localCopyCount
+            withContext(Dispatchers.Main) {
+                val message = when {
+                    failures.isEmpty() -> "${if (mode == PasteMode.MOVE) "移动" else "复制"}成功 $successCount 个文件"
+                    successCount > 0 -> "成功 $successCount 个，失败 ${failures.size} 个"
+                    else -> "操作失败 ${failures.size} 个文件"
+                }
+                android.widget.Toast.makeText(getApplication(), message, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private suspend fun copySmbItemToMediaStore(
+        item: SmbFileInfo,
+        targetDir: String
+    ): Result<Uri> = withContext(Dispatchers.IO) {
+        val resolver = getApplication<Application>().contentResolver
+        var insertedUri: Uri? = null
+        runCatching {
+            val relativePath = localRelativePathOrThrow(targetDir)
+            val collection = if (item.isVideo) {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+            val displayName = findAvailableMediaStoreName(collection, relativePath, item.name)
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeTypeFor(item))
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+                if (item.lastModified > 0L) {
+                    put(MediaStore.MediaColumns.DATE_MODIFIED, item.lastModified / 1000L)
+                }
+            }
+
+            val uri = resolver.insert(collection, values)
+                ?: error("MediaStore could not create the local target")
+            insertedUri = uri
+
+            val copiedBytes = resolver.openOutputStream(uri, "w")?.use { output ->
+                smbRepository.copyToOutputStream(item.path, output).getOrThrow()
+            } ?: error("MediaStore could not open the local target")
+
+            if (item.size > 0L && copiedBytes != item.size) {
+                error("Size mismatch: expected ${item.size}, copied $copiedBytes")
+            }
+            val storedBytes = resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                descriptor.statSize
+            } ?: -1L
+            if (storedBytes != copiedBytes) {
+                error("Local file verification failed: stored $storedBytes, copied $copiedBytes")
+            }
+
+            val committed = resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                null,
+                null
+            )
+            if (committed <= 0) error("MediaStore could not commit the local target")
+            uri
+        }.onFailure { error ->
+            insertedUri?.let { uri ->
+                runCatching { resolver.delete(uri, null, null) }
+            }
+            if (error is CancellationException) throw error
+        }
+    }
+
+    private fun localRelativePathOrThrow(targetDir: String): String {
+        val normalized = targetDir.replace('\\', '/').trimEnd('/')
+        val relative = when {
+            normalized.startsWith("/storage/emulated/0/") -> normalized.removePrefix("/storage/emulated/0/")
+            normalized.startsWith("/sdcard/") -> normalized.removePrefix("/sdcard/")
+            else -> throw IllegalArgumentException("Unsupported local target: $targetDir")
+        }
+        if (relative.isBlank() || relative.startsWith("../")) {
+            throw IllegalArgumentException("Invalid local target: $targetDir")
+        }
+        return "$relative/"
+    }
+
+    private fun findAvailableMediaStoreName(collection: Uri, relativePath: String, requestedName: String): String {
+        val resolver = getApplication<Application>().contentResolver
+        val existingNames = resolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            "${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+            arrayOf(relativePath),
+            null
+        )?.use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(0).lowercase())
+            }
+        }.orEmpty()
+        if (requestedName.lowercase() !in existingNames) return requestedName
+
+        val dotIndex = requestedName.lastIndexOf('.')
+        val baseName = if (dotIndex > 0) requestedName.substring(0, dotIndex) else requestedName
+        val extension = if (dotIndex > 0) requestedName.substring(dotIndex) else ""
+        var suffix = 1
+        while (true) {
+            val candidate = "$baseName ($suffix)$extension"
+            if (candidate.lowercase() !in existingNames) return candidate
+            suffix++
+        }
+    }
+
+    private fun mimeTypeFor(item: SmbFileInfo): String {
+        val extension = item.name.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            ?: if (item.isVideo) "video/mp4" else "image/jpeg"
     }
 
     /**
