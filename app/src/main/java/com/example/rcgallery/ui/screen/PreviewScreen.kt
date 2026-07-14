@@ -742,7 +742,16 @@ fun PreviewScreen(
 
         // ── 视频底部 seek 区（全屏层，仅视频活跃时生效，Compose pointerInput 精确消费）──
         // 手势跟踪状态在 pointerInput 内部局部化，不触发顶层重组
-        val isVideoSeekActive = currentItem?.isVideo == true && pagerState.currentPage == mediaItems.indexOf(currentItem)
+        LaunchedEffect(showInfo) {
+            if (showInfo) {
+                isDraggingSeek = false
+                pagerScrollEnabled = true
+            }
+        }
+
+        val isVideoSeekActive = currentItem?.isVideo == true &&
+            !showInfo &&
+            pagerState.currentPage == mediaItems.indexOf(currentItem)
         if (isVideoSeekActive) {
             val haptic = LocalHapticFeedback.current
             Box(
@@ -783,6 +792,7 @@ fun PreviewScreen(
                             var lastSeekTimeMs = 0L
                             var seekStarted = false
 
+                            try {
                             do {
                                 val event = awaitPointerEvent()
                                 val change = event.changes.firstOrNull() ?: break
@@ -805,11 +815,13 @@ fun PreviewScreen(
                                     AppLogger.d("Seek", "UP page=$curPage uri=${currentItem?.uri?.lastPathSegment} final=${seekIndicatorPosition} currentPage=${pagerState.currentPage}")
                                     seekHandler(seekIndicatorPosition)
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    isDraggingSeek = false
-                                    pagerScrollEnabled = true
                                     break
                                 }
                             } while (true)
+                            } finally {
+                                isDraggingSeek = false
+                                pagerScrollEnabled = true
+                            }
                         }
                     }
             )
