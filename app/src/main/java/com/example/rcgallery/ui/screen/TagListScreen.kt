@@ -8,9 +8,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -46,6 +48,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /** 筛选类型 */
 private enum class FilterType(val label: String) {
@@ -187,12 +190,27 @@ fun TagListScreen(
             else -> searchMedia
         }
     }
-    // 按相册分组
-    val mediaGroups = remember(flatFilteredMedia) {
-        flatFilteredMedia.groupBy { it.albumName ?: "未分类" }
+    // Use the same stable bucket identity as the local album screen. MediaStore can
+    // expose differently-cased display names for records that belong to one bucket.
+    val albumNamesById = remember(allAlbums) { allAlbums.associate { it.bucketId to it.bucketName } }
+    val mediaGroups = remember(flatFilteredMedia, albumNamesById) {
+        flatFilteredMedia
+            .groupBy { it.tagAlbumGroupKey() }
+            .map { (groupKey, items) ->
+                TagMediaGroup(
+                    key = groupKey,
+                    displayName = items.firstNotNullOfOrNull { item ->
+                        item.albumId?.let(albumNamesById::get)
+                    } ?: items.firstNotNullOfOrNull { it.albumName } ?: "未分类",
+                    items = items
+                )
+            }
     }
     // 每个分组的折叠状态
     val collapsedGroups = remember { mutableStateMapOf<String, Boolean>() }
+    val albumGridState = rememberLazyGridState()
+    val imageListState = rememberLazyListState()
+    val videoListState = rememberLazyListState()
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -517,6 +535,7 @@ fun TagListScreen(
                         } else {
                             LazyVerticalGrid(
                                 columns = GridCells.Fixed(4),
+                                state = albumGridState,
                                 modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
                                 contentPadding = PaddingValues(top = 8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -573,6 +592,7 @@ fun TagListScreen(
                             GroupedMediaList(
                                 groups = mediaGroups,
                                 collapsedGroups = collapsedGroups,
+                                lazyListState = imageListState,
                                 onMediaClick = { item ->
                                     val idx = flatFilteredMedia.indexOf(item)
                                     if (idx >= 0) {
@@ -605,6 +625,7 @@ fun TagListScreen(
                             GroupedMediaList(
                                 groups = mediaGroups,
                                 collapsedGroups = collapsedGroups,
+                                lazyListState = videoListState,
                                 onMediaClick = { item ->
                                     val idx = flatFilteredMedia.indexOf(item)
                                     if (idx >= 0) {
@@ -753,15 +774,28 @@ fun TagListScreen(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GroupedMediaList(
-    groups: Map<String, List<MediaItem>>,
+    groups: List<TagMediaGroup>,
     collapsedGroups: MutableMap<String, Boolean>,
+    lazyListState: LazyListState,
     onMediaClick: (MediaItem) -> Unit,
     isMultiSelectMode: Boolean = false,
     selectedUris: Set<String> = emptySet(),
     onMediaLongClick: ((MediaItem) -> Unit)? = null,
     onMediaTapInMultiSelect: ((MediaItem) -> Unit)? = null
 ) {
-    val lazyListState = rememberLazyListState()
+    val collapsedSnapshot = groups.associate { it.key to (collapsedGroups[it.key] ?: false) }
+    val sections = remember(groups, collapsedSnapshot) {
+        groups.map { group ->
+            GroupedMediaSection(
+                groupKey = group.key,
+                albumName = group.displayName,
+                items = group.items,
+                isCollapsed = collapsedSnapshot[group.key] ?: false,
+                rows = if (collapsedSnapshot[group.key] == true) emptyList()
+                else group.items.chunked(GRID_COLUMNS)
+            )
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -770,12 +804,15 @@ private fun GroupedMediaList(
             contentPadding = PaddingValues(top = 8.dp),
             verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
-        groups.forEach { (albumName, items) ->
-            val isCollapsed = collapsedGroups[albumName] ?: false
-            val rows = if (isCollapsed) emptyList() else items.chunked(GRID_COLUMNS)
+        sections.forEach { section ->
+            val groupKey = section.groupKey
+            val albumName = section.albumName
+            val items = section.items
+            val isCollapsed = section.isCollapsed
+            val rows = section.rows
 
             // ── 相册名 header（顶部圆角，点击展开/折叠） ──
-            item(key = "h_$albumName") {
+            item(key = "h_$groupKey", contentType = "tag_group_header") {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -786,7 +823,7 @@ private fun GroupedMediaList(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { collapsedGroups[albumName] = !isCollapsed }
+                            .clickable { collapsedGroups[groupKey] = !isCollapsed }
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -817,7 +854,7 @@ private fun GroupedMediaList(
             // ── 每行 4 个缩略图（独立 lazy item，仅渲染可见行） ──
             rows.forEachIndexed { rowIdx, row ->
                 val isLastRow = rowIdx == rows.lastIndex
-                item(key = "r_${albumName}_$rowIdx") {
+                item(key = "r_${groupKey}_$rowIdx", contentType = "tag_media_row") {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -893,6 +930,34 @@ private fun GroupedMediaList(
         item { Spacer(Modifier.height(16.dp)) }
         }
     }
+}
+
+private data class TagMediaGroup(
+    val key: String,
+    val displayName: String,
+    val items: List<MediaItem>
+)
+
+private data class GroupedMediaSection(
+    val groupKey: String,
+    val albumName: String,
+    val items: List<MediaItem>,
+    val isCollapsed: Boolean,
+    val rows: List<List<MediaItem>>
+)
+
+private fun MediaItem.tagAlbumGroupKey(): String {
+    albumId?.takeIf { it.isNotBlank() }?.let { return "bucket:$it" }
+
+    val directory = filePath
+        .substringBeforeLast('/', missingDelimiterValue = "")
+        .replace("/sdcard/", "/storage/emulated/0/", ignoreCase = true)
+        .trimEnd('/')
+    if (directory.isNotBlank()) return "path:${directory.lowercase(Locale.ROOT)}"
+
+    return albumName?.takeIf { it.isNotBlank() }
+        ?.let { "name:${it.lowercase(Locale.ROOT)}" }
+        ?: "media:${uri}"
 }
 
 /** 网格列数 */

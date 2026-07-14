@@ -56,6 +56,12 @@ class MediaRepository(private val context: Context) {
                 val mimeType = c.getString(proj.indexMime) ?: ""
                 val size = c.getLong(proj.indexSize)
                 val filePath = c.getString(proj.indexData) ?: ""
+                val displayName = c.getString(proj.indexName) ?: ""
+
+                // Keep album totals aligned with the media list's visibility rules.
+                if (displayName.startsWith(".")) continue
+                if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) continue
+
                 val imageUri = Uri.withAppendedPath(proj.uri, id.toString())
 
                 val existing = albumMap[bucketId]

@@ -514,15 +514,28 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     if (generation != albumsLoadGeneration.get()) return@withLock
                     result.onSuccess { albums ->
                     // 从各相册计数中减去已回收的文件数
-                    val trashPerAlbum = trashList
+                    val trashByAlbum = trashList
                         .filter { it.originalAlbumId != null }
                         .groupBy { it.originalAlbumId }
-                        .mapValues { it.value.size }
                     val filtered = albums.mapNotNull { album ->
-                        val trashCount = trashPerAlbum[album.bucketId] ?: 0
+                        val albumTrash = trashByAlbum[album.bucketId].orEmpty()
+                        val trashCount = albumTrash.size
+                        val trashedVideos = albumTrash.count { it.mimeType.startsWith("video/") }
+                        val trashedGifs = albumTrash.count {
+                            it.mimeType.equals("image/gif", ignoreCase = true)
+                        }
+                        val trashedImages = albumTrash.count {
+                            it.mimeType.startsWith("image/") &&
+                                !it.mimeType.equals("image/gif", ignoreCase = true)
+                        }
                         val newCount = album.count - trashCount
                         if (newCount <= 0) null
-                        else album.copy(count = newCount)
+                        else album.copy(
+                            count = newCount,
+                            imageCount = (album.imageCount - trashedImages).coerceAtLeast(0),
+                            videoCount = (album.videoCount - trashedVideos).coerceAtLeast(0),
+                            gifCount = (album.gifCount - trashedGifs).coerceAtLeast(0)
+                        )
                     }
                     // 过滤已忽略文件夹中的相册
                     val ignoredDirs = _ignoredFolderPaths.value
@@ -592,7 +605,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _isLoading.value = true
 
         loadMediaJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { repository.loadMediaItems(albumId = albumId) }
+            val result = withContext(Dispatchers.IO) {
+                repository.loadMediaItems(albumId = albumId, pageSize = 10000)
+            }
             result
                 .onSuccess {
                     val match = pendingAlbumId == albumId

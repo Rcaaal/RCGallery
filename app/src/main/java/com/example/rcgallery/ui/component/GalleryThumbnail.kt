@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,13 +35,16 @@ fun GalleryThumbnail(
     targetSize: Int = 120
 ) {
     val context = LocalContext.current
-    AsyncImage(
-        model = ImageRequest.Builder(context)
+    val request = remember(context, uri, targetSize) {
+        ImageRequest.Builder(context)
             .data(uri)
             .size(targetSize)
             .bitmapConfig(Bitmap.Config.RGB_565)
             .crossfade(false)
-            .build(),
+            .build()
+    }
+    AsyncImage(
+        model = request,
         contentDescription = contentDescription,
         modifier = modifier.fillMaxSize().background(placeholderColor),
         contentScale = ContentScale.Crop
