@@ -63,7 +63,6 @@ import com.example.rcgallery.ui.component.InertiaSettings
 import kotlinx.coroutines.delay
 
 private const val SPEED_TEXT_HIDE_DELAY_MS = 800L
-private const val PROGRESS_POLL_MS = 100L
 private const val DOUBLE_TAP_TIMEOUT_MS = 300L
 private val speedOptions = listOf(2f, 3f, 4f, 5f, 10f)
 
@@ -105,8 +104,6 @@ fun VideoPlayer(
     var controllerVisible by remember { mutableStateOf(false) }
     val pvRef = remember { mutableStateOf<PlayerView?>(null) }
     var pipControllerDisabled by remember { mutableStateOf(false) }
-    var playerPosition by remember { mutableFloatStateOf(0f) }
-    var playerDuration by remember { mutableFloatStateOf(1f) }
     val lastTapTime = remember { longArrayOf(0L) }
 
     // 稳定持最新 onFirstFrameRendered / onPlaybackEnded 回调，供 remember 内 Player.Listener 使用
@@ -163,16 +160,15 @@ fun VideoPlayer(
         }
     }
 
-    // 每次重组注册 seek 回调，供 PreviewScreen 全屏层调用
-    // 使用 poll 状态（playerPosition/playerDuration），不直读 ExoPlayer（防异步 prepare 后 duration=0）
+    // Read player values on demand instead of recomposing the whole player every 100 ms.
     val callbackUri = uri
     SideEffect {
         onRegisterSeekHandler { pos ->
             AppLogger.d("VideoPlayer", "seekTo uri=${callbackUri.lastPathSegment} pos=$pos before=${exoPlayer.currentPosition} state=${exoPlayer.playbackState} ready=${exoPlayer.playWhenReady}")
             exoPlayer.seekTo(pos)
         }
-        onRegisterPositionProvider { playerPosition.toLong() }
-        onRegisterDurationProvider { playerDuration.toLong() }
+        onRegisterPositionProvider { exoPlayer.currentPosition.coerceAtLeast(0L) }
+        onRegisterDurationProvider { exoPlayer.duration.coerceAtLeast(1L) }
         onRegisterSpeedSettingsTrigger { showSpeedSettings = true }
     }
 
@@ -273,15 +269,6 @@ fun VideoPlayer(
             } else {
                 pv.controllerShowTimeoutMs = 3000
             }
-        }
-    }
-
-    LaunchedEffect(isActive) {
-        while (isActive) {
-            playerPosition = exoPlayer.currentPosition.coerceAtLeast(0).toFloat()
-            playerDuration = exoPlayer.duration.coerceAtLeast(1).toFloat()
-            AppLogger.d("VideoPlayer", "poll uri=${uri.lastPathSegment} pos=${exoPlayer.currentPosition} dur=${exoPlayer.duration} state=${exoPlayer.playbackState} ready=${exoPlayer.playWhenReady}")
-            delay(PROGRESS_POLL_MS)
         }
     }
 

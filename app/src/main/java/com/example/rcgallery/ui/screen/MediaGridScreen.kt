@@ -44,6 +44,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.res.ResourcesCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
@@ -597,6 +598,23 @@ fun MediaGridScreen(
                                 val prevMode = adapter.currentMode
                                 val currentMode = mediaDisplayMode
                                 val modeChanged = prevMode != currentMode
+                                val oldItems = adapter.items
+                                val oldStarredUris = adapter.starredUris
+                                val oldMediaTagsMap = adapter.mediaTagsMap
+                                val oldSelectedUris = adapter.selectedUris
+                                val oldMultiSelectMode = adapter.isMultiSelectMode
+
+                                val itemDiff = if (!modeChanged && oldItems !== tagFilteredItems) {
+                                    DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+                                        override fun getOldListSize() = oldItems.size
+                                        override fun getNewListSize() = tagFilteredItems.size
+                                        override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                                            oldItems[oldItemPosition].uri == tagFilteredItems[newItemPosition].uri
+                                        override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                                            oldItems[oldItemPosition] == tagFilteredItems[newItemPosition]
+                                    })
+                                } else null
+
                                 adapter.items = tagFilteredItems
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
@@ -612,10 +630,30 @@ fun MediaGridScreen(
                                     if (lm == null || lm.spanCount != spanCount) {
                                         rv.layoutManager = GridLayoutManager(rv.context, spanCount)
                                     }
-                                }
-                                adapter.notifyDataSetChanged()
-                                if (modeChanged) {
+                                    adapter.notifyDataSetChanged()
                                     scroller.refresh()
+                                } else {
+                                    itemDiff?.dispatchUpdatesTo(adapter)
+                                    if (oldMultiSelectMode != isMediaMultiSelect) {
+                                        adapter.notifyItemRangeChanged(0, adapter.itemCount)
+                                    } else {
+                                        val changedUris = (oldStarredUris - starredMediaUris) +
+                                            (starredMediaUris - oldStarredUris) +
+                                            (oldSelectedUris - selectedMediaUris) +
+                                            (selectedMediaUris - oldSelectedUris)
+                                        val changedPaths = if (currentMode is MediaDisplayMode.List) {
+                                            (oldMediaTagsMap.keys + mediaTags.keys).filterTo(HashSet()) { path ->
+                                                oldMediaTagsMap[path] != mediaTags[path]
+                                            }
+                                        } else emptySet()
+                                        if (changedUris.isNotEmpty() || changedPaths.isNotEmpty()) {
+                                            tagFilteredItems.forEachIndexed { index, item ->
+                                                if (item.uri.toString() in changedUris || item.filePath in changedPaths) {
+                                                    adapter.notifyItemChanged(index)
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 // ── 列表刷新后对齐多选状态：清除已不存在的 URI ──
                                 if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
@@ -1369,6 +1407,7 @@ private class SimpleGridAdapter(
         }
 
         fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, selectedUris: Set<String> = emptySet(), columns: Int = DEFAULT_MEDIA_GRID_COLUMNS, isMultiSelectMode: Boolean = false) {
+            val previousUri = currentItem?.uri
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -1377,7 +1416,9 @@ private class SimpleGridAdapter(
                 if (isStarred) android.graphics.Color.rgb(255, 193, 7) else android.graphics.Color.rgb(160, 160, 160),
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
-            if (item.isVideo) iv.load(item.uri) { crossfade(false) } else iv.load(item.uri) { crossfade(false) }
+            if (previousUri != item.uri || iv.drawable == null) {
+                iv.load(item.uri) { crossfade(false) }
+            }
             if (item.isVideo) {
                 val formatCode = item.fileName.substringAfterLast('.', "")
                     .takeIf { it.isNotBlank() }?.uppercase() ?: "VIDEO"
@@ -1660,6 +1701,7 @@ private class SimpleGridAdapter(
         }
 
         fun bind(item: com.example.rcgallery.model.MediaItem, position: Int, starredUris: Set<String>, mediaTagsMap: Map<String, List<TagEntity>> = emptyMap(), selectedUris: Set<String> = emptySet(), isMultiSelectMode: Boolean = false) {
+            val previousUri = currentItem?.uri
             currentItem = item
             starContainer.tag = item.uri.toString()
             val isStarred = item.uri.toString() in starredUris
@@ -1683,7 +1725,9 @@ private class SimpleGridAdapter(
                 checkmarkContainer.visibility = android.view.View.GONE
                 itemView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             }
-            iv.load(item.uri) { crossfade(false) }
+            if (previousUri != item.uri || iv.drawable == null) {
+                iv.load(item.uri) { crossfade(false) }
+            }
             nameTv.text = item.fileName
             infoTv.text = buildString {
                 if (item.isVideo && item.duration > 0) {
