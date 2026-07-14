@@ -330,6 +330,7 @@ fun AlbumGridScreen(
     var selectedDatePhotoIndex by remember { mutableIntStateOf(-1) }
     // 持久化恢复或切换标签回来时，日期视图要加载全量数据
     LaunchedEffect(isDateView) {
+        viewModel.setAllMediaViewActive(isDateView)
         if (isDateView) {
             viewModel.loadAllMedia()
         } else if (selectedDatePhotoIndex >= 0) {
@@ -337,6 +338,9 @@ fun AlbumGridScreen(
             selectedDatePhotoIndex = -1
             onAlbumActiveChanged(false)
         }
+    }
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.setAllMediaViewActive(false) }
     }
 
     // ── MediaGrid overlay 状态（代替 navigation push，LazyVerticalGrid 保持存活）──
@@ -633,7 +637,7 @@ fun AlbumGridScreen(
                     onBatchAddTagsToMedia = { filePath, tagName -> viewModel.addMediaTag(filePath, tagName) },
                     onDeleteDateMedia = { paths ->
                         val toDelete = dateMediaItems.filter { it.filePath in paths }
-                        toDelete.forEach { viewModel.moveToTrash(it) }
+                        viewModel.moveToTrash(toDelete)
                     },
                     hasActiveFilter = persistentRules.any { it.enabled } || tempFilter.isActive,
                     onOpenFilter = { showFilterPage = true },

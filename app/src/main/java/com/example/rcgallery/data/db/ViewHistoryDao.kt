@@ -35,4 +35,7 @@ interface ViewHistoryDao {
     /** 删除指定 targetKey 的记录（文件被删除时清理） */
     @Query("DELETE FROM view_history WHERE targetKey = :targetKey")
     suspend fun deleteByKey(targetKey: String)
+
+    @Query("DELETE FROM view_history WHERE targetKey IN (:targetKeys)")
+    suspend fun deleteByKeys(targetKeys: List<String>)
 }

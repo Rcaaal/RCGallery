@@ -616,7 +616,7 @@ fun TagListScreen(
                 onBatchTag = { showTagBatchTagDialog = true },
                 onDeleteToTrash = {
                     val toDelete = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
-                    toDelete.forEach { item -> viewModel.moveToTrash(item) }
+                    viewModel.moveToTrash(toDelete)
                     exitTagMediaMultiSelect()
                 },
                 onAddToClipboard = {

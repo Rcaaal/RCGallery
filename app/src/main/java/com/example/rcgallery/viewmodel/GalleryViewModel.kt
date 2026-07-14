@@ -48,8 +48,11 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ContentValues
@@ -76,6 +79,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ── 日期视图：全部媒体项（按 dateAdded 降序，用于按天分组）──
     private val _allMediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val allMediaItems: StateFlow<List<MediaItem>> = _allMediaItems.asStateFlow()
+    @Volatile private var allMediaViewActive = false
+
+    private val albumsLoadMutex = Mutex()
+    private val allMediaLoadMutex = Mutex()
+    private val albumsLoadGeneration = AtomicInteger(0)
+    private val allMediaLoadGeneration = AtomicInteger(0)
+    private var albumsLoadJob: Job? = null
+    private var allMediaLoadJob: Job? = null
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -491,13 +502,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun loadAlbums() {
         AppLogger.d("VM", "loadAlbums")
-        viewModelScope.launch {
-            _isLoading.value = true
-            val result = withContext(Dispatchers.IO) { repository.loadAlbums() }
-            result
-                .onSuccess { albums ->
+        val generation = albumsLoadGeneration.incrementAndGet()
+        albumsLoadJob?.cancel()
+        _isLoading.value = true
+        albumsLoadJob = viewModelScope.launch {
+            try {
+                albumsLoadMutex.withLock {
+                    val (result, trashList) = withContext(Dispatchers.IO) {
+                        repository.loadAlbums() to trashManager.getAll()
+                    }
+                    if (generation != albumsLoadGeneration.get()) return@withLock
+                    result.onSuccess { albums ->
                     // 从各相册计数中减去已回收的文件数
-                    val trashList = trashManager.getAll()
                     val trashPerAlbum = trashList
                         .filter { it.originalAlbumId != null }
                         .groupBy { it.originalAlbumId }
@@ -517,33 +533,55 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     } else filtered
                     _albums.value = albumFiltered
                     AppLogger.d("VM", "loadAlbums OK count=${albumFiltered.size} (trashed+ignored filtered)")
+                    }.onFailure {
+                        _albums.value = emptyList()
+                        AppLogger.e("VM", "loadAlbums FAIL", it)
+                    }
                 }
-                .onFailure {
-                    _albums.value = emptyList()
-                    AppLogger.e("VM", "loadAlbums FAIL", it)
+            } finally {
+                if (generation == albumsLoadGeneration.get()) {
+                    _isLoading.value = false
                 }
-            _isLoading.value = false
+            }
         }
     }
 
     /** 加载全部媒体（不限相册，按 dateAdded 降序，用于日期分组视图） */
     fun loadAllMedia() {
-        viewModelScope.launch {
-            _allMediaItems.value = withContext(Dispatchers.IO) {
-                repository.loadMediaItems(albumId = null, pageSize = 10000)
-            }.getOrDefault(emptyList())
-            // 过滤已回收文件（同 loadMedia）
-            val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
-            _allMediaItems.value = _allMediaItems.value.filter { it.uri.toString() !in trashedUris }
-            // 过滤已忽略文件夹中的文件
-            val ignoredDirs = _ignoredFolderPaths.value
-            if (ignoredDirs.isNotEmpty()) {
-                _allMediaItems.value = _allMediaItems.value.filterNot { item ->
-                    ignoredDirs.any { item.filePath.startsWith(it) }
+        val generation = allMediaLoadGeneration.incrementAndGet()
+        allMediaLoadJob?.cancel()
+        allMediaLoadJob = viewModelScope.launch {
+            allMediaLoadMutex.withLock {
+                var loaded = withContext(Dispatchers.IO) {
+                    repository.loadMediaItems(albumId = null, pageSize = 10000)
+                }.getOrDefault(emptyList())
+                if (generation != allMediaLoadGeneration.get()) return@withLock
+                val trashedUris = withContext(Dispatchers.IO) {
+                    trashManager.getAll().map { entry -> entry.uri }.toSet()
                 }
+                loaded = loaded.filter { it.uri.toString() !in trashedUris }
+                val ignoredDirs = _ignoredFolderPaths.value
+                if (ignoredDirs.isNotEmpty()) {
+                    loaded = loaded.filterNot { item ->
+                        ignoredDirs.any { item.filePath.startsWith(it) }
+                    }
+                }
+                _allMediaItems.value = loaded
+                AppLogger.d("VM", "loadAllMedia count=${loaded.size}")
             }
-            AppLogger.d("VM", "loadAllMedia count=${_allMediaItems.value.size}")
         }
+    }
+
+    fun setAllMediaViewActive(active: Boolean) {
+        allMediaViewActive = active
+        if (!active) {
+            allMediaLoadGeneration.incrementAndGet()
+            allMediaLoadJob?.cancel()
+        }
+    }
+
+    private fun refreshAllMediaIfActive() {
+        if (allMediaViewActive) loadAllMedia()
     }
 
     fun loadMedia(albumId: String? = null) {
@@ -710,39 +748,51 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 将媒体项移入回收站（逻辑删除——只写索引，不删文件）。
      */
     fun moveToTrash(item: MediaItem) {
-        trashManager.add(
-            TrashEntry(
-                uri = item.uri.toString(),
-                filePath = item.filePath,
-                fileName = item.fileName,
-                deleteTime = System.currentTimeMillis(),
-                originalAlbumId = item.albumId,
-                originalAlbumName = item.albumName,
-                mimeType = item.mimeType
-            )
-        )
-        refreshTrashCount()
-        // 如果当前正在浏览该相册，从列表中移除（同步过滤，不走 loadMedia 全量重查）
-        _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != item.uri.toString() }
-        // 如果日期视图打开，从全量列表中也移除
-        _allMediaItems.value = _allMediaItems.value.filter { it.uri.toString() != item.uri.toString() }
-        // 直接更新相册计数（减 1），count=0 的相册自动移除
-        _albums.value = _albums.value.mapNotNull { album ->
-            if (album.bucketId == item.albumId) {
-                val newCount = (album.count - 1).coerceAtLeast(0)
-                if (newCount <= 0) null else album.copy(count = newCount)
-            } else {
-                album
+        moveToTrash(listOf(item))
+    }
+
+    /** 批量移入逻辑回收站，只执行一次索引落盘和一次状态更新。 */
+    fun moveToTrash(items: List<MediaItem>) {
+        val distinctItems = items.distinctBy { it.uri.toString() }
+        if (distinctItems.isEmpty()) return
+
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val entries = distinctItems.map { item ->
+                TrashEntry(
+                    uri = item.uri.toString(),
+                    filePath = item.filePath,
+                    fileName = item.fileName,
+                    deleteTime = now,
+                    originalAlbumId = item.albumId,
+                    originalAlbumName = item.albumName,
+                    mimeType = item.mimeType
+                )
             }
+            val newTrashCount = withContext(Dispatchers.IO) {
+                val count = trashManager.addAll(entries)
+                viewHistoryRepository.deleteByKeys(
+                    distinctItems.map { item -> item.filePath.ifEmpty { item.uri.toString() } }
+                )
+                count
+            }
+
+            val removedUris = distinctItems.mapTo(HashSet()) { it.uri.toString() }
+            val removedByAlbum = distinctItems.groupingBy { it.albumId }.eachCount()
+            _trashCount.value = newTrashCount
+            _mediaItems.value = _mediaItems.value.filterNot { it.uri.toString() in removedUris }
+            _allMediaItems.value = _allMediaItems.value.filterNot { it.uri.toString() in removedUris }
+            _albums.value = _albums.value.mapNotNull { album ->
+                val removedCount = removedByAlbum[album.bucketId] ?: 0
+                if (removedCount == 0) album
+                else {
+                    val newCount = (album.count - removedCount).coerceAtLeast(0)
+                    if (newCount == 0) null else album.copy(count = newCount)
+                }
+            }
+            AppLogger.d("VM", "moveToTrash batch: ${distinctItems.size} items")
+            refreshRecent()
         }
-        AppLogger.d("VM", "moveToTrash: ${item.fileName}")
-        // 通知本地相册刷新（TAG 页删除后本地相册同步更新）
-        loadAlbums()
-        // 从浏览历史中移除（文件已删除，不再出现在"最近"中）
-        viewModelScope.launch(Dispatchers.IO) {
-            viewHistoryRepository.deleteByKey(item.filePath.ifEmpty { item.uri.toString() })
-        }
-        refreshRecent()
     }
 
     /**
@@ -783,7 +833,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
         // 同步刷新日期视图和标签搜索结果（loadAllMedia 含回收站过滤，恢复的条目不会被滤掉）
-        loadAllMedia()
+        refreshAllMediaIfActive()
         refreshTagSearch()
         AppLogger.d("VM", "restoreFromTrash: $uri")
     }
@@ -833,7 +883,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         trashManager.removeAll(uris)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
-        loadAllMedia()
+        refreshAllMediaIfActive()
         refreshTagSearch()
         AppLogger.d("VM", "batchRestoreFromTrash: ${uris.size} items")
     }
@@ -1048,7 +1098,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         saveIgnoredFolderPaths(current)
         // 立即刷新所有视图
         loadAlbums()
-        loadAllMedia()
+        refreshAllMediaIfActive()
         refreshTagSearch()
         AppLogger.d("VM", "toggleIgnoredFolder: ${if (normalized in current) "ignored" else "unignored"} $normalized")
     }
@@ -2816,8 +2866,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
 
                 // 刷新
-                loadAlbums()
-                loadAllMedia()
+                refreshAllMediaIfActive()
                 if (currentAlbumId != null) {
                     loadMedia(currentAlbumId)
                 }
@@ -2980,8 +3029,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
 
                 // 刷新
-                loadAlbums()
-                loadAllMedia()
+                refreshAllMediaIfActive()
                 if (currentAlbumId != null) {
                     loadMedia(currentAlbumId)
                 }
@@ -3231,8 +3279,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
             // 刷新相册列表和所有媒体（确保目标相册的 count 和内容在 UI 中更新）
             if (successCount > 0) {
-                loadAlbums()
-                loadAllMedia()
+                refreshAllMediaIfActive()
                 // 刷新当前相册的媒体列表（文件移入/移出后立即反映在列表中）
                 if (currentAlbumId != null) {
                     loadMedia(currentAlbumId)
@@ -3387,8 +3434,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
             // 刷新数据
             if (successCount > 0) {
-                loadAlbums()
-                loadAllMedia()
+                refreshAllMediaIfActive()
                 withContext(Dispatchers.Main) {
                     android.widget.Toast.makeText(
                         getApplication(),

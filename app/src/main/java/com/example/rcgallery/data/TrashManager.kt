@@ -73,6 +73,23 @@ class TrashManager(private val context: Context) {
         }
     }
 
+    /** Batch add with a single index read and durable write. */
+    fun addAll(entries: List<TrashEntry>): Int {
+        if (entries.isEmpty()) return count()
+        synchronized(lock) {
+            val merged = LinkedHashMap<String, TrashEntry>()
+            getAll().forEach { merged[it.uri] = it }
+            entries.forEach { entry ->
+                merged.remove(entry.uri)
+                merged[entry.uri] = entry
+            }
+            val result = merged.values.toList()
+            writeAll(result)
+            AppLogger.d(TAG, "addAll: ${entries.size} entries total=${result.size}")
+            return result.size
+        }
+    }
+
     /** 从回收站移除一条记录（恢复或永久删除后） */
     fun remove(uri: String) {
         synchronized(lock) {

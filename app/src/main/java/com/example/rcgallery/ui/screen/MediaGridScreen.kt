@@ -773,7 +773,7 @@ fun MediaGridScreen(
                     onBatchTag = { showMediaBatchTagDialog = true },
                     onDeleteToTrash = {
                         val toDelete = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
-                        toDelete.forEach { item -> viewModel.moveToTrash(item) }
+                        viewModel.moveToTrash(toDelete)
                         exitMediaMultiSelect()
                     },
                     onAddToClipboard = {
