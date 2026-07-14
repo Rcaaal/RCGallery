@@ -1,5 +1,6 @@
 package com.example.rcgallery.ui.screen
 
+import android.os.Environment
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -38,6 +39,11 @@ import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
 import com.example.rcgallery.ui.component.GalleryThumbnail
 import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import com.example.rcgallery.viewmodel.PasteMode
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 筛选类型 */
 private enum class FilterType(val label: String) {
@@ -626,7 +632,10 @@ fun TagListScreen(
                 },
                 onPickTargetAlbum = {
                     tagPendingPickItems = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
-                    exitTagMediaMultiSelect()
+                    // Close the selection UI without clearing the items needed by the picker.
+                    isTagMediaMultiSelect = false
+                    tagSelectedMediaUris = emptySet()
+                    showTagBatchTagDialog = false
                     showTagPickDialog = true
                 },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 16.dp)
@@ -683,13 +692,34 @@ fun TagListScreen(
                 albums = allAlbums,
                 recentMoveAlbums = recentMoveAlbums,
                 onAlbumSelected = { targetDir, targetName, mode ->
-                    if (tagPendingPickItems.isNotEmpty()) {
-                        viewModel.addToClipboard(tagPendingPickItems)
-                        tagPendingPickItems = emptyList()
-                    }
+                    val items = tagPendingPickItems.toList()
+                    tagPendingPickItems = emptyList()
                     showTagPickDialog = false
+                    if (items.isNotEmpty()) {
+                        if (mode == PasteMode.MOVE) {
+                            viewModel.moveItemsToAlbum(items, targetDir, targetName, null)
+                        } else {
+                            viewModel.copyItemsToAlbum(items, targetDir, targetName, null)
+                        }
+                    }
                 },
-                onDismiss = { showTagPickDialog = false }
+                onCreateFolder = { name, onResult ->
+                    scope.launch {
+                        val path = withContext(Dispatchers.IO) {
+                            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                            val dir = File(dcim, name)
+                            if ((dir.isDirectory || dir.mkdirs()) && dir.isDirectory) {
+                                dir.absolutePath
+                            } else null
+                        }
+                        if (path != null) viewModel.loadAlbums()
+                        onResult(path)
+                    }
+                },
+                onDismiss = {
+                    showTagPickDialog = false
+                    tagPendingPickItems = emptyList()
+                }
             )
         }
     }
