@@ -290,10 +290,6 @@ fun MediaGridScreen(
             !viewModel.shouldHideMedia(item.filePath, mTags, aTags)
         }
     }
-    // 列表数据版本号：tagFilteredItems 变化时递增，用于多选拖拽检测旧 position 过期
-    var mediaDatasetVersion by remember { mutableIntStateOf(0) }
-    LaunchedEffect(tagFilteredItems) { mediaDatasetVersion++ }
-
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
@@ -417,23 +413,119 @@ fun MediaGridScreen(
                                 rv.setPadding(0, (40 * ctx.resources.displayMetrics.density).toInt(), 0, 0)
 
                                 // ── 滑动手势多选（替代 adapter 的 onLongClick）──
-                                val dragState = object {
-                                    var dragStartIdx = -1
-                                    var dragStartUri = ""       // 稳定锚点 URI
-                                    var dragStartVersion = 0    // 长按时的数据版本
-                                    var isDragging = false
-                                    var longPressConsumed = false  // 长按触发后拦截 click
-                                    var notifyMin = -1             // 本次拖拽通知范围起点
-                                    var notifyMax = -1             // 本次拖拽通知范围终点
-                                }
+                                 val dragState = object {
+                                     var dragStartIdx = -1
+                                     var dragStartUri = ""       // 稳定锚点 URI
+                                     var dragStartVersion = 0    // 长按时的数据版本
+                                     var baseSelection: Set<String> = emptySet()
+                                     var selecting = true
+                                     var isDragging = false
+                                     var longPressConsumed = false  // 长按触发后拦截 click
+                                 }
                                 val handler = android.os.Handler(android.os.Looper.getMainLooper())
                                 val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
-                                var downX = 0f; var downY = 0f
+                                 var downX = 0f; var downY = 0f
 
-                                rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
-                                    override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
-                                        when (e.actionMasked) {
-                                            MotionEvent.ACTION_DOWN -> {
+                                 rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
+                                     var lastTouchX = 0f
+                                     var lastTouchY = 0f
+                                     var autoScrollDelta = 0
+
+                                     private val autoScrollRunnable = object : Runnable {
+                                         override fun run() {
+                                             if (!dragState.isDragging || autoScrollDelta == 0) return
+                                             val direction = if (autoScrollDelta > 0) 1 else -1
+                                             if (!rv.canScrollVertically(direction)) {
+                                                 autoScrollDelta = 0
+                                                 return
+                                             }
+                                             rv.scrollBy(0, autoScrollDelta)
+                                             resolveDragPosition(rv, lastTouchX, lastTouchY)?.let {
+                                                 applyDragSelection(rv, it)
+                                             }
+                                             rv.postOnAnimation(this)
+                                         }
+                                     }
+
+                                     private fun stopAutoScroll(rv: RecyclerView) {
+                                         autoScrollDelta = 0
+                                         rv.removeCallbacks(autoScrollRunnable)
+                                     }
+
+                                     private fun updateAutoScroll(rv: RecyclerView, touchY: Float) {
+                                         val density = rv.resources.displayMetrics.density
+                                         val threshold = 72f * density
+                                         val depth = when {
+                                             touchY < threshold -> -((threshold - touchY) / threshold).coerceIn(0f, 1f)
+                                             touchY > rv.height - threshold ->
+                                                 ((touchY - (rv.height - threshold)) / threshold).coerceIn(0f, 1f)
+                                             else -> 0f
+                                         }
+                                         val newDelta = if (depth == 0f) 0 else {
+                                             val minStep = 4f * density
+                                             val maxStep = 24f * density
+                                             (kotlin.math.sign(depth) * (minStep + (maxStep - minStep) * kotlin.math.abs(depth))).toInt()
+                                         }
+                                         if (newDelta == autoScrollDelta) return
+                                         val wasStopped = autoScrollDelta == 0
+                                         autoScrollDelta = newDelta
+                                         if (newDelta == 0) {
+                                             rv.removeCallbacks(autoScrollRunnable)
+                                         } else if (wasStopped) {
+                                             rv.postOnAnimation(autoScrollRunnable)
+                                         }
+                                     }
+
+                                     private fun resolveDragPosition(rv: RecyclerView, x: Float, y: Float): Int? {
+                                         val layoutManager = rv.layoutManager as? GridLayoutManager ?: return null
+                                         return when {
+                                             autoScrollDelta < 0 -> layoutManager.findFirstVisibleItemPosition().takeIf { it >= 0 }
+                                             autoScrollDelta > 0 -> layoutManager.findLastVisibleItemPosition().takeIf { it >= 0 }
+                                             else -> rv.findChildViewUnder(x, y)?.let(rv::getChildAdapterPosition)?.takeIf { it >= 0 }
+                                         }
+                                     }
+
+                                     private fun abortDrag(rv: RecyclerView) {
+                                         stopAutoScroll(rv)
+                                         dragState.isDragging = false
+                                         dragState.dragStartIdx = -1
+                                         isDragInProgress = false
+                                     }
+
+                                     private fun applyDragSelection(rv: RecyclerView, requestedPosition: Int) {
+                                         val adapter = rv.adapter as? SimpleGridAdapter ?: return
+                                         val items = adapter.items
+                                         if (items.isEmpty()) return
+                                         if (dragState.dragStartVersion != adapter.dataVersion) {
+                                             val reFound = adapter.indexOfUri(dragState.dragStartUri)
+                                             if (reFound < 0) {
+                                                 abortDrag(rv)
+                                                 return
+                                             }
+                                             dragState.dragStartIdx = reFound
+                                             dragState.dragStartVersion = adapter.dataVersion
+                                             val currentUris = items.asSequence().map { it.uri.toString() }.toSet()
+                                             dragState.baseSelection = dragState.baseSelection.intersect(currentUris)
+                                         }
+
+                                         val position = requestedPosition.coerceIn(0, items.lastIndex)
+                                         val minIndex = minOf(dragState.dragStartIdx, position)
+                                         val maxIndex = maxOf(dragState.dragStartIdx, position)
+                                         val rangeUris = (minIndex..maxIndex).mapTo(LinkedHashSet<String>()) { index ->
+                                             items[index].uri.toString()
+                                         }
+                                         val displaySelection = if (dragState.selecting) {
+                                             dragState.baseSelection + rangeUris
+                                         } else {
+                                             dragState.baseSelection - rangeUris
+                                         }
+                                         adapter.updateSelection(displaySelection)
+                                     }
+
+                                     override fun onInterceptTouchEvent(rv: RecyclerView, e: MotionEvent): Boolean {
+                                         when (e.actionMasked) {
+                                             MotionEvent.ACTION_DOWN -> {
+                                                 stopAutoScroll(rv)
                                                 dragState.isDragging = false
                                                 dragState.dragStartIdx = -1
                                                 dragState.longPressConsumed = false
@@ -443,26 +535,26 @@ fun MediaGridScreen(
                                                     val child = rv.findChildViewUnder(downX, downY) ?: return@postDelayed
                                                     val pos = rv.getChildAdapterPosition(child)
                                                     if (pos < 0) return@postDelayed
+                                                    val currentAdapter = rv.adapter as? SimpleGridAdapter ?: return@postDelayed
+                                                    val item = currentAdapter.items.getOrNull(pos) ?: return@postDelayed
+                                                    val uri = item.uri.toString()
                                                     dragState.dragStartIdx = pos
+                                                    dragState.dragStartUri = uri
+                                                    dragState.dragStartVersion = currentAdapter.dataVersion
+                                                    dragState.baseSelection = selectedMediaUris
+                                                        .intersect(currentAdapter.items.asSequence().map { it.uri.toString() }.toSet())
+                                                    dragState.selecting = uri !in dragState.baseSelection
                                                     dragState.isDragging = true
-                                                    val item = tagFilteredItems.getOrNull(pos) ?: return@postDelayed
-                                                    dragState.dragStartUri = item.uri.toString()
-                                                    dragState.dragStartVersion = mediaDatasetVersion
-                                                    dragState.notifyMin = -1
-                                                    dragState.notifyMax = -1
                                                     dragState.longPressConsumed = true
-                                                    if (!isMediaMultiSelect) {
-                                                        isMediaMultiSelect = true
-                                                        committedSelection = emptySet()
-                                                        toggleMediaSelection(item)
+                                                    val initialSelection = if (dragState.selecting) {
+                                                        dragState.baseSelection + uri
                                                     } else {
-                                                        // 已有多选：确保长按的 item 被选中，但不覆盖已有选择
-                                                        val uri = item.uri.toString()
-                                                        if (uri !in selectedMediaUris) {
-                                                            selectedMediaUris = selectedMediaUris + uri
-                                                            committedSelection = committedSelection + uri
-                                                        }
+                                                        dragState.baseSelection - uri
                                                     }
+                                                    currentAdapter.updateSelection(initialSelection)
+                                                    isMediaMultiSelect = true
+                                                    selectedMediaUris = initialSelection
+                                                    committedSelection = initialSelection
                                                     isDragInProgress = true
                                                 }, longPressMs)
                                                 return false
@@ -475,9 +567,10 @@ fun MediaGridScreen(
                                                 if (dragState.isDragging) return true
                                                 return false
                                             }
-                                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                handler.removeCallbacksAndMessages(null)
-                                                val consumed = dragState.longPressConsumed
+                                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                 handler.removeCallbacksAndMessages(null)
+                                                 stopAutoScroll(rv)
+                                                 val consumed = dragState.longPressConsumed
                                                 if (dragState.isDragging) {
                                                     // 长按后未拖拽就松手：清除拖拽状态（选中已由 toggle 处理）
                                                     dragState.isDragging = false
@@ -492,81 +585,29 @@ fun MediaGridScreen(
                                         return false
                                     }
 
-                                    override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
-                                        if (!dragState.isDragging) return
-                                        when (e.actionMasked) {
-                                            MotionEvent.ACTION_MOVE -> {
-                                                var pos: Int
-                                                // 自动滚动：先于 findChildViewUnder 判断，确保边缘滚动生效
-                                                val edgeThreshold = 80f
-                                                val scrollSpeed = 60
-                                                if (e.y < edgeThreshold) {
-                                                    rv.scrollBy(0, -scrollSpeed)
-                                                    val firstVisible = (rv.layoutManager as? androidx.recyclerview.widget.GridLayoutManager)
-                                                        ?.findFirstVisibleItemPosition() ?: return
-                                                    pos = (firstVisible - 1).coerceAtLeast(0)
-                                                } else if (e.y > rv.height - edgeThreshold) {
-                                                    rv.scrollBy(0, scrollSpeed)
-                                                    val lastVisible = (rv.layoutManager as? androidx.recyclerview.widget.GridLayoutManager)
-                                                        ?.findLastVisibleItemPosition() ?: return
-                                                    pos = (lastVisible + 1).coerceAtMost(tagFilteredItems.size - 1)
-                                                } else {
-                                                    val child = rv.findChildViewUnder(e.x, e.y) ?: return
-                                                    pos = rv.getChildAdapterPosition(child)
-                                                    if (pos < 0) return
-                                                }
-                                                val currentAdapter = rv.adapter as? SimpleGridAdapter ?: return
-                                                val items = currentAdapter.items
-                                                // ── 版本变化时用 URI 重新定位起点，防列表刷新后 position 漂移 ──
-                                                if (dragState.dragStartVersion != mediaDatasetVersion) {
-                                                    val reFound = items.indexOfFirst { it.uri.toString() == dragState.dragStartUri }
-                                                    if (reFound >= 0) {
-                                                        dragState.dragStartIdx = reFound
-                                                        dragState.dragStartVersion = mediaDatasetVersion
-                                                    } else {
-                                                        // 起点项已不在列表中（被 MOVE/删除），中止本次拖拽
-                                                        dragState.isDragging = false
-                                                        dragState.dragStartIdx = -1
-                                                        isDragInProgress = false
-                                                        return
-                                                    }
-                                                }
-                                                // 按方向计算显示选中集
-                                                val displayUris: Set<String>
-                                                if (pos >= dragState.dragStartIdx) {
-                                                    // 正向：选中 [dragStart, pos]
-                                                    val selectUris = (dragState.dragStartIdx..pos).mapNotNull { i ->
-                                                        items.getOrNull(i)?.uri?.toString()
-                                                    }.toSet()
-                                                    displayUris = committedSelection + selectUris
-                                                } else {
-                                                    // 反向：取消选中 [pos, dragStart]（含 dragStart 本身）
-                                                    val deselectUris = (pos .. dragState.dragStartIdx).mapNotNull { i ->
-                                                        items.getOrNull(i)?.uri?.toString()
-                                                    }.toSet()
-                                                    displayUris = committedSelection - deselectUris
-                                                }
-                                                // 通知范围 = 本次拖拽覆盖过的全部范围
-                                                val curMin = minOf(dragState.dragStartIdx, pos)
-                                                val curMax = maxOf(dragState.dragStartIdx, pos)
-                                                dragState.notifyMin = if (dragState.notifyMin < 0) curMin else minOf(dragState.notifyMin, curMin)
-                                                dragState.notifyMax = if (dragState.notifyMax < 0) curMax else maxOf(dragState.notifyMax, curMax)
-                                                currentAdapter.selectedUris = displayUris
-                                                currentAdapter.notifyItemRangeChanged(dragState.notifyMin, dragState.notifyMax - dragState.notifyMin + 1)
-                                            }
-                                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                                // 提交本次拖拽结果：读取 adapter 当前选中集
-                                                val currentAdapter = rv.adapter as? SimpleGridAdapter
-                                                if (currentAdapter != null) {
+                                     override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
+                                         if (!dragState.isDragging) return
+                                         when (e.actionMasked) {
+                                             MotionEvent.ACTION_MOVE -> {
+                                                 lastTouchX = e.x
+                                                 lastTouchY = e.y
+                                                 updateAutoScroll(rv, e.y)
+                                                 resolveDragPosition(rv, e.x, e.y)?.let {
+                                                     applyDragSelection(rv, it)
+                                                 }
+                                             }
+                                             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                                 stopAutoScroll(rv)
+                                                 // 提交本次拖拽结果：读取 adapter 当前选中集
+                                                 val currentAdapter = rv.adapter as? SimpleGridAdapter
+                                                 if (currentAdapter != null) {
                                                     committedSelection = currentAdapter.selectedUris
                                                 }
-                                                selectedMediaUris = committedSelection
-                                                dragState.isDragging = false
-                                                dragState.dragStartIdx = -1
-                                                dragState.notifyMin = -1
-                                                dragState.notifyMax = -1
-                                                isDragInProgress = false
-                                            }
+                                                 selectedMediaUris = committedSelection
+                                                 dragState.isDragging = false
+                                                 dragState.dragStartIdx = -1
+                                                 isDragInProgress = false
+                                             }
                                         }
                                     }
                                 })
@@ -625,10 +666,12 @@ fun MediaGridScreen(
                                     })
                                 } else null
 
-                                adapter.items = tagFilteredItems
+                                adapter.replaceItems(tagFilteredItems)
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
-                                adapter.selectedUris = selectedMediaUris
+                                if (!isDragInProgress) {
+                                    adapter.selectedUris = selectedMediaUris
+                                }
                                 adapter.isMultiSelectMode = isMediaMultiSelect
                                 if (modeChanged) {
                                     adapter.currentMode = currentMode
@@ -666,7 +709,7 @@ fun MediaGridScreen(
                                     }
                                 }
                                 // ── 列表刷新后对齐多选状态：清除已不存在的 URI ──
-                                if (isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
+                                if (!isDragInProgress && isMediaMultiSelect && selectedMediaUris.isNotEmpty()) {
                                     val currentUris = tagFilteredItems.map { it.uri.toString() }.toSet()
                                     val staleUris = selectedMediaUris - currentUris
                                     if (staleUris.isNotEmpty()) {
@@ -1220,6 +1263,7 @@ private const val LIST_THUMB_SIZE_DP = 48
 
 private const val VIEW_TYPE_GRID = 0
 private const val VIEW_TYPE_LIST = 1
+private const val PAYLOAD_SELECTION = "selection"
 
 /** 星标缩放因子：根据 Grid 列数调整，列数越多星标越小 */
 private fun getMediaStarScale(columns: Int): Float = when (columns) {
@@ -1250,10 +1294,44 @@ private class SimpleGridAdapter(
     var mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()
     var selectedUris: Set<String> = emptySet()
     var isMultiSelectMode: Boolean = false
+    var dataVersion: Int = 0
+        private set
+    private var uriToIndex: Map<String, Int> = emptyMap()
 
     init { setHasStableIds(true) }
 
     override fun getItemCount() = items.size
+
+    fun replaceItems(newItems: List<com.example.rcgallery.model.MediaItem>) {
+        if (items === newItems) return
+        items = newItems
+        uriToIndex = newItems.mapIndexed { index, item -> item.uri.toString() to index }.toMap()
+        dataVersion++
+    }
+
+    fun indexOfUri(uri: String): Int = uriToIndex[uri] ?: -1
+
+    fun updateSelection(newSelection: Set<String>) {
+        if (selectedUris == newSelection) return
+        val changedIndices = ((selectedUris - newSelection) + (newSelection - selectedUris))
+            .mapNotNull { uriToIndex[it] }
+            .sorted()
+        selectedUris = newSelection
+        if (changedIndices.isEmpty()) return
+
+        var rangeStart = changedIndices.first()
+        var previous = rangeStart
+        for (index in changedIndices.drop(1)) {
+            if (index == previous + 1) {
+                previous = index
+            } else {
+                notifyItemRangeChanged(rangeStart, previous - rangeStart + 1, PAYLOAD_SELECTION)
+                rangeStart = index
+                previous = index
+            }
+        }
+        notifyItemRangeChanged(rangeStart, previous - rangeStart + 1, PAYLOAD_SELECTION)
+    }
 
     override fun getItemId(position: Int): Long = items.getOrNull(position)?.id ?: 0L
 
@@ -1279,6 +1357,27 @@ private class SimpleGridAdapter(
             is GridVH -> holder.bind(item, position, starredUris, selectedUris, columns, isMultiSelectMode)
             is ListVH -> holder.bind(item, position, starredUris, mediaTagsMap, selectedUris, isMultiSelectMode)
         }
+    }
+
+    override fun onBindViewHolder(
+        holder: RecyclerView.ViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        if (payloads.contains(PAYLOAD_SELECTION)) {
+            val item = items.getOrNull(position) ?: return
+            val selected = item.uri.toString() in selectedUris
+            val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
+            when (holder) {
+                is GridVH -> {
+                    val columns = (currentMode as? MediaDisplayMode.Grid)?.columns ?: 1
+                    holder.bindSelection(selected, inMultiSelect, columns)
+                }
+                is ListVH -> holder.bindSelection(selected, inMultiSelect)
+            }
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
     }
 
     // ── Grid ViewHolder ──
@@ -1448,10 +1547,14 @@ private class SimpleGridAdapter(
                 tv.visibility = android.view.View.VISIBLE
             } else { tv.visibility = android.view.View.GONE }
             updateStarSize(columns)
-            val hideStar = columns == 4 || columns == 5
             // 多选模式（含 0 已选但模式开启中）：隐藏星标，显示对号
             val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
+            bindSelection(isSelected, inMultiSelect, columns)
+        }
+
+        fun bindSelection(isSelected: Boolean, inMultiSelect: Boolean, columns: Int) {
+            val hideStar = columns == 4 || columns == 5
             starContainer.visibility = if (inMultiSelect || hideStar) android.view.View.GONE else android.view.View.VISIBLE
             starContainer.isClickable = !hideStar
             starContainer.isEnabled = !hideStar
@@ -1729,18 +1832,7 @@ private class SimpleGridAdapter(
             // 多选模式（含 0 已选但模式开启中）：隐藏星标
             val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
-            if (inMultiSelect) {
-                selectedOverlay.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
-                checkmarkContainer.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
-                itemView.setBackgroundColor(
-                    if (isSelected) android.graphics.Color.argb(30, 68, 138, 255)
-                    else android.graphics.Color.TRANSPARENT
-                )
-            } else {
-                selectedOverlay.visibility = android.view.View.GONE
-                checkmarkContainer.visibility = android.view.View.GONE
-                itemView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            }
+            bindSelection(isSelected, inMultiSelect)
             if (previousUri != item.uri || iv.drawable == null) {
                 iv.load(item.uri) { crossfade(false) }
             }
@@ -1775,6 +1867,22 @@ private class SimpleGridAdapter(
                 tagChips[i].visibility = android.view.View.GONE
             }
             tagRow.visibility = android.view.View.VISIBLE
+        }
+
+        fun bindSelection(isSelected: Boolean, inMultiSelect: Boolean) {
+            if (inMultiSelect) {
+                selectedOverlay.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                checkmarkContainer.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+                itemView.setBackgroundColor(
+                    if (isSelected) android.graphics.Color.argb(30, 68, 138, 255)
+                    else android.graphics.Color.TRANSPARENT
+                )
+            } else {
+                selectedOverlay.visibility = android.view.View.GONE
+                checkmarkContainer.visibility = android.view.View.GONE
+                itemView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            }
+
         }
     }
 }
