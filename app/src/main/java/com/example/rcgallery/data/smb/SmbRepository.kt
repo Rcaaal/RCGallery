@@ -61,7 +61,7 @@ class SmbRepository {
         }
 
         val IMAGE_EXTS = listOf(".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp")
-        val VIDEO_EXTS = listOf(".mp4", ".mkv", ".avi", ".mov", ".wmv", ".asf", ".flv", ".3gp", ".webm")
+        val VIDEO_EXTS = listOf(".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".3gp", ".webm")
 
         /** 单次 readBytes 最大读取字节数（50MB，防止 OOM） */
         private const val MAX_READ_BYTES = 50L * 1024 * 1024

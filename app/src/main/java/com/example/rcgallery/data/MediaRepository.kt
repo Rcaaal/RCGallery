@@ -309,8 +309,6 @@ class MediaRepository(private val context: Context) {
             "webm" -> "video/webm"
             "avi" -> "video/x-msvideo"
             "mov" -> "video/quicktime"
-            "wmv" -> "video/x-ms-wmv"
-            "asf" -> "video/x-ms-asf"
             else -> null
         }
     }

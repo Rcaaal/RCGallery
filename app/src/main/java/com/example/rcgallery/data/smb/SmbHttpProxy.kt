@@ -228,7 +228,7 @@ class SmbProxyService : Service() {
             if (parts.size < 2) return
             val method = parts[0]
             val path = parts[1]
-            if (method != "GET" && method != "HEAD") {
+            if (method != "GET") {
                 sendResponse(output, 405, "Method Not Allowed")
                 return
             }
@@ -266,7 +266,6 @@ class SmbProxyService : Service() {
 
             // ── seek 到目标位置（RAF 原生 <5ms）──
             val file = entry.smbFile
-            synchronized(file) {
             try { file.seek(position) } catch (e: Exception) {
                 AppLogger.e(TAG, "seek failed pos=$position", e)
                 sendResponse(output, 500, "Seek Error")
@@ -275,13 +274,8 @@ class SmbProxyService : Service() {
 
             // ── 返回 206 Partial Content（不限制每次响应大小，ExoPlayer 自行控制）──
             val contentLen = remaining
-            val contentType = when {
-                entry.url.endsWith(".wmv", ignoreCase = true) -> "video/x-ms-wmv"
-                entry.url.endsWith(".asf", ignoreCase = true) -> "video/x-ms-asf"
-                else -> "application/octet-stream"
-            }
             val respBytes = ("HTTP/1.1 206 Partial Content\r\n" +
-                    "Content-Type: $contentType\r\n" +
+                    "Content-Type: video/mp4\r\n" +
                     "Content-Length: $contentLen\r\n" +
                     "Content-Range: bytes $position-${position + contentLen - 1}/$fileLen\r\n" +
                     "Accept-Ranges: bytes\r\n" +
@@ -291,7 +285,6 @@ class SmbProxyService : Service() {
             try {
                 output.write(respBytes)
                 output.flush()
-                if (method == "HEAD") return
                 val buf = ByteArray(256 * 1024)
                 var remainingRead = contentLen
                 while (remainingRead > 0) {
@@ -305,7 +298,6 @@ class SmbProxyService : Service() {
             } catch (e: Exception) {
                 // 客户端提前关闭（seek 后播放器拿到数据会关闭连接）
                 AppLogger.d(TAG, "client closed: ${e.message}")
-            }
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "handle error", e)
