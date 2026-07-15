@@ -3,6 +3,7 @@ package com.example.rcgallery.viewmodel
 import android.net.Uri
 import android.app.Application
 import android.media.MediaScannerConnection
+import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.MediaRepository
@@ -21,6 +22,7 @@ import com.example.rcgallery.data.smb.SmbFileOperationRecord
 import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.data.db.TargetResult
+import com.example.rcgallery.data.db.SystemAlbumRuleEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
@@ -273,6 +275,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val parentAlbumDao = AppDatabase.getInstance(getApplication()).parentAlbumDao()
     private val parentSharedTagDao = AppDatabase.getInstance(getApplication()).parentSharedTagDao()
+    private val systemAlbumRuleDao = AppDatabase.getInstance(getApplication()).systemAlbumRuleDao()
+
+    private val _systemHiddenAlbumPaths = MutableStateFlow<Set<String>>(emptySet())
+    val systemHiddenAlbumPaths: StateFlow<Set<String>> = _systemHiddenAlbumPaths.asStateFlow()
+    @Volatile private var normalizedSystemHiddenAlbumPaths: Set<String> = emptySet()
 
     /** 所有父级实体 */
     private val _parentEntities = MutableStateFlow<List<ParentAlbumEntity>>(emptyList())
@@ -408,8 +415,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 // 同步到子级 album/media
                 for (child in childAlbums) {
                     tagRepository.addTagToTarget(tag.id, tagRepository.albumKey(child.directoryPath), TagRepository.TYPE_ALBUM)
-                    val items = repository.loadMediaItems(albumId = child.bucketId, pageSize = 10000)
-                        .getOrDefault(emptyList())
+                    val items = loadItemsForAlbum(child)
                     items.forEach { item ->
                         if (item.filePath.isNotEmpty()) {
                             tagRepository.addTagToTarget(tag.id, tagRepository.mediaKey(item.filePath), TagRepository.TYPE_MEDIA)
@@ -488,6 +494,84 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _ignoredFolderPaths = MutableStateFlow<Set<String>>(emptySet())
     val ignoredFolderPaths: StateFlow<Set<String>> = _ignoredFolderPaths.asStateFlow()
 
+    fun isSystemHiddenAlbum(directoryPath: String): Boolean =
+        normalizedPath(directoryPath) in normalizedSystemHiddenAlbumPaths
+
+    /**
+     * Toggle the reserved album TAG. The TAG is synthetic; .nomedia is the actual OS-level marker.
+     * RCGallery keeps the folder visible through MediaRepository's direct-file fallback.
+     */
+    fun setSystemGalleryHidden(
+        directoryPath: String,
+        hidden: Boolean,
+        onResult: (Result<Unit>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    check(Environment.isExternalStorageManager()) {
+                        "需要授予所有文件访问权限"
+                    }
+                    val directory = File(directoryPath)
+                    check(directory.isDirectory) { "相册目录不存在" }
+                    val canonicalDirectory = directory.canonicalFile
+                    val canonicalPath = canonicalDirectory.path
+                    val marker = File(canonicalDirectory, MediaStore.MEDIA_IGNORE_FILENAME)
+
+                    if (hidden) {
+                        val markerExisted = marker.exists()
+                        if (!markerExisted) {
+                            check(marker.createNewFile()) { "无法创建 .nomedia" }
+                        }
+                        systemAlbumRuleDao.upsert(
+                            SystemAlbumRuleEntity(
+                                directoryPath = canonicalPath,
+                                markerOwnedByApp = !markerExisted
+                            )
+                        )
+                        requestDirectoryRescan(canonicalDirectory, includeMarker = true)
+                    } else {
+                        val rule = systemAlbumRuleDao.getByPath(canonicalPath)
+                        if (rule?.markerOwnedByApp == false && marker.exists()) {
+                            error(".nomedia 不是由 RCGallery 创建，无法安全删除")
+                        }
+                        if (rule?.markerOwnedByApp == true && marker.exists()) {
+                            check(marker.delete()) { "无法删除 .nomedia" }
+                        }
+                        systemAlbumRuleDao.deleteByPath(canonicalPath)
+                        requestDirectoryRescan(canonicalDirectory, includeMarker = false)
+                    }
+                }
+            }
+            result.onFailure { AppLogger.e("SystemTag", "toggle failed path=$directoryPath hidden=$hidden", it) }
+            onResult(result)
+        }
+    }
+
+    private fun requestDirectoryRescan(directory: File, includeMarker: Boolean) {
+        val paths = buildList {
+            if (includeMarker) add(File(directory, MediaStore.MEDIA_IGNORE_FILENAME).absolutePath)
+            directory.listFiles().orEmpty()
+                .filter { it.isFile && !it.name.startsWith(".") }
+                .forEach { add(it.absolutePath) }
+        }
+        if (paths.isNotEmpty()) {
+            MediaScannerConnection.scanFile(getApplication(), paths.toTypedArray(), null, null)
+        }
+    }
+
+    private fun normalizedPath(path: String): String =
+        runCatching { File(path).canonicalPath.lowercase() }
+            .getOrElse { path.replace('\\', '/').trimEnd('/').lowercase() }
+
+    private fun loadItemsForAlbum(album: Album): List<MediaItem> =
+        if (isSystemHiddenAlbum(album.directoryPath)) {
+            repository.loadMediaItemsFromDirectory(album.directoryPath).getOrDefault(emptyList())
+        } else {
+            repository.loadMediaItems(albumId = album.bucketId, pageSize = 10000)
+                .getOrDefault(emptyList())
+        }
+
     init {
         // 从 SharedPreferences 恢复星标状态
         _starredBucketIds.value = loadStarredIds()
@@ -505,6 +589,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         loadPersistentRules()
         loadIgnoredFolderPaths()
         loadRecentAccessTimestamps()
+        viewModelScope.launch {
+            systemAlbumRuleDao.getAllFlow().collect { rules ->
+                _systemHiddenAlbumPaths.value = rules.mapTo(linkedSetOf()) { it.directoryPath }
+                normalizedSystemHiddenAlbumPaths = rules.mapTo(HashSet()) {
+                    normalizedPath(it.directoryPath)
+                }
+                loadAlbums()
+                refreshAllMediaIfActive()
+            }
+        }
         viewModelScope.launch {
             observer.observeMediaChanges()
                 .debounce(500)
@@ -524,11 +618,22 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         albumsLoadJob = viewModelScope.launch {
             try {
                 albumsLoadMutex.withLock {
-                    val (result, trashList) = withContext(Dispatchers.IO) {
-                        repository.loadAlbums() to trashManager.getAll()
+                    val (result, trashList, hiddenAlbums) = withContext(Dispatchers.IO) {
+                        Triple(
+                            repository.loadAlbums(),
+                            trashManager.getAll(),
+                            repository.loadFileSystemAlbums(_systemHiddenAlbumPaths.value)
+                                .getOrDefault(emptyList())
+                        )
                     }
                     if (generation != albumsLoadGeneration.get()) return@withLock
-                    result.onSuccess { albums ->
+                    result.onSuccess { mediaStoreAlbums ->
+                    val mediaStorePaths = mediaStoreAlbums.mapTo(HashSet()) {
+                        normalizedPath(it.directoryPath)
+                    }
+                    val albums = mediaStoreAlbums + hiddenAlbums.filter {
+                        normalizedPath(it.directoryPath) !in mediaStorePaths
+                    }
                     // 从各相册计数中减去已回收的文件数
                     val trashByAlbum = trashList
                         .filter { it.originalAlbumId != null }
@@ -582,13 +687,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         allMediaLoadJob = viewModelScope.launch {
             allMediaLoadMutex.withLock {
                 var loaded = withContext(Dispatchers.IO) {
-                    repository.loadMediaItems(albumId = null, pageSize = 10000)
-                }.getOrDefault(emptyList())
-                if (generation != allMediaLoadGeneration.get()) return@withLock
-                val trashedUris = withContext(Dispatchers.IO) {
-                    trashManager.getAll().map { entry -> entry.uri }.toSet()
+                    val mediaStoreItems = repository.loadMediaItems(albumId = null, pageSize = 10000)
+                        .getOrDefault(emptyList())
+                    val hiddenItems = _systemHiddenAlbumPaths.value.flatMap { path ->
+                        repository.loadMediaItemsFromDirectory(path).getOrDefault(emptyList())
+                    }
+                    (mediaStoreItems + hiddenItems).distinctBy { normalizedPath(it.filePath) }
                 }
-                loaded = loaded.filter { it.uri.toString() !in trashedUris }
+                if (generation != allMediaLoadGeneration.get()) return@withLock
+                val trashEntries = withContext(Dispatchers.IO) { trashManager.getAll() }
+                val trashedUris = trashEntries.mapTo(HashSet()) { it.uri }
+                val trashedPaths = trashEntries.mapTo(HashSet()) { normalizedPath(it.filePath) }
+                loaded = loaded.filter {
+                    it.uri.toString() !in trashedUris && normalizedPath(it.filePath) !in trashedPaths
+                }
                 val ignoredDirs = _ignoredFolderPaths.value
                 if (ignoredDirs.isNotEmpty()) {
                     loaded = loaded.filterNot { item ->
@@ -622,7 +734,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
         loadMediaJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                repository.loadMediaItems(albumId = albumId, pageSize = 10000)
+                val albumPath = _albums.value.firstOrNull { it.bucketId == albumId }?.directoryPath
+                if (albumPath != null && isSystemHiddenAlbum(albumPath)) {
+                    repository.loadMediaItemsFromDirectory(albumPath)
+                } else {
+                    repository.loadMediaItems(albumId = albumId, pageSize = 10000)
+                }
             }
             result
                 .onSuccess {
@@ -630,8 +747,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     AppLogger.d("VM", "loadMedia OK albumId=[$albumId] items=${it.size} pendingMatch=$match")
                     if (match) {
                         // 过滤已回收文件
-                        val trashedUris = trashManager.getAll().map { entry -> entry.uri }.toSet()
-                        val filtered = it.filter { item -> item.uri.toString() !in trashedUris }
+                        val trashEntries = trashManager.getAll()
+                        val trashedUris = trashEntries.mapTo(HashSet()) { entry -> entry.uri }
+                        val trashedPaths = trashEntries.mapTo(HashSet()) { entry -> normalizedPath(entry.filePath) }
+                        val filtered = it.filter { item ->
+                            item.uri.toString() !in trashedUris && normalizedPath(item.filePath) !in trashedPaths
+                        }
                         // 过滤已忽略文件夹中的文件
                         val ignoredDirs = _ignoredFolderPaths.value
                         val finalFiltered = if (ignoredDirs.isNotEmpty()) {
@@ -1213,7 +1334,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             tagRepository.addTagToTarget(tag.id, tagRepository.albumKey(directoryPath), TagRepository.TYPE_ALBUM)
             // 同时赋予相册内所有文件
             val album = _albums.value.find { it.directoryPath == directoryPath } ?: return@launch
-            val items = repository.loadMediaItems(albumId = album.bucketId, pageSize = 10000).getOrDefault(emptyList())
+            val items = loadItemsForAlbum(album)
             items.forEach { item ->
                 if (item.filePath.isNotEmpty()) {
                     tagRepository.addTagToTarget(tag.id, tagRepository.mediaKey(item.filePath), TagRepository.TYPE_MEDIA)
@@ -1228,7 +1349,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             tagRepository.removeTagFromTarget(tagId, tagRepository.albumKey(directoryPath))
             // 同时清理相册内所有文件的此TAG
             val album = _albums.value.find { it.directoryPath == directoryPath } ?: return@launch
-            val items = repository.loadMediaItems(albumId = album.bucketId, pageSize = 10000).getOrDefault(emptyList())
+            val items = loadItemsForAlbum(album)
             items.forEach { item ->
                 if (item.filePath.isNotEmpty()) {
                     tagRepository.removeTagFromTarget(tagId, tagRepository.mediaKey(item.filePath))
@@ -1380,10 +1501,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val albumTagIds = tagRepository.getTagIdsForTarget(albumKey)
         if (albumTagIds.isEmpty()) return
         val album = _albums.value.find { it.directoryPath == albumDir } ?: return
-        val items = withContext(Dispatchers.IO) {
-            repository.loadMediaItems(albumId = album.bucketId, pageSize = 10000)
-                .getOrDefault(emptyList())
-        }
+        val items = withContext(Dispatchers.IO) { loadItemsForAlbum(album) }
         for (item in items) {
             if (item.filePath.isEmpty()) continue
             val mediaKey = tagRepository.mediaKey(item.filePath)

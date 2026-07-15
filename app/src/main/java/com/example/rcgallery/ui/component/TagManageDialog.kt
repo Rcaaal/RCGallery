@@ -33,6 +33,8 @@ fun TagManageDialog(
     allTags: List<TagEntity>,
     recentTags: List<TagEntity> = emptyList(),
     readOnlyTagIds: Set<Long> = emptySet(),
+    systemGalleryHidden: Boolean? = null,
+    onSystemGalleryHiddenChange: ((Boolean) -> Unit)? = null,
     onAddTag: (String) -> Unit,
     onRemoveTag: (Long) -> Unit,
     onDismiss: () -> Unit
@@ -51,6 +53,40 @@ fun TagManageDialog(
         title = { Text(title, fontSize = 16.sp) },
         text = {
             Column(modifier = Modifier.heightIn(max = 400.dp)) {
+                if (systemGalleryHidden != null && onSystemGalleryHiddenChange != null) {
+                    Text(
+                        "系统标签",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (systemGalleryHidden) MaterialTheme.colorScheme.tertiaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("不在手机原生相册显示", fontSize = 13.sp)
+                                Text(
+                                    "RCGallery 内仍正常显示",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = systemGalleryHidden,
+                                onCheckedChange = onSystemGalleryHiddenChange
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+
                 // ── 输入框 ──
                 OutlinedTextField(
                     value = searchQuery,

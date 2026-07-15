@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class],
-    version = 4,
+    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class],
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -18,6 +18,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun viewHistoryDao(): ViewHistoryDao
     abstract fun parentAlbumDao(): ParentAlbumDao
     abstract fun parentSharedTagDao(): ParentSharedTagDao
+    abstract fun systemAlbumRuleDao(): SystemAlbumRuleDao
 
     companion object {
         @Volatile
@@ -82,6 +83,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `system_album_rules` (
+                        `directoryPath` TEXT NOT NULL,
+                        `markerOwnedByApp` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`directoryPath`)
+                    )
+                """)
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -89,7 +103,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "rcgallery_tags.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

@@ -159,6 +159,7 @@ fun AlbumGridScreen(
     val starredIds by viewModel.starredBucketIds.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
+    val systemHiddenAlbumPaths by viewModel.systemHiddenAlbumPaths.collectAsStateWithLifecycle()
     val persistentRules by viewModel.persistentRules.collectAsStateWithLifecycle()
     val recentAccessMap by viewModel.recentAccessMap.collectAsStateWithLifecycle()
     val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
@@ -568,6 +569,7 @@ fun AlbumGridScreen(
                     albums = displayAlbums,
                     starredIds = starredIds,
                     albumTags = albumTags,
+                    systemHiddenAlbumPaths = systemHiddenAlbumPaths,
                     isSearchActive = isSearchActive,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { searchQuery = it; showSuggestions = true },
@@ -675,6 +677,12 @@ fun AlbumGridScreen(
                         existingTags = existingTags,
                         allTags = allTagsList,
                         recentTags = recentTagList,
+                        systemGalleryHidden = systemHiddenAlbumPaths.any {
+                            it.equals(currentTagAlbum.directoryPath, ignoreCase = true)
+                        },
+                        onSystemGalleryHiddenChange = { hidden ->
+                            viewModel.setSystemGalleryHidden(currentTagAlbum.directoryPath, hidden)
+                        },
                         onAddTag = { name -> viewModel.addAlbumTag(currentTagAlbum.directoryPath, name) },
                         onRemoveTag = { tagId -> viewModel.removeAlbumTag(currentTagAlbum.directoryPath, tagId) },
                         onDismiss = { tagDialogAlbum = null }
@@ -934,6 +942,7 @@ private fun AlbumGridContent(
     onManageAlbumTags: (Album) -> Unit = {},
     albumRvRef: MutableState<RecyclerView?>,
     albumTags: Map<String, List<TagEntity>> = emptyMap(),
+    systemHiddenAlbumPaths: Set<String> = emptySet(),
     allTags: List<TagEntity> = emptyList(),
     onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
     onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
@@ -1694,6 +1703,7 @@ private fun AlbumGridContent(
                     adapter.albumMap = albums.associateBy { it.bucketId }
                     adapter.starredIds = starredIds
                     adapter.albumTagsMap = albumTags
+                    adapter.systemHiddenAlbumPaths = systemHiddenAlbumPaths
                     adapter.selectedIds = selectedAlbumIds
                     adapter.parentBadgeMap = parentBadgeMap
                     adapter.parentSharedTagMap = parentSharedTagMap
@@ -1890,6 +1900,7 @@ private class AlbumGridAdapter(
     var currentMode: AlbumDisplayMode = AlbumDisplayMode.Grid(3)
     var starredIds: Set<String> = emptySet()
     var albumTagsMap: Map<String, List<TagEntity>> = emptyMap()
+    var systemHiddenAlbumPaths: Set<String> = emptySet()
     var selectedIds: Set<String> = emptySet()  // 多选模式选中项 bucketId 集合
     var albumMap: Map<String, Album> = emptyMap()  // bucketId → Album 快速查找
 
@@ -1948,7 +1959,7 @@ private class AlbumGridAdapter(
                     if (album != null) holder.bind(album, position, item.parentName)
                 }
                 holder is ListVH && item is Album -> {
-                    holder.bind(item, position, starredIds, albumTagsMap)
+                    holder.bind(item, position, starredIds, albumTagsMap, isSystemHidden(item.directoryPath))
                 }
             }
         } else if (holder is GridVH) {
@@ -1956,9 +1967,12 @@ private class AlbumGridAdapter(
             holder.bind(item, position, starredIds, selectedIds, columns, parentBadgeMap)
         } else if (holder is ListVH) {
             val item = items[position]
-            holder.bind(item, position, starredIds, albumTagsMap)
+            holder.bind(item, position, starredIds, albumTagsMap, isSystemHidden(item.directoryPath))
         }
     }
+
+    private fun isSystemHidden(directoryPath: String): Boolean =
+        systemHiddenAlbumPaths.any { it.equals(directoryPath, ignoreCase = true) }
 
 }
 
@@ -2461,7 +2475,13 @@ private class ListVH private constructor(
         }
     }
 
-    fun bind(item: Album, pos: Int, starredIds: Set<String>, albumTagsMap: Map<String, List<TagEntity>> = emptyMap()) {
+    fun bind(
+        item: Album,
+        pos: Int,
+        starredIds: Set<String>,
+        albumTagsMap: Map<String, List<TagEntity>> = emptyMap(),
+        systemGalleryHidden: Boolean = false
+    ) {
         itemView.tag = item.bucketId
         starContainer.tag = item.bucketId
         val row = (itemView as LinearLayout).getChildAt(0) as LinearLayout
@@ -2489,17 +2509,29 @@ private class ListVH private constructor(
         )
         // ── TAG 行 ──
         val tags = albumTagsMap[item.directoryPath] ?: emptyList()
+        val labels = buildList {
+            if (systemGalleryHidden) add("系统隐藏")
+            addAll(tags.map { it.name })
+        }
         // + 按钮点击
         (tagRow.getChildAt(0) as? TextView)?.setOnClickListener { onManageTags(item) }
 
         // 预建 chip：只改 text 和 visibility，不新建 View
-        tags.forEachIndexed { i, tag ->
+        labels.forEachIndexed { i, label ->
             val chip = tagChips.getOrNull(i) ?: return@forEachIndexed
-            chip.text = tag.name
+            chip.text = label
+            chip.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 6 * itemView.context.resources.displayMetrics.density
+                setColor(
+                    if (systemGalleryHidden && i == 0) android.graphics.Color.argb(210, 230, 145, 45)
+                    else android.graphics.Color.argb(180, 100, 140, 255)
+                )
+            }
             chip.visibility = android.view.View.VISIBLE
         }
         // 隐藏多余的 chip
-        for (i in tags.size until tagChips.size) {
+        for (i in labels.size until tagChips.size) {
             tagChips[i].visibility = android.view.View.GONE
         }
         tagRow.visibility = android.view.View.VISIBLE

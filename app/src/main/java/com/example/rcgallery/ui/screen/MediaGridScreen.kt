@@ -87,6 +87,7 @@ fun MediaGridScreen(
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
+    val systemHiddenAlbumPaths by viewModel.systemHiddenAlbumPaths.collectAsStateWithLifecycle()
     val mediaPersistentRules by viewModel.mediaPersistentRules.collectAsStateWithLifecycle()
     val mediaTempFilter by viewModel.mediaTempFilter.collectAsStateWithLifecycle()
     var showMediaFilterPage by remember { mutableStateOf(false) }
@@ -913,6 +914,12 @@ fun MediaGridScreen(
                     existingTags = currentAlbumTags,
                     allTags = allTags,
                     recentTags = recentTagList,
+                    systemGalleryHidden = systemHiddenAlbumPaths.any {
+                        it.equals(albumDirectoryPath, ignoreCase = true)
+                    },
+                    onSystemGalleryHiddenChange = { hidden ->
+                        viewModel.setSystemGalleryHidden(albumDirectoryPath, hidden)
+                    },
                     onAddTag = { name -> viewModel.addAlbumTag(albumDirectoryPath, name) },
                     onRemoveTag = { tagId -> viewModel.removeAlbumTag(albumDirectoryPath, tagId) },
                     onDismiss = { showAlbumTagDialog = false }

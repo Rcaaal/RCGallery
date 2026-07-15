@@ -4,14 +4,47 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import java.io.File
+import java.util.Locale
 
 /**
  * 媒体仓库 — 封装 MediaStore CRUD 操作。
  */
 class MediaRepository(private val context: Context) {
+
+    /** Build album rows for folders that intentionally no longer exist in MediaStore. */
+    fun loadFileSystemAlbums(directoryPaths: Set<String>): Result<List<Album>> = runCatching {
+        directoryPaths.mapNotNull { path ->
+            val directory = File(path)
+            val items = mediaFiles(directory).map { fileToMediaItem(it, directory) }
+            if (items.isEmpty()) return@mapNotNull null
+            val cover = items.maxByOrNull { it.dateAdded } ?: return@mapNotNull null
+            Album(
+                bucketId = bucketIdForDirectory(directory),
+                bucketName = directory.name,
+                coverUri = cover.uri,
+                count = items.size,
+                totalSize = items.sumOf { it.size },
+                imageCount = items.count { it.isImage && !it.isGif },
+                videoCount = items.count { it.isVideo },
+                gifCount = items.count { it.isGif },
+                directoryPath = canonicalPath(directory),
+                dateAdded = cover.dateAdded
+            )
+        }
+    }
+
+    fun loadMediaItemsFromDirectory(directoryPath: String): Result<List<MediaItem>> = runCatching {
+        val directory = File(directoryPath)
+        mediaFiles(directory)
+            .map { fileToMediaItem(it, directory) }
+            .sortedByDescending { it.dateAdded }
+    }
 
     // ── 相册列表 ──
 
@@ -210,8 +243,81 @@ class MediaRepository(private val context: Context) {
             queryMediaItemsBySelection(MediaProjection.Images, selection, selectionArgs, items)
             queryMediaItemsBySelection(MediaProjection.Videos, selection, selectionArgs, items)
         }
+        // Files under a .nomedia directory are intentionally absent from MediaStore.
+        val foundPaths = items.mapTo(HashSet()) { canonicalPath(File(it.filePath)) }
+        filePaths.forEach { path ->
+            val file = File(path)
+            if (file.isFile && canonicalPath(file) !in foundPaths) {
+                fileToMediaItemOrNull(file)?.let(items::add)
+            }
+        }
         items.sortedByDescending { it.dateAdded }
     }
+
+    private fun mediaFiles(directory: File): List<File> {
+        if (!directory.isDirectory) return emptyList()
+        return directory.listFiles().orEmpty().filter { file ->
+            file.isFile && !file.name.startsWith(".") && resolveMimeType(file) != null
+        }
+    }
+
+    private fun fileToMediaItemOrNull(file: File): MediaItem? {
+        val parent = file.parentFile ?: return null
+        return resolveMimeType(file)?.let { fileToMediaItem(file, parent, it) }
+    }
+
+    private fun fileToMediaItem(file: File, directory: File): MediaItem {
+        val mimeType = resolveMimeType(file)
+            ?: throw IllegalArgumentException("Unsupported media file: ${file.absolutePath}")
+        return fileToMediaItem(file, directory, mimeType)
+    }
+
+    private fun fileToMediaItem(file: File, directory: File, mimeType: String): MediaItem {
+        val path = canonicalPath(file)
+        val directoryPath = canonicalPath(directory)
+        val modifiedSeconds = file.lastModified().coerceAtLeast(0L) / 1000L
+        val externalRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd(File.separatorChar)
+        val relativeDirectory = directoryPath.removePrefix(externalRoot).trimStart(File.separatorChar)
+        return MediaItem(
+            id = path.lowercase(Locale.ROOT).hashCode().toLong(),
+            uri = Uri.fromFile(file),
+            filePath = path,
+            fileName = file.name,
+            mimeType = mimeType,
+            dateAdded = modifiedSeconds,
+            dateModified = modifiedSeconds,
+            size = file.length(),
+            albumId = bucketIdForDirectory(directory),
+            albumName = directory.name,
+            relativePath = if (relativeDirectory.isEmpty()) "" else "$relativeDirectory/"
+        )
+    }
+
+    private fun resolveMimeType(file: File): String? {
+        val extension = file.extension.lowercase(Locale.ROOT)
+        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        if (mime?.startsWith("image/") == true || mime?.startsWith("video/") == true) return mime
+        return when (extension) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "heic", "heif" -> "image/heif"
+            "avif" -> "image/avif"
+            "mp4", "m4v" -> "video/mp4"
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "avi" -> "video/x-msvideo"
+            "mov" -> "video/quicktime"
+            else -> null
+        }
+    }
+
+    private fun bucketIdForDirectory(directory: File): String =
+        canonicalPath(directory).lowercase(Locale.ROOT).hashCode().toString()
+
+    private fun canonicalPath(file: File): String =
+        runCatching { file.canonicalPath }.getOrElse { file.absolutePath }
 
     private fun queryMediaItemsBySelection(
         proj: MediaProjection,
