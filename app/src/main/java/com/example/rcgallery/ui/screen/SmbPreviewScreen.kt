@@ -2,6 +2,7 @@ package com.example.rcgallery.ui.screen
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.content.Intent
 import android.net.Uri
 import android.widget.ImageView
 import android.widget.Toast
@@ -54,6 +55,7 @@ import com.example.rcgallery.PipState
 import com.example.rcgallery.data.smb.SmbDataSource
 import com.example.rcgallery.data.smb.SmbFileInfo
 import com.example.rcgallery.data.smb.SmbRepository
+import com.example.rcgallery.data.smb.SmbProxyService
 import com.example.rcgallery.data.smb.SmbThumbnailLoader
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.ui.component.AutoFocusRenameTextField
@@ -182,18 +184,31 @@ fun SmbPreviewScreen(
             val file = mutableItems.getOrNull(page) ?: return@HorizontalPager
             key(file.path) {
                 if (file.isVideo) {
-                    VideoPlayer(
-                        uri = Uri.parse(file.path),
-                        isActive = page == pagerState.currentPage,
-                        volumeLevel = volumeState.level,
-                        savedPositions = savedPositions,
-                        onToggleMute = { playbackSettingsVM.toggleMute() },
-                        onControllerVisibilityChanged = { controllerVisible = it },
-                        onRequestPip = { pipTriggered = true },
-                        hideUiOverlays = pipOverlayHidden,
-                        dataSourceFactory = SmbDataSource.Factory(),
-                        onMoveToTrash = { showDeleteConfirm = true }
-                    )
+                    if (file.name.isVlcContainer()) {
+                        SmbVlcVideoPlayer(
+                            smbUrl = file.path,
+                            isActive = page == pagerState.currentPage,
+                            volumeLevel = volumeState.level,
+                            savedPositions = savedPositions,
+                            onToggleMute = { playbackSettingsVM.toggleMute() },
+                            onControllerVisibilityChanged = { controllerVisible = it },
+                            hideUiOverlays = pipOverlayHidden,
+                            onMoveToTrash = { showDeleteConfirm = true }
+                        )
+                    } else {
+                        VideoPlayer(
+                            uri = Uri.parse(file.path),
+                            isActive = page == pagerState.currentPage,
+                            volumeLevel = volumeState.level,
+                            savedPositions = savedPositions,
+                            onToggleMute = { playbackSettingsVM.toggleMute() },
+                            onControllerVisibilityChanged = { controllerVisible = it },
+                            onRequestPip = { pipTriggered = true },
+                            hideUiOverlays = pipOverlayHidden,
+                            dataSourceFactory = SmbDataSource.Factory(),
+                            onMoveToTrash = { showDeleteConfirm = true }
+                        )
+                    }
                 } else {
                     SmbZoomableImage(
                         fileInfo = file,
@@ -366,6 +381,69 @@ fun SmbPreviewScreen(
         }
     }
 }
+
+@Composable
+private fun SmbVlcVideoPlayer(
+    smbUrl: String,
+    isActive: Boolean,
+    volumeLevel: Float,
+    savedPositions: MutableMap<Uri, Long>,
+    onToggleMute: () -> Unit,
+    onControllerVisibilityChanged: (Boolean) -> Unit,
+    hideUiOverlays: Boolean,
+    onMoveToTrash: () -> Unit,
+) {
+    val context = LocalContext.current
+    var proxyUri by remember(smbUrl) { mutableStateOf<Uri?>(null) }
+    var proxyTag by remember(smbUrl) { mutableStateOf<String?>(null) }
+    var failed by remember(smbUrl) { mutableStateOf(false) }
+
+    LaunchedEffect(smbUrl) {
+        context.startForegroundService(Intent(context, SmbProxyService::class.java))
+        var attempts = 0
+        while (!SmbProxyService.isRunning && attempts < 50) {
+            delay(100L)
+            attempts++
+        }
+        val url = if (SmbProxyService.isRunning) {
+            withContext(Dispatchers.IO) { SmbProxyService.register(smbUrl) }
+        } else null
+        if (url == null) {
+            failed = true
+        } else {
+            proxyTag = Uri.parse(url).lastPathSegment
+            proxyUri = Uri.parse(url)
+        }
+    }
+
+    DisposableEffect(proxyTag) {
+        val tag = proxyTag
+        onDispose { if (tag != null) SmbProxyService.unregister(tag) }
+    }
+
+    when {
+        failed -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("无法读取 SMB 视频", color = Color.White)
+        }
+        proxyUri == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        else -> VideoPlayer(
+            uri = proxyUri!!,
+            isActive = isActive,
+            useVlc = true,
+            volumeLevel = volumeLevel,
+            savedPositions = savedPositions,
+            onToggleMute = onToggleMute,
+            onControllerVisibilityChanged = onControllerVisibilityChanged,
+            hideUiOverlays = hideUiOverlays,
+            onMoveToTrash = onMoveToTrash
+        )
+    }
+}
+
+private fun String.isVlcContainer(): Boolean =
+    endsWith(".wmv", ignoreCase = true) || endsWith(".asf", ignoreCase = true)
 // ══════════════════════════════════════
 
 private const val THUMB_MAX_PX = 400

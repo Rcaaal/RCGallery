@@ -19,6 +19,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildTypes {
@@ -105,7 +108,8 @@ dependencies {
 
     // Media3 — 视频播放 + PiP MediaSession + SMB 缓存
     implementation(libs.media3.exoplayer)
-    implementation(libs.media3.ffmpeg.decoder)  // AV1 + WMV (Jellyfin FFmpeg 软解)
+    implementation(libs.libvlc) // ASF/WMV container support
+    implementation(libs.media3.ffmpeg.decoder)  // Media3 FFmpeg audio extensions
     implementation(libs.media3.ui)
     implementation(libs.media3.session)
     // media3-datasource 包含 SimpleCache/CacheDataSource 等缓存类

@@ -70,6 +70,7 @@ private val speedOptions = listOf(2f, 3f, 4f, 5f, 10f)
 fun VideoPlayer(
     uri: Uri,
     isActive: Boolean,
+    useVlc: Boolean = false,
     volumeLevel: Float = 1f,
     onToggleMute: () -> Unit = {},
     savedPositions: MutableMap<Uri, Long> = remember { mutableMapOf() },
@@ -89,6 +90,30 @@ fun VideoPlayer(
     repeatMode: Int = Player.REPEAT_MODE_ONE,
     onPlaybackEnded: () -> Unit = {},
 ) {
+    if (useVlc) {
+        VlcVideoPlayer(
+            uri = uri,
+            isActive = isActive,
+            volumeLevel = volumeLevel,
+            onToggleMute = onToggleMute,
+            savedPositions = savedPositions,
+            onRegisterSeekHandler = onRegisterSeekHandler,
+            onRegisterPositionProvider = onRegisterPositionProvider,
+            onRegisterDurationProvider = onRegisterDurationProvider,
+            modifier = modifier,
+            hideUiOverlays = hideUiOverlays,
+            keepControllerVisible = keepControllerVisible,
+            onShowInfoClick = onShowInfoClick,
+            onMoveToTrash = onMoveToTrash,
+            onRegisterSpeedSettingsTrigger = onRegisterSpeedSettingsTrigger,
+            onControllerVisibilityChanged = onControllerVisibilityChanged,
+            onFirstFrameRendered = onFirstFrameRendered,
+            repeatMode = repeatMode,
+            onPlaybackEnded = onPlaybackEnded,
+        )
+        return
+    }
+
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rcgallery_prefs", Context.MODE_PRIVATE) }
     var hasError by remember { mutableStateOf(false) }

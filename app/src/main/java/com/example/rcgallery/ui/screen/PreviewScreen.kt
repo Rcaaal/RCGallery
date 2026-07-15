@@ -545,6 +545,7 @@ fun PreviewScreen(
                                         VideoPlayer(
                                             uri = item.uri,
                                             isActive = true,
+                                            useVlc = item.fileName.isVlcContainer(),
                                             volumeLevel = volumeState.level,
                                             onToggleMute = { playbackSettingsVM.toggleMute() },
                                             onControllerVisibilityChanged = { controllerVisible = it },
@@ -1093,6 +1094,9 @@ fun PreviewScreen(
         }
     }
 }
+
+private fun String.isVlcContainer(): Boolean =
+    endsWith(".wmv", ignoreCase = true) || endsWith(".asf", ignoreCase = true)
 
 // ══════════════════════════════════════
 //  视频 seek 浮动时间提示（独立组件，最小重组范围）
