@@ -51,6 +51,7 @@ import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.data.db.ParentAlbumEntity
 import com.example.rcgallery.ui.component.DevOverlay
@@ -303,7 +304,7 @@ fun AlbumGridScreen(
     val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
     val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
     // 日期视图：按相册筛选规则过滤（被隐藏的相册中的内容也不在日期模式出现）
-    val dateMediaItems = remember(allMediaItems, albums, persistentRules, albumTags, tempFilter) {
+    val dateMediaItems = remember(allMediaItems, albums, persistentRules, albumTags, tempFilter, systemHiddenAlbumPaths) {
         val hasActiveAlbumRule = persistentRules.any {
             it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
         }
@@ -312,7 +313,10 @@ fun AlbumGridScreen(
             allMediaItems
         } else {
             val hiddenBucketIds = albums.filter { album ->
-                val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
+                val tagNames = buildList {
+                    addAll(albumTags[album.directoryPath]?.map { it.name }.orEmpty())
+                    if (viewModel.isSystemHiddenAlbum(album.directoryPath)) add(SystemTags.HID_NAME)
+                }
                 val byPersistent = if (hasActiveAlbumRule) viewModel.shouldHideAlbum(album.directoryPath, tagNames) else false
                 val byTemp = if (hasTemp) {
                     val tagSet = tagNames.toSet()
@@ -474,7 +478,7 @@ fun AlbumGridScreen(
     val albumRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
     // ── 筛选规则过滤后的相册列表（持久规则 + 临时筛选叠加）──
-    val filteredAlbums = remember(albums, persistentRules, albumTags, tempFilter) {
+    val filteredAlbums = remember(albums, persistentRules, albumTags, tempFilter, systemHiddenAlbumPaths) {
         val hasActiveAlbumRule = persistentRules.any {
             it.enabled && (it.scope == com.example.rcgallery.model.FilterScope.ALBUM || it.scope == com.example.rcgallery.model.FilterScope.BOTH)
         }
@@ -483,7 +487,10 @@ fun AlbumGridScreen(
         if (!hasActiveAlbumRule && !hasTemp) albums
         else {
             albums.filter { album ->
-                val tagNames = albumTags[album.directoryPath]?.map { it.name } ?: emptyList()
+                val tagNames = buildList {
+                    addAll(albumTags[album.directoryPath]?.map { it.name }.orEmpty())
+                    if (viewModel.isSystemHiddenAlbum(album.directoryPath)) add(SystemTags.HID_NAME)
+                }
                 // 先过持久规则
                 val byPersistent = if (hasActiveAlbumRule) viewModel.shouldHideAlbum(album.directoryPath, tagNames) else false
                 val byTemp = if (hasTemp) {
@@ -754,7 +761,7 @@ fun AlbumGridScreen(
             }
             // ── 筛选规则页面（全屏覆盖层）──
             if (showFilterPage) {
-                val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+                val allTags by viewModel.filterableTags.collectAsStateWithLifecycle()
                 FilterPage(
                     allTags = allTags,
                     persistentRules = persistentRules,
@@ -2500,7 +2507,7 @@ private class ListVH private constructor(
             if (item.videoCount > 0) append(" · ${item.videoCount} 视频")
             if (item.gifCount > 0) append(" · ${item.gifCount} GIF")
         }
-        pathTv.text = item.directoryPath
+        pathTv.text = FormatUtil.formatDisplayPath(item.directoryPath)
         pathTv.visibility = if (item.directoryPath.isNotEmpty()) android.view.View.VISIBLE else android.view.View.GONE
         val isStarred = item.bucketId in starredIds
         starIv.colorFilter = android.graphics.PorterDuffColorFilter(
@@ -2510,7 +2517,7 @@ private class ListVH private constructor(
         // ── TAG 行 ──
         val tags = albumTagsMap[item.directoryPath] ?: emptyList()
         val labels = buildList {
-            if (systemGalleryHidden) add("系统隐藏")
+            if (systemGalleryHidden) add("HID")
             addAll(tags.map { it.name })
         }
         // + 按钮点击
@@ -2524,7 +2531,7 @@ private class ListVH private constructor(
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = 6 * itemView.context.resources.displayMetrics.density
                 setColor(
-                    if (systemGalleryHidden && i == 0) android.graphics.Color.argb(210, 230, 145, 45)
+                    if (systemGalleryHidden && i == 0) android.graphics.Color.rgb(97, 97, 97)
                     else android.graphics.Color.argb(180, 100, 140, 255)
                 )
             }

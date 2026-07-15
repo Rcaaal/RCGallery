@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rcgallery.data.smb.SmbFileOperationRecord
 import com.example.rcgallery.util.AppLogger
+import com.example.rcgallery.util.FormatUtil
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -205,14 +206,14 @@ private fun HistoryRecordCard(record: SmbFileOperationRecord) {
             if (record.sourcePath.length > 30 || record.targetPath.length > 30) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = record.sourcePath,
+                    text = FormatUtil.formatDisplayPath(record.sourcePath),
                     fontSize = 9.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = "→ ${record.targetPath}",
+                    text = "→ ${FormatUtil.formatDisplayPath(record.targetPath)}",
                     fontSize = 9.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                     maxLines = 1,

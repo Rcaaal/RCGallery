@@ -276,7 +276,14 @@ fun MediaGridScreen(
     }
 
     // ── 标签筛选（持久规则 + 临时筛选）—— 在 sortedItems 之后过滤 ──
-    val tagFilteredItems = remember(sortedItems, mediaTempFilter, mediaPersistentRules, mediaTags, albumTags) {
+    val tagFilteredItems = remember(
+        sortedItems,
+        mediaTempFilter,
+        mediaPersistentRules,
+        mediaTags,
+        albumTags,
+        systemHiddenAlbumPaths
+    ) {
         sortedItems.filter { item ->
             val mTags = mediaTags[item.filePath]?.map { it.name } ?: emptyList()
             val aTags = albumTags[albumDirectoryPath]?.map { it.name } ?: emptyList()
@@ -877,7 +884,7 @@ fun MediaGridScreen(
 
             // ── 图片筛选全屏覆盖层 ──
             if (showMediaFilterPage) {
-                val allTags by viewModel.allTags.collectAsStateWithLifecycle()
+                val allTags by viewModel.filterableTags.collectAsStateWithLifecycle()
                 MediaFilterPage(
                     allTags = allTags,
                     mediaPersistentRules = mediaPersistentRules,

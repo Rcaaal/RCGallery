@@ -1199,7 +1199,7 @@ private fun InfoCard(
         }
     }
 
-    val filePath = item.filePath.ifEmpty { albumDisplayName }
+    val filePath = FormatUtil.formatDisplayPath(item.filePath.ifEmpty { albumDisplayName })
     // 目录路径展开状态（默认折叠，maxLines=2）
     var filePathExpanded by remember { mutableStateOf(false) }
 

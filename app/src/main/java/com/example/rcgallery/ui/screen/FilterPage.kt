@@ -28,9 +28,11 @@ import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.FilterLogic
 import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.model.FilterScope
+import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.findFirstConflict
+import com.example.rcgallery.util.FormatUtil
 import androidx.activity.compose.BackHandler
 import java.io.UnsupportedEncodingException
 import java.net.URLDecoder
@@ -297,10 +299,14 @@ private fun TempFilterSection(
     ) {
         allTags.forEach { tag ->
             val isSelected = tag.name in selectedTagNames
+            val isHid = SystemTags.isHid(tag)
             Surface(
                 shape = RoundedCornerShape(6.dp),
-                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                        else MaterialTheme.colorScheme.surfaceVariant,
+                color = when {
+                    isSelected -> MaterialTheme.colorScheme.primaryContainer
+                    isHid -> Color(0xFF616161)
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                },
                 modifier = Modifier.height(28.dp).clickable {
                     if (isSelected) {
                         onFilterChange(filter.copy(
@@ -316,6 +322,7 @@ private fun TempFilterSection(
                 Box(Modifier.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
                     Text(tag.name, fontSize = 12.sp,
                         color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                else if (isHid) Color.White
                                 else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -481,10 +488,14 @@ private fun RuleEditPage(
             ) {
                 allTags.forEach { tag ->
                     val isSelected = tag.name in selectedTagNames
+                    val isHid = SystemTags.isHid(tag)
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                else MaterialTheme.colorScheme.surfaceVariant,
+                        color = when {
+                            isSelected -> MaterialTheme.colorScheme.primaryContainer
+                            isHid -> Color(0xFF616161)
+                            else -> MaterialTheme.colorScheme.surfaceVariant
+                        },
                         modifier = Modifier.height(32.dp).clickable {
                             if (isSelected) selectedTagNames = selectedTagNames - tag.name
                             else selectedTagNames = selectedTagNames + tag.name
@@ -493,6 +504,7 @@ private fun RuleEditPage(
                         Box(Modifier.padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
                             Text(tag.name, fontSize = 13.sp,
                                 color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else if (isHid) Color.White
                                         else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -617,7 +629,7 @@ private fun IgnoreFolderDialog(
                         ) {
                             Checkbox(checked = true, onCheckedChange = { onToggle(path) })
                             Spacer(Modifier.width(8.dp))
-                            Text(path, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            Text(FormatUtil.formatDisplayPath(path), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 2)
                         }
                     }
@@ -651,7 +663,7 @@ private fun IgnoreFolderDialog(
                         Spacer(Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(album.bucketName, fontSize = 14.sp)
-                            Text(album.directoryPath, fontSize = 11.sp,
+                            Text(FormatUtil.formatDisplayPath(album.directoryPath), fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1)
                         }

@@ -43,6 +43,7 @@ import coil.compose.AsyncImage
 import com.example.rcgallery.model.TrashEntry
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,6 +95,8 @@ fun TrashScreen(
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
     // 待批量删除的条目（用于 IntentSender 回调后操作）
     val pendingBatchEntries = remember { mutableStateListOf<TrashEntry>() }
+    var directDeletedBeforeRequest by remember { mutableIntStateOf(0) }
+    var directFailedBeforeRequest by remember { mutableIntStateOf(0) }
 
     // ── Tab 过滤 ──
     val filteredEntries = remember(entries, activeTab) {
@@ -155,7 +158,9 @@ fun TrashScreen(
                         pendingBatchEntries.map { it.uri to it.originalAlbumId }
                     )
                     pendingBatchEntries.clear()
-                    Toast.makeText(context, "已永久删除 $batchSize 项", Toast.LENGTH_SHORT).show()
+                    val totalDeleted = directDeletedBeforeRequest + batchSize
+                    val suffix = if (directFailedBeforeRequest > 0) "，${directFailedBeforeRequest} 项失败" else ""
+                    Toast.makeText(context, "已永久删除 $totalDeleted 项$suffix", Toast.LENGTH_SHORT).show()
                 } else {
                     // 单条目删除
                     val entry = selectedEntry
@@ -165,7 +170,13 @@ fun TrashScreen(
                     }
                 }
             } else {
-                if (pendingBatchEntries.isEmpty() && selectedEntry == null) {
+                if (directDeletedBeforeRequest > 0) {
+                    Toast.makeText(
+                        context,
+                        "已永久删除 $directDeletedBeforeRequest 项，其余项目未获得授权",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else if (pendingBatchEntries.isEmpty() && selectedEntry == null) {
                     // 用户取消了系统弹窗，不做额外操作
                 } else {
                     Toast.makeText(context, "删除失败：未获得授权", Toast.LENGTH_SHORT).show()
@@ -180,6 +191,8 @@ fun TrashScreen(
             isMultiSelectMode = false
             isDeleting = false
             pendingBatchEntries.clear()
+            directDeletedBeforeRequest = 0
+            directFailedBeforeRequest = 0
         }
     }
 
@@ -211,6 +224,97 @@ fun TrashScreen(
         selectedUris = filteredEntries.map { it.uri }.toSet()
     }
 
+    fun isMediaStoreEntry(entry: TrashEntry): Boolean {
+        val uri = Uri.parse(entry.uri)
+        val albumDirectory = entry.filePath.takeIf { it.isNotBlank() }
+            ?.let { File(it).parent }
+            .orEmpty()
+        return !viewModel.isSystemHiddenAlbum(albumDirectory) &&
+            uri.scheme.equals("content", ignoreCase = true) &&
+            uri.authority == MediaStore.AUTHORITY
+    }
+
+    fun isFileEntry(entry: TrashEntry): Boolean {
+        val uri = Uri.parse(entry.uri)
+        val albumDirectory = entry.filePath.takeIf { it.isNotBlank() }
+            ?.let { File(it).parent }
+            .orEmpty()
+        return uri.scheme.equals("file", ignoreCase = true) ||
+            viewModel.isSystemHiddenAlbum(albumDirectory)
+    }
+
+    fun finishWithoutSystemRequest(deletedCount: Int, failedCount: Int) {
+        val message = if (failedCount == 0) {
+            "已永久删除 $deletedCount 项"
+        } else {
+            "已永久删除 $deletedCount 项，$failedCount 项失败"
+        }
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        selectedEntry = null
+        selectedUris = emptySet()
+        isMultiSelectMode = false
+        isDeleting = false
+    }
+
+    fun deleteEntriesPermanently(targetEntries: List<TrashEntry>) {
+        val fileEntries = targetEntries.filter(::isFileEntry)
+        val mediaStoreEntries = targetEntries.filter(::isMediaStoreEntry)
+        val unsupportedCount = targetEntries.size - fileEntries.size - mediaStoreEntries.size
+
+        fun continueWithMediaStore(directDeleted: Int, directFailed: Int) {
+            val failedBeforeRequest = directFailed + unsupportedCount
+            if (mediaStoreEntries.isEmpty()) {
+                finishWithoutSystemRequest(directDeleted, failedBeforeRequest)
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    pendingBatchEntries.clear()
+                    pendingBatchEntries.addAll(mediaStoreEntries)
+                    directDeletedBeforeRequest = directDeleted
+                    directFailedBeforeRequest = failedBeforeRequest
+                    val pending = MediaStore.createDeleteRequest(
+                        context.contentResolver,
+                        mediaStoreEntries.map { Uri.parse(it.uri) }
+                    )
+                    deleteRequestLauncher.launch(
+                        IntentSenderRequest.Builder(pending.intentSender).build()
+                    )
+                } catch (e: Exception) {
+                    AppLogger.e("Trash", "request MediaStore delete failed", e)
+                    pendingBatchEntries.clear()
+                    finishWithoutSystemRequest(directDeleted, failedBeforeRequest + mediaStoreEntries.size)
+                }
+            } else {
+                val deletedMediaEntries = mediaStoreEntries.filter { entry ->
+                    runCatching {
+                        context.contentResolver.delete(Uri.parse(entry.uri), null, null) > 0
+                    }.onFailure {
+                        AppLogger.e("Trash", "MediaStore delete failed: ${entry.fileName}", it)
+                    }.getOrDefault(false)
+                }
+                if (deletedMediaEntries.isNotEmpty()) {
+                    viewModel.batchPermanentlyDeleteConfirmed(
+                        deletedMediaEntries.map { it.uri to it.originalAlbumId }
+                    )
+                }
+                finishWithoutSystemRequest(
+                    directDeleted + deletedMediaEntries.size,
+                    failedBeforeRequest + mediaStoreEntries.size - deletedMediaEntries.size
+                )
+            }
+        }
+
+        if (fileEntries.isEmpty()) {
+            continueWithMediaStore(0, 0)
+        } else {
+            viewModel.permanentlyDeleteFileEntries(fileEntries) { deleted, failed ->
+                continueWithMediaStore(deleted, failed)
+            }
+        }
+    }
+
     // ── 对话框 ──
 
     // 单条目永久删除确认（现有流程）
@@ -228,33 +332,7 @@ fun TrashScreen(
                         if (isDeleting) return@Button
                         isDeleting = true
                         showDeleteConfirm = false
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            try {
-                                val uri = Uri.parse(entry.uri)
-                                if (uri == null || uri.toString().isBlank()) {
-                                    Toast.makeText(context, "无效的文件 URI", Toast.LENGTH_SHORT).show()
-                                    selectedEntry = null; isDeleting = false; return@Button
-                                }
-                                val pending = MediaStore.createDeleteRequest(
-                                    context.contentResolver, listOf(uri)
-                                )
-                                deleteRequestLauncher.launch(
-                                    IntentSenderRequest.Builder(pending.intentSender).build()
-                                )
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
-                                selectedEntry = null; isDeleting = false
-                            }
-                        } else {
-                            try {
-                                context.contentResolver.delete(Uri.parse(entry.uri), null, null)
-                                viewModel.permanentlyDeleteConfirmed(entry.uri, entry.originalAlbumId)
-                                Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
-                            }
-                            selectedEntry = null; isDeleting = false
-                        }
+                        deleteEntriesPermanently(listOf(entry))
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("删除") }
@@ -276,45 +354,7 @@ fun TrashScreen(
                     onClick = {
                         showClearAllConfirm = false
                         if (entries.isEmpty()) return@Button
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            try {
-                                val uris = entries.mapNotNull { Uri.parse(it.uri).takeIf { u -> u.toString().isNotBlank() } }
-                                if (uris.isEmpty()) {
-                                    Toast.makeText(context, "没有有效的文件", Toast.LENGTH_SHORT).show()
-                                    return@Button
-                                }
-                                pendingBatchEntries.clear()
-                                pendingBatchEntries.addAll(entries)
-                                val pending = MediaStore.createDeleteRequest(context.contentResolver, uris)
-                                deleteRequestLauncher.launch(
-                                    IntentSenderRequest.Builder(pending.intentSender).build()
-                                )
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
-                                pendingBatchEntries.clear()
-                            }
-                        } else {
-                            // API 29- 直接删除
-                            var successCount = 0
-                            val failedNames = mutableListOf<String>()
-                            entries.forEach { entry ->
-                                try {
-                                    context.contentResolver.delete(Uri.parse(entry.uri), null, null)
-                                    successCount++
-                                } catch (e: Exception) {
-                                    AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
-                                    failedNames.add(entry.fileName)
-                                }
-                            }
-                            viewModel.batchPermanentlyDeleteConfirmed(
-                                entries.map { it.uri to it.originalAlbumId }
-                            )
-                            if (successCount == entries.size) {
-                                Toast.makeText(context, "已清空 $successCount 项", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "已清空 $successCount/${entries.size} 项，${failedNames.size} 项删除失败", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        deleteEntriesPermanently(entries)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("清空") }
@@ -362,44 +402,7 @@ fun TrashScreen(
                         showBatchDeleteConfirm = false
                         val toDelete = entries.filter { it.uri in selectedUris }
                         if (toDelete.isEmpty()) return@Button
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            try {
-                                val uris = toDelete.mapNotNull { Uri.parse(it.uri).takeIf { u -> u.toString().isNotBlank() } }
-                                if (uris.isEmpty()) {
-                                    Toast.makeText(context, "没有有效的文件", Toast.LENGTH_SHORT).show()
-                                    return@Button
-                                }
-                                pendingBatchEntries.clear()
-                                pendingBatchEntries.addAll(toDelete)
-                                val pending = MediaStore.createDeleteRequest(context.contentResolver, uris)
-                                deleteRequestLauncher.launch(
-                                    IntentSenderRequest.Builder(pending.intentSender).build()
-                                )
-                            } catch (e: Exception) {
-                                Toast.makeText(context, "请求删除授权失败", Toast.LENGTH_SHORT).show()
-                                pendingBatchEntries.clear()
-                            }
-                        } else {
-                            var successCount = 0
-                            val failedNames = mutableListOf<String>()
-                            toDelete.forEach { entry ->
-                                try {
-                                    context.contentResolver.delete(Uri.parse(entry.uri), null, null)
-                                    successCount++
-                                } catch (e: Exception) {
-                                    AppLogger.e("Trash", "delete failed: ${entry.fileName}", e)
-                                    failedNames.add(entry.fileName)
-                                }
-                            }
-                            viewModel.batchPermanentlyDeleteConfirmed(
-                                toDelete.map { it.uri to it.originalAlbumId }
-                            )
-                            if (successCount == count) {
-                                Toast.makeText(context, "已永久删除 $successCount 项", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "已删除 $successCount/$count 项，${failedNames.size} 项失败", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        deleteEntriesPermanently(toDelete)
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) { Text("删除") }

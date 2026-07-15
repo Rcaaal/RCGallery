@@ -30,6 +30,7 @@ import com.example.rcgallery.model.FilterLogic
 import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.model.FilterScope
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.TrashEntry
@@ -496,6 +497,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun isSystemHiddenAlbum(directoryPath: String): Boolean =
         normalizedPath(directoryPath) in normalizedSystemHiddenAlbumPaths
+
+    fun isSystemHiddenMedia(filePath: String): Boolean {
+        val parentPath = File(filePath).parent ?: return false
+        return normalizedPath(parentPath) in normalizedSystemHiddenAlbumPaths
+    }
 
     /**
      * Toggle the reserved album TAG. The TAG is synthetic; .nomedia is the actual OS-level marker.
@@ -1023,6 +1029,50 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
     }
 
+    /**
+     * Permanently delete filesystem-backed trash entries, such as media loaded from HID albums.
+     * MediaStore's delete request only accepts content:// URIs, so file:// entries must use their
+     * verified filesystem path. A trash record is removed only after its file is actually gone.
+     */
+    fun permanentlyDeleteFileEntries(
+        entries: List<TrashEntry>,
+        onComplete: (deletedCount: Int, failedCount: Int) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            val (deleted, failed) = withContext(Dispatchers.IO) {
+                entries.distinctBy { it.uri }.partition { entry ->
+                    runCatching {
+                        val uri = Uri.parse(entry.uri)
+                        check(entry.filePath.isNotBlank()) { "Missing file path" }
+
+                        val pathFile = File(entry.filePath).canonicalFile
+                        val isFileUri = uri.scheme.equals("file", ignoreCase = true)
+                        val isHiddenAlbumFile = pathFile.parentFile?.let {
+                            normalizedPath(it.path) in normalizedSystemHiddenAlbumPaths
+                        } == true
+                        check(isFileUri || isHiddenAlbumFile) { "Not a filesystem-backed HID item" }
+
+                        if (isFileUri) {
+                            val uriFile = File(requireNotNull(uri.path)).canonicalFile
+                            check(uriFile == pathFile) { "URI and file path do not match" }
+                        }
+
+                        !pathFile.exists() || (pathFile.isFile && pathFile.delete())
+                    }.onFailure {
+                        AppLogger.e("Trash", "file delete failed: ${entry.fileName}", it)
+                    }.getOrDefault(false)
+                }
+            }
+
+            if (deleted.isNotEmpty()) {
+                batchPermanentlyDeleteConfirmed(
+                    deleted.map { it.uri to it.originalAlbumId }
+                )
+            }
+            onComplete(deleted.size, failed.size)
+        }
+    }
+
     /** 获取全部回收站条目（供 TrashScreen 使用） */
     fun loadTrashEntries() {
         _trashEntries.value = trashManager.getAll()
@@ -1270,6 +1320,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 所有 TAG 定义 */
     private val _allTags = MutableStateFlow<List<com.example.rcgallery.data.db.TagEntity>>(emptyList())
     val allTags: StateFlow<List<com.example.rcgallery.data.db.TagEntity>> = _allTags.asStateFlow()
+    val filterableTags: StateFlow<List<TagEntity>> = _allTags
+        .map(SystemTags::prependTo)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, listOf(SystemTags.hid))
 
     /** 相册 TAG 映射：directoryPath → List<TagEntity> */
     private val _albumTags = MutableStateFlow<Map<String, List<TagEntity>>>(emptyMap())
@@ -1394,6 +1447,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     /** 删除 TAG 定义（先清理父级共享关联，再级联删除真实关联） */
     fun deleteTag(tagId: Long) {
+        if (tagId == SystemTags.HID_ID) return
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 parentSharedTagDao.removeByTagId(tagId)
@@ -1425,20 +1479,58 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 多 TAG AND 搜索：获取同时拥有所有指定 TAG 的相册 */
     suspend fun getAlbumsByTagNames(tagNames: List<String>): List<Album> {
         if (tagNames.isEmpty()) return emptyList()
-        val results = tagRepository.findTargetsWithAllTags(tagNames)
-        val dirPaths = results.filter { it.targetType == TagRepository.TYPE_ALBUM }
-            .map { it.targetKey.removePrefix("album:") }.toSet()
-        return _albums.value.filter { it.directoryPath in dirPaths }
+        val requiresHid = tagNames.any(SystemTags::isHidName)
+        val regularTagNames = tagNames.filterNot(SystemTags::isHidName)
+        val candidates = if (regularTagNames.isEmpty()) {
+            _albums.value
+        } else {
+            val results = tagRepository.findTargetsWithAllTags(regularTagNames)
+            val dirPaths = results.filter { it.targetType == TagRepository.TYPE_ALBUM }
+                .map { normalizedPath(it.targetKey.removePrefix("album:")) }
+                .toSet()
+            _albums.value.filter { normalizedPath(it.directoryPath) in dirPaths }
+        }
+        return if (requiresHid) candidates.filter { isSystemHiddenAlbum(it.directoryPath) }
+        else candidates
     }
 
     /** 多 TAG AND 搜索：获取同时拥有所有指定 TAG 的媒体文件（跨相册） */
     suspend fun getMediaByTagNames(tagNames: List<String>): List<MediaItem> {
         if (tagNames.isEmpty()) return emptyList()
-        val results = tagRepository.findTargetsWithAllTags(tagNames)
-        val filePaths = results.filter { it.targetType == TagRepository.TYPE_MEDIA }
-            .map { it.targetKey.removePrefix("media:") }
-        if (filePaths.isEmpty()) return emptyList()
-        return repository.loadMediaItemsByPaths(filePaths).getOrDefault(emptyList())
+        val requiresHid = tagNames.any(SystemTags::isHidName)
+        val regularTagNames = tagNames.filterNot(SystemTags::isHidName)
+        val candidates = if (regularTagNames.isEmpty()) {
+            withContext(Dispatchers.IO) {
+                _albums.value
+                    .filter { isSystemHiddenAlbum(it.directoryPath) }
+                    .flatMap(::loadItemsForAlbum)
+            }
+        } else {
+            val results = tagRepository.findTargetsWithAllTags(regularTagNames)
+            val filePaths = results.filter { it.targetType == TagRepository.TYPE_MEDIA }
+                .map { it.targetKey.removePrefix("media:") }
+            if (filePaths.isEmpty()) {
+                emptyList()
+            } else {
+                val hiddenTargetPaths = filePaths
+                    .filter(::isSystemHiddenMedia)
+                    .mapTo(HashSet(), ::normalizedPath)
+                val mediaStorePaths = filePaths.filterNot(::isSystemHiddenMedia)
+                val mediaStoreItems = if (mediaStorePaths.isEmpty()) emptyList()
+                else repository.loadMediaItemsByPaths(mediaStorePaths).getOrDefault(emptyList())
+                val hiddenItems = if (hiddenTargetPaths.isEmpty()) emptyList()
+                else withContext(Dispatchers.IO) {
+                    _albums.value
+                        .filter { isSystemHiddenAlbum(it.directoryPath) }
+                        .flatMap(::loadItemsForAlbum)
+                        .filter { normalizedPath(it.filePath) in hiddenTargetPaths }
+                }
+                mediaStoreItems + hiddenItems
+            }
+        }
+        return candidates
+            .filter { !requiresHid || isSystemHiddenMedia(it.filePath) }
+            .distinctBy { normalizedPath(it.filePath) }
     }
 
     // ── TAG 搜索结果 Flow（支持删除后自动刷新） ──
@@ -1467,7 +1559,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun getMediaByTagNamesExcludeTrash(tagNames: List<String>): List<MediaItem> {
         if (tagNames.isEmpty()) return emptyList()
         // ① 找出拥有所有搜索 TAG 的相册，自动同步其 TAG 到内部文件
-        val targets = tagRepository.findTargetsWithAllTags(tagNames)
+        val regularTagNames = tagNames.filterNot(SystemTags::isHidName)
+        val targets = if (regularTagNames.isEmpty()) emptyList()
+        else tagRepository.findTargetsWithAllTags(regularTagNames)
         val albumDirs = targets.filter { it.targetType == TagRepository.TYPE_ALBUM }
             .map { it.targetKey.removePrefix("album:") }
             .toSet()
@@ -1597,7 +1691,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun shouldHideAlbum(directoryPath: String, albumTags: List<String>): Boolean {
         val rules = getActiveAlbumRules()
         if (rules.isEmpty()) return false
-        val tagSet = albumTags.toSet()
+        val tagSet = buildSet {
+            addAll(albumTags)
+            if (isSystemHiddenAlbum(directoryPath)) add(SystemTags.HID_NAME)
+        }
         AppLogger.d("Filter", "shouldHideAlbum dir=$directoryPath tags=$tagSet activeRules=${rules.map { "${it.name}:${it.mode}:${it.tagNames}" }}")
 
         // 先检查是否有 SHOW_ONLY 规则：如果任一 SHOW_ONLY 规则不命中 → 隐藏
@@ -1618,7 +1715,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
      * 判断媒体文件是否应被隐藏（基于图片筛选规则 + 临时筛选）。
      */
     fun shouldHideMedia(filePath: String, mediaTags: List<String>, albumTags: List<String>): Boolean {
-        val allTagSet = (albumTags + mediaTags).toSet()
+        val allTagSet = buildSet {
+            addAll(albumTags)
+            addAll(mediaTags)
+            if (isSystemHiddenMedia(filePath)) add(SystemTags.HID_NAME)
+        }
 
         // 检查持久规则（图片筛选，全部生效，无需 scope 过滤）
         val pRules = _mediaPersistentRules.value.filter { it.enabled }

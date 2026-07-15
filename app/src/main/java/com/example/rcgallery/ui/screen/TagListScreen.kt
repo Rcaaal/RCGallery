@@ -39,6 +39,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
 import com.example.rcgallery.ui.component.GalleryThumbnail
@@ -75,6 +76,8 @@ fun TagListScreen(
     onOverlayChanged: (Boolean) -> Unit = {}
 ) {
     val allTags by viewModel.allTags.collectAsState()
+    val filterableTags by viewModel.filterableTags.collectAsState()
+    val systemHiddenAlbumPaths by viewModel.systemHiddenAlbumPaths.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -82,14 +85,21 @@ fun TagListScreen(
     // ── 搜索与 TAG 选择状态 ──
     var searchQuery by remember { mutableStateOf("") }
     val selectedTags = remember { mutableStateListOf<TagEntity>() }
-    val sortedTags = remember(allTags) { allTags.sortedBy { it.name } }
+    val sortedTags = remember(filterableTags) {
+        filterableTags.sortedWith(
+            compareBy<TagEntity> { if (SystemTags.isHid(it)) 0 else 1 }
+                .thenBy { it.name.lowercase(Locale.getDefault()) }
+        )
+    }
 
     // ── 自动补全候选 ──
-    val suggestions = remember(searchQuery, allTags, selectedTags) {
+    val suggestions = remember(searchQuery, filterableTags, selectedTags) {
         if (searchQuery.isBlank()) emptyList()
         else {
             val selectedIds = selectedTags.map { it.id }.toSet()
-            allTags.filter { it.name.contains(searchQuery, ignoreCase = true) && it.id !in selectedIds }
+            filterableTags.filter {
+                it.name.contains(searchQuery, ignoreCase = true) && it.id !in selectedIds
+            }
         }
     }
 
@@ -135,7 +145,7 @@ fun TagListScreen(
     val scope = rememberCoroutineScope()
 
     // 选中 TAG 变化时自动搜索
-    LaunchedEffect(selectedTags.toList(), tagSearchRefreshVersion) {
+    LaunchedEffect(selectedTags.toList(), tagSearchRefreshVersion, systemHiddenAlbumPaths) {
         val tags = selectedTags.toList()
         if (tags.isEmpty()) {
             searchAlbums = emptyList()
@@ -326,7 +336,14 @@ fun TagListScreen(
                         ) {
                             suggestions.forEach { tag ->
                                 DropdownMenuItem(
-                                    text = { Text(tag.name, fontSize = 14.sp) },
+                                    text = {
+                                        Text(
+                                            tag.name,
+                                            fontSize = 14.sp,
+                                            color = if (SystemTags.isHid(tag)) Color(0xFF757575)
+                                                    else LocalContentColor.current
+                                        )
+                                    },
                                     onClick = {
                                         toggleTag(tag)
                                         showSuggestions = false
@@ -426,8 +443,13 @@ fun TagListScreen(
                     ) {
                         sortedTags.forEach { tag ->
                             val selected = isTagSelected(tag)
-                            val bgColor = if (selected) Color(0xFF448AFF) else Color(0xFF8E8E8E)
-                            if (isDeleteMode) {
+                            val isHid = SystemTags.isHid(tag)
+                            val bgColor = when {
+                                selected -> Color(0xFF448AFF)
+                                isHid -> Color(0xFF616161)
+                                else -> Color(0xFF8E8E8E)
+                            }
+                            if (isDeleteMode && !isHid) {
                                 // 删除模式：chip 带 ✕ 按钮
                                 Surface(
                                     shape = RoundedCornerShape(20.dp),
