@@ -42,6 +42,7 @@ import com.example.rcgallery.ui.component.AlbumPickDialog
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import com.example.rcgallery.viewmodel.PasteMode
+import com.example.rcgallery.viewmodel.BaiduNetdiskViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +59,8 @@ import java.io.File
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NetworkBrowserScreen(
-    viewModel: GalleryViewModel
+    viewModel: GalleryViewModel,
+    baiduViewModel: BaiduNetdiskViewModel
 ) {
     val smbBrowseState by viewModel.smbBrowseState.collectAsState()
     val smbDevices by viewModel.smbDevices.collectAsState()
@@ -70,6 +72,7 @@ fun NetworkBrowserScreen(
     val scope = rememberCoroutineScope()
 
     var showConnectDialog by remember { mutableStateOf(false) }
+    var showBaiduNetdisk by remember { mutableStateOf(false) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
@@ -99,6 +102,14 @@ fun NetworkBrowserScreen(
     // ── SMB 操作历史 ──
     val smbOperationHistory by viewModel.smbOperationHistory.collectAsState()
     var showHistoryPage by remember { mutableStateOf(false) }
+
+    if (showBaiduNetdisk) {
+        BaiduNetdiskScreen(
+            viewModel = baiduViewModel,
+            onDismiss = { showBaiduNetdisk = false }
+        )
+        return
+    }
 
     // 初始化 SMB 缩略图磁盘缓存
     LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
@@ -171,6 +182,7 @@ fun NetworkBrowserScreen(
                     is SmbBrowseState.DeviceList -> {
                         DeviceListContent(
                             devices = smbDevices,
+                            onBaiduClick = { showBaiduNetdisk = true },
                             onAddDevice = { showConnectDialog = true },
                             onDeviceClick = { viewModel.smbConnect(it.host) },
                             onRemoveDevice = { deviceId -> viewModel.smbRemoveDevice(deviceId) }
@@ -520,11 +532,29 @@ private fun SmbPasteProgressOverlay(progress: com.example.rcgallery.viewmodel.Ga
 @Composable
 private fun DeviceListContent(
     devices: List<SmbDevice>,
+    onBaiduClick: () -> Unit,
     onAddDevice: () -> Unit,
     onDeviceClick: (SmbDevice) -> Unit,
     onRemoveDevice: (String) -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onBaiduClick),
+            elevation = CardDefaults.cardElevation(2.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("☁", fontSize = 30.sp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("百度网盘", fontWeight = FontWeight.Bold)
+                    Text("账号授权 · 云端图片与视频", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("进入 ›", color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
         if (devices.isEmpty()) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Column(
