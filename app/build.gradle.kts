@@ -8,19 +8,6 @@ plugins {
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.Properties
-
-val localProperties = Properties().apply {
-    val propertiesFile = rootProject.file("local.properties")
-    if (propertiesFile.exists()) propertiesFile.inputStream().use(::load)
-}
-
-fun quotedBuildConfigValue(name: String): String {
-    val value = localProperties.getProperty(name, "")
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-    return "\"$value\""
-}
 
 android {
     namespace = "com.example.rcgallery"
@@ -32,11 +19,6 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
-        buildConfigField(
-            "String",
-            "BAIDU_AUTH_BACKEND_URL",
-            quotedBuildConfigValue("BAIDU_AUTH_BACKEND_URL")
-        )
     }
 
     buildTypes {
@@ -60,7 +42,6 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
     }
 
     // 自定义 APK 输出命名：RCGallery_年月日_时分.apk

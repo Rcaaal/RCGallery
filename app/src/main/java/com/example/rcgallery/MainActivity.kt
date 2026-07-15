@@ -3,7 +3,6 @@ package com.example.rcgallery
 import android.app.PictureInPictureParams
 import android.content.res.Configuration
 import android.os.Bundle
-import android.content.Intent
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -35,15 +34,12 @@ import com.example.rcgallery.player.VideoPlayerScreen
 import com.example.rcgallery.data.smb.SmbBrowseState
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.activity.viewModels
-import com.example.rcgallery.viewmodel.BaiduNetdiskViewModel
 
 /** PiP 状态与工具方法 */
 object PipState {
     var isInPip: Boolean by mutableStateOf(false)
     /** SMB 预览是否激活（打开图片/视频全屏查看时隐藏底部导航栏） */
     var isSmbPreviewActive: Boolean by mutableStateOf(false)
-    var isBaiduBrowserActive: Boolean by mutableStateOf(false)
     var exoPlayer: ExoPlayer? = null
     var videoWidth: Int = 16
     var videoHeight: Int = 9
@@ -66,11 +62,8 @@ object PipState {
 }
 
 class MainActivity : ComponentActivity() {
-    private val baiduNetdiskViewModel: BaiduNetdiskViewModel by viewModels()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handleBaiduOAuthIntent(intent)
         enableEdgeToEdge()
         setContent {
             RCGalleryTheme {
@@ -82,9 +75,7 @@ class MainActivity : ComponentActivity() {
                     val showBottomBar = when {
                         PipState.isInPip -> false
                         currentTab == 2 -> !isAlbumActive  // 标签
-                        currentTab == 3 -> !PipState.isSmbPreviewActive &&
-                            !PipState.isBaiduBrowserActive &&
-                            smbBrowseState is SmbBrowseState.DeviceList  // 网络
+                        currentTab == 3 -> !PipState.isSmbPreviewActive && smbBrowseState is SmbBrowseState.DeviceList  // 网络
                         else -> !isAlbumActive  // 最近、本地
                     }
 
@@ -186,10 +177,7 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                                 3 -> {
-                                    NetworkBrowserScreen(
-                                        viewModel = viewModel,
-                                        baiduViewModel = baiduNetdiskViewModel
-                                    )
+                                    NetworkBrowserScreen(viewModel = viewModel)
                                 }
                             }
                         }
@@ -197,16 +185,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        handleBaiduOAuthIntent(intent)
-    }
-
-    private fun handleBaiduOAuthIntent(intent: Intent?) {
-        intent?.data?.let(baiduNetdiskViewModel::handleOAuthCallback)
     }
 
     override fun onPictureInPictureModeChanged(
