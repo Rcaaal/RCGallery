@@ -24,7 +24,7 @@ data class SmbSubFolder(
     val name: String,
     val path: String,
     var coverPath: String = "",   // 该文件夹内第一张图片的路径
-    var mediaCount: Int = 0,       // 该文件夹直接包含的媒体文件数（不含递归子目录）
+    var mediaCount: Int = -1,      // -1 扫描中，-2 扫描失败，非负数为实际媒体数量
     val lastModified: Long = 0L    // 最后修改时间（毫秒时间戳）
 )
 

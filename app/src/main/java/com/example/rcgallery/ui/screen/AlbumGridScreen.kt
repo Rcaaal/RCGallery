@@ -46,9 +46,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
+import coil.size.Precision
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
 import com.example.rcgallery.model.SystemTags
@@ -59,8 +61,10 @@ import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.screen.TrashScreen
 import com.example.rcgallery.ui.component.FloatingJumpButton
+import com.example.rcgallery.ui.component.FloatingMultiSelectButtons
 import com.example.rcgallery.ui.component.ClipboardBadge
 import com.example.rcgallery.ui.component.AlbumPickDialog
+import com.example.rcgallery.ui.component.AlbumStoragePickDialog
 import com.example.rcgallery.ui.component.AutoFocusRenameTextField
 import com.example.rcgallery.viewmodel.PasteMode
 import com.example.rcgallery.ui.component.FpsMonitor
@@ -78,6 +82,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 // 跨闭包信号：设为 true 时触发搜索建议关闭 + 输入框失焦
 // 用模块级变量而非 composable 局部变量，解决 Kotlin 2.1 Compose 编译器对普通 lambda 捕获限制
@@ -164,6 +176,7 @@ fun AlbumGridScreen(
     val persistentRules by viewModel.persistentRules.collectAsStateWithLifecycle()
     val recentAccessMap by viewModel.recentAccessMap.collectAsStateWithLifecycle()
     val recentMoveAlbums by viewModel.recentMoveAlbums.collectAsStateWithLifecycle()
+    val recentMigrationRoots by viewModel.recentMigrationRoots.collectAsStateWithLifecycle()
 
     // ── 层级相册 ──
     val parentEntities by viewModel.parentEntities.collectAsStateWithLifecycle()
@@ -302,6 +315,7 @@ fun AlbumGridScreen(
         mutableStateOf(prefs.getBoolean("date_view", false))
     }
     val allMediaItems by viewModel.allMediaItems.collectAsStateWithLifecycle()
+    val isAllMediaInitialLoading by viewModel.isAllMediaInitialLoading.collectAsStateWithLifecycle()
     val tempFilter by viewModel.tempFilter.collectAsStateWithLifecycle()
     // 日期视图：按相册筛选规则过滤（被隐藏的相册中的内容也不在日期模式出现）
     val dateMediaItems = remember(allMediaItems, albums, persistentRules, albumTags, tempFilter, systemHiddenAlbumPaths) {
@@ -354,6 +368,8 @@ fun AlbumGridScreen(
     var selectedAlbumName by remember { mutableStateOf("") }
     var selectedAlbumDirectoryPath by remember { mutableStateOf("") }
     var showAlbumPickDialog by remember { mutableStateOf(false) }
+    var directAlbumPickItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    val albumPickScope = rememberCoroutineScope()
     // albums（来自 ViewModel）变化时联动更新相册名
     // 优先按 bucketId 匹配；如果 bucketId 变了（如改名后 MediaStore 重新扫描），按相册名回退
     LaunchedEffect(albums, selectedAlbumId) {
@@ -410,6 +426,8 @@ fun AlbumGridScreen(
     // ── 相册重命名状态 ──
     var showAlbumRenameDialog by remember { mutableStateOf(false) }
     var renameTargetAlbum by remember { mutableStateOf<Album?>(null) }
+    var migrateTargetAlbum by remember { mutableStateOf<Album?>(null) }
+    var migratingAlbumName by remember { mutableStateOf<String?>(null) }
     val renameLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { _ ->
@@ -466,6 +484,44 @@ fun AlbumGridScreen(
                 Button(onClick = { confirmAlbumRename() }) { Text("确认") }
             },
             dismissButton = { TextButton(onClick = { showAlbumRenameDialog = false; renameTargetAlbum = null }) { Text("取消") } }
+        )
+    }
+
+    migrateTargetAlbum?.let { targetAlbum ->
+        AlbumStoragePickDialog(
+            sourceAlbum = targetAlbum,
+            recentRoots = recentMigrationRoots,
+            onDismiss = { migrateTargetAlbum = null },
+            onSelectRoot = { root ->
+                migrateTargetAlbum = null
+                migratingAlbumName = targetAlbum.bucketName
+                viewModel.migrateAlbumStorage(targetAlbum, root.absolutePath) { result ->
+                    migratingAlbumName = null
+                    Toast.makeText(
+                        context,
+                        result.fold(
+                            onSuccess = { "相册已迁移到 ${FormatUtil.formatDisplayPath(it)}" },
+                            onFailure = { it.message ?: "迁移失败" }
+                        ),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+    }
+    migratingAlbumName?.let { albumName ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在迁移") },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("正在迁移“$albumName”，请勿退出")
+                }
+            },
+            confirmButton = {},
+            dismissButton = {}
         )
     }
 
@@ -600,6 +656,7 @@ fun AlbumGridScreen(
                         renameTargetAlbum = album
                         showAlbumRenameDialog = true
                     },
+                    onMigrateAlbum = { album -> migrateTargetAlbum = album },
                     onToggleStar = { bucketId -> viewModel.toggleStar(bucketId) },
                     onRefresh = { viewModel.loadAlbums() },
                     displayMode = displayMode,
@@ -629,9 +686,9 @@ fun AlbumGridScreen(
                     onToggleDateView = {
                         isDateView = !isDateView
                         prefs.edit().putBoolean("date_view", isDateView).apply()
-                        if (isDateView) viewModel.loadAllMedia()
                     },
                     allDateMediaItems = dateMediaItems,
+                    isDateInitialLoading = isAllMediaInitialLoading,
                     selectedDatePhotoIndex = selectedDatePhotoIndex,
                     onDatePhotoClick = { idx -> selectedDatePhotoIndex = idx; onAlbumActiveChanged(true) },
                     onDatePhotoBack = { selectedDatePhotoIndex = -1 },
@@ -649,6 +706,11 @@ fun AlbumGridScreen(
                     onDeleteDateMedia = { paths ->
                         val toDelete = dateMediaItems.filter { it.filePath in paths }
                         viewModel.moveToTrash(toDelete)
+                    },
+                    onAddDateMediaToClipboard = { items -> viewModel.addToClipboard(items) },
+                    onPickDateMediaTarget = { items ->
+                        directAlbumPickItems = items
+                        showAlbumPickDialog = true
                     },
                     hasActiveFilter = persistentRules.any { it.enabled } || tempFilter.isActive,
                     onOpenFilter = { showFilterPage = true },
@@ -721,7 +783,10 @@ fun AlbumGridScreen(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = null,  // 不传入当前相册（相册列表模式下没有"当前相册"）
                         onPasteToAlbum = { mode, dir -> viewModel.pasteToAlbum(mode, dir, "") },
-                        onPickTargetAlbum = { showAlbumPickDialog = true },
+                        onPickTargetAlbum = {
+                            directAlbumPickItems = emptyList()
+                            showAlbumPickDialog = true
+                        },
                         onClear = { viewModel.clearClipboard() },
                         modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 80.dp)
                     )
@@ -794,9 +859,69 @@ fun AlbumGridScreen(
                 AlbumPickDialog(
                     albums = allAlbums,
                     recentMoveAlbums = recentDirs,
-                    onDismiss = { showAlbumPickDialog = false },
+                    onDismiss = {
+                        showAlbumPickDialog = false
+                        directAlbumPickItems = emptyList()
+                    },
                     onAlbumSelected = { targetDir, targetName, mode ->
-                        viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        val directItems = directAlbumPickItems
+                        if (directItems.isNotEmpty()) {
+                            if (mode == PasteMode.MOVE) {
+                                viewModel.moveItemsToAlbum(directItems, targetDir, targetName)
+                            } else {
+                                viewModel.copyItemsToAlbum(directItems, targetDir, targetName)
+                            }
+                        } else {
+                            viewModel.pasteToAlbum(mode, targetDir, targetName)
+                        }
+                        directAlbumPickItems = emptyList()
+                    },
+                    onCreateFolder = { name, onResult ->
+                        albumPickScope.launch(Dispatchers.IO) {
+                            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                            val dir = java.io.File(dcim, name)
+                            val path = if (dir.mkdirs() || dir.exists()) {
+                                viewModel.loadAlbums()
+                                dir.absolutePath
+                            } else null
+                            onResult(path)
+                        }
+                    }
+                )
+            }
+
+            val moveFailures by viewModel.moveFailures.collectAsStateWithLifecycle()
+            if (moveFailures.isNotEmpty() && selectedAlbumId == null && selectedDatePhotoIndex < 0 && !showTrash) {
+                val grouped = moveFailures.groupBy { it.reason }.mapValues { it.value.size }
+                AlertDialog(
+                    onDismissRequest = { viewModel.clearMoveFailures() },
+                    title = { Text("移动未完全成功") },
+                    text = {
+                        Column {
+                            Text("共 ${moveFailures.size} 个文件移动失败：")
+                            Spacer(Modifier.height(8.dp))
+                            grouped.forEach { (reason, count) ->
+                                val message = when (reason) {
+                                    GalleryViewModel.MoveFailureReason.SOURCE_DELETE_FAILED ->
+                                        "$count 个文件删除源文件失败，请检查所有文件访问权限。"
+                                    GalleryViewModel.MoveFailureReason.TARGET_VERIFICATION_FAILED ->
+                                        "$count 个文件目标验证失败，请检查存储空间。"
+                                    GalleryViewModel.MoveFailureReason.MEDIASTORE_UPDATE_FAILED ->
+                                        "$count 个文件 MediaStore 移动或复制失败。"
+                                    GalleryViewModel.MoveFailureReason.SCAN_FAILED ->
+                                        "$count 个文件媒体扫描注册失败。"
+                                    GalleryViewModel.MoveFailureReason.SOURCE_NOT_FOUND ->
+                                        "$count 个源文件已不存在。"
+                                    GalleryViewModel.MoveFailureReason.UNKNOWN_ERROR ->
+                                        "$count 个文件发生未知错误。"
+                                }
+                                Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.height(4.dp))
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(onClick = { viewModel.clearMoveFailures() }) { Text("知道了") }
                     }
                 )
             }
@@ -937,6 +1062,7 @@ private fun AlbumGridContent(
     starredIds: Set<String>,
     onAlbumClick: (Album) -> Unit,
     onAlbumLongClick: (Album) -> Unit,
+    onMigrateAlbum: (Album) -> Unit = {},
     onToggleStar: (String) -> Unit,
     onRefresh: () -> Unit,
     displayMode: AlbumDisplayMode,
@@ -954,6 +1080,8 @@ private fun AlbumGridContent(
     onBatchAddTagsToAlbums: (String, String) -> Unit = { _, _ -> },
     onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
     onDeleteDateMedia: (List<String>) -> Unit = {},
+    onAddDateMediaToClipboard: (List<MediaItem>) -> Unit = {},
+    onPickDateMediaTarget: (List<MediaItem>) -> Unit = {},
     // ── 搜索参数 ──
     isSearchActive: Boolean = false,
     searchQuery: String = "",
@@ -966,6 +1094,7 @@ private fun AlbumGridContent(
     isDateView: Boolean = false,
     onToggleDateView: () -> Unit = {},
     allDateMediaItems: List<MediaItem> = emptyList(),
+    isDateInitialLoading: Boolean = false,
     selectedDatePhotoIndex: Int = -1,
     onDatePhotoClick: (Int) -> Unit = {},
     onDatePhotoBack: () -> Unit = {},
@@ -1007,19 +1136,34 @@ private fun AlbumGridContent(
 
     // ── 日期视图多选状态 ──
     var isDateMultiSelect by remember { mutableStateOf(false) }
-    var selectedDateMediaPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedDateMediaUris by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     fun exitDateMultiSelect() {
         isDateMultiSelect = false
-        selectedDateMediaPaths = emptySet()
+        selectedDateMediaUris = emptySet()
     }
 
-    fun toggleDateMediaSelection(filePath: String) {
-        selectedDateMediaPaths = if (filePath in selectedDateMediaPaths)
-            selectedDateMediaPaths - filePath
+    fun toggleDateMediaSelection(uri: String) {
+        selectedDateMediaUris = if (uri in selectedDateMediaUris)
+            selectedDateMediaUris - uri
         else
-            selectedDateMediaPaths + filePath
-        if (selectedDateMediaPaths.isEmpty()) isDateMultiSelect = false
+            selectedDateMediaUris + uri
+        if (selectedDateMediaUris.isEmpty()) isDateMultiSelect = false
+    }
+
+    val selectedDateMediaItems = remember(allDateMediaItems, selectedDateMediaUris) {
+        allDateMediaItems.filter { it.uri.toString() in selectedDateMediaUris }
+    }
+
+    LaunchedEffect(isDateView) {
+        if (!isDateView && isDateMultiSelect) exitDateMultiSelect()
+    }
+    LaunchedEffect(allDateMediaItems) {
+        if (selectedDateMediaUris.isNotEmpty()) {
+            val currentUris = allDateMediaItems.mapTo(HashSet()) { it.uri.toString() }
+            selectedDateMediaUris = selectedDateMediaUris.intersect(currentUris)
+            if (selectedDateMediaUris.isEmpty()) isDateMultiSelect = false
+        }
     }
 
     val onGridLongClick: (Album) -> Unit = remember {{
@@ -1404,7 +1548,7 @@ private fun AlbumGridContent(
                 } else {
                     Text(
                         if (isAlbumMultiSelect) "已选 ${selectedAlbumIds.size} 项"
-                        else if (isDateMultiSelect) "已选 ${selectedDateMediaPaths.size} 项"
+                        else if (isDateMultiSelect) "已选 ${selectedDateMediaUris.size} 项"
                         else "RCGallery"
                     )
                 }
@@ -1485,6 +1629,15 @@ private fun AlbumGridContent(
                                 onClick = { onOpenTrash() }
                             )
                         }
+                    } else if (isDateMultiSelect) {
+                        val allUris = allDateMediaItems.map { it.uri.toString() }.toSet()
+                        val allSelected = allUris.isNotEmpty() && allUris.all { it in selectedDateMediaUris }
+                        TextButton(onClick = {
+                            selectedDateMediaUris = if (allSelected) emptySet() else allUris
+                            isDateMultiSelect = selectedDateMediaUris.isNotEmpty()
+                        }) {
+                            Text(if (allSelected) "取消全选" else "全选", fontSize = 13.sp)
+                        }
                     }   // ← if (!isAlbumMultiSelect)
                 }
             )
@@ -1507,39 +1660,6 @@ private fun AlbumGridContent(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                     ) {
                         Text("批量加标签 (${selectedAlbumIds.size})", fontSize = 13.sp)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                }
-            } else if (isDateMultiSelect && selectedDateMediaPaths.isNotEmpty()) {
-                BottomAppBar(
-                    containerColor = Color(0xFF1A1A1A),
-                    tonalElevation = 8.dp
-                ) {
-                    Text(
-                        "已选 ${selectedDateMediaPaths.size} 项",
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(start = 16.dp)
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Button(
-                        onClick = { showDateBatchTagDialog = true },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Text("批量加标签 (${selectedDateMediaPaths.size})", fontSize = 13.sp)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            onDeleteDateMedia(selectedDateMediaPaths.toList())
-                            exitDateMultiSelect()
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error
-                        ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Text("删除到回收站 (${selectedDateMediaPaths.size})", fontSize = 13.sp)
                     }
                     Spacer(Modifier.width(8.dp))
                 }
@@ -1646,6 +1766,7 @@ private fun AlbumGridContent(
                         onLongClick = onAlbumLongClick,
                         onToggleStar = onToggleStar,
                         onManageTags = onManageAlbumTags,
+                        onMigrateAlbum = onMigrateAlbum,
                         onGridLongClick = onGridLongClick,
                         parentBadgeMap = parentBadgeMap,
                         parentItems = parentItems,
@@ -1740,34 +1861,42 @@ private fun AlbumGridContent(
                     is AlbumDisplayMode.Grid -> mode.columns
                     is AlbumDisplayMode.List -> 1
                 }
-                val dateViewItems = remember(allDateMediaItems, displayMode) {
-                    buildDateViewItems(allDateMediaItems)
+                var dateViewItems by remember { mutableStateOf<List<DateViewItem>>(emptyList()) }
+                LaunchedEffect(allDateMediaItems) {
+                    val buildStartedAt = System.nanoTime()
+                    val builtItems = withContext(Dispatchers.Default) {
+                        buildDateViewItems(allDateMediaItems)
+                    }
+                    AppLogger.d(
+                        "DatePerf",
+                        "build date items media=${allDateMediaItems.size} " +
+                            "rows=${builtItems.size} ms=${(System.nanoTime() - buildStartedAt) / 1_000_000}"
+                    )
+                    dateViewItems = builtItems
                 }
                 DateGroupRecyclerView(
                     items = dateViewItems,
                     columns = columns,
                     onClick = { mediaItem, allMediaIdx ->
                         if (isDateMultiSelect) {
-                            toggleDateMediaSelection(mediaItem.filePath)
+                            toggleDateMediaSelection(mediaItem.uri.toString())
                         } else {
                             onDatePhotoClick(allMediaIdx)
                         }
                     },
                     onLongClick = { mediaItem ->
                         if (!isDateMultiSelect) isDateMultiSelect = true
-                        toggleDateMediaSelection(mediaItem.filePath)
+                        toggleDateMediaSelection(mediaItem.uri.toString())
                     },
-                    selectedPaths = selectedDateMediaPaths,
-                    onDragSelectRange = { start, end ->
-                        val minIdx = minOf(start, end)
-                        val maxIdx = maxOf(start, end)
-                        val paths = (minIdx..maxIdx).mapNotNull { i ->
-                            (dateViewItems.getOrNull(i) as? DateViewItem.Media)?.item?.filePath
-                        }.toSet()
-                        if (paths.isNotEmpty()) isDateMultiSelect = true
-                        selectedDateMediaPaths = paths
+                    selectedUris = selectedDateMediaUris,
+                    onDragSelectUris = { uris ->
+                        if (uris.isNotEmpty()) isDateMultiSelect = true
+                        selectedDateMediaUris = uris
                     }
                 )
+                if (isDateInitialLoading && dateViewItems.isEmpty()) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                }
             }
             // ── 显示模式 + 排序 悬浮工具栏（在 RecyclerView 上方）──
             Row(
@@ -1797,6 +1926,26 @@ private fun AlbumGridContent(
                     }
                 )
             }  // end Row
+
+            if (isDateMultiSelect && selectedDateMediaUris.isNotEmpty()) {
+                FloatingMultiSelectButtons(
+                    selectedCount = selectedDateMediaUris.size,
+                    onBatchTag = { showDateBatchTagDialog = true },
+                    onDeleteToTrash = {
+                        onDeleteDateMedia(selectedDateMediaItems.map { it.filePath })
+                        exitDateMultiSelect()
+                    },
+                    onAddToClipboard = {
+                        onAddDateMediaToClipboard(selectedDateMediaItems)
+                        exitDateMultiSelect()
+                    },
+                    onPickTargetAlbum = {
+                        onPickDateMediaTarget(selectedDateMediaItems)
+                        exitDateMultiSelect()
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 80.dp)
+                )
+            }
         }  // end Box
 
         // ── 批量 TAG 对话框 ──
@@ -1818,11 +1967,11 @@ private fun AlbumGridContent(
         // ── 日期视图批量 TAG 对话框 ──
         if (showDateBatchTagDialog) {
             BatchTagDialog(
-                title = "批量加标签 - 已选 ${selectedDateMediaPaths.size} 个媒体文件",
+                title = "批量加标签 - 已选 ${selectedDateMediaUris.size} 个媒体文件",
                 allTags = allTags,
                 onAddTag = { tagName ->
-                    selectedDateMediaPaths.forEach { filePath ->
-                        onBatchAddTagsToMedia(filePath, tagName)
+                    selectedDateMediaItems.forEach { item ->
+                        onBatchAddTagsToMedia(item.filePath, tagName)
                     }
                     showDateBatchTagDialog = false
                     exitDateMultiSelect()
@@ -1891,6 +2040,7 @@ private class AlbumGridAdapter(
     private val onLongClick: (Album) -> Unit,
     private val onToggleStar: (String) -> Unit,
     private val onManageTags: (Album) -> Unit = {},
+    private val onMigrateAlbum: (Album) -> Unit = {},
     private val onGridLongClick: ((Album) -> Unit)? = null,  // Grid 模式长按（多选），不传则回退到 onLongClick
     // ── 层级相册相关 ──
     var parentBadgeMap: Map<String, String> = emptyMap(),  // bucketId -> parentName
@@ -1943,7 +2093,7 @@ private class AlbumGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
-            VIEW_TYPE_LIST -> ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, albumTagsMap)
+            VIEW_TYPE_LIST -> ListVH.create(parent, onClick, onLongClick, onToggleStar, onManageTags, onMigrateAlbum, albumTagsMap)
             VIEW_TYPE_LIST_PARENT_HEADER -> ParentHeaderVH.create(parent, onParentClick, onParentLongClick, onAddChildClick, onToggleStar, onDeleteParentClick, onManageSharedTagClick)
             VIEW_TYPE_LIST_CHILD -> ChildRowVH.create(parent, onClick, onRemoveChildClick)
             else -> GridVH.create(parent, onClick, onGridLongClick ?: onLongClick, onToggleStar)
@@ -2311,7 +2461,8 @@ private class ListVH private constructor(
 
     companion object {
         fun create(parent: ViewGroup, onClick: (Album) -> Unit, onLongClick: (Album) -> Unit, onToggleStar: (String) -> Unit,
-                   onManageTags: (Album) -> Unit = {}, albumTagsMap: Map<String, List<TagEntity>> = emptyMap()): ListVH {
+                   onManageTags: (Album) -> Unit = {}, onMigrateAlbum: (Album) -> Unit = {},
+                   albumTagsMap: Map<String, List<TagEntity>> = emptyMap()): ListVH {
             val ctx = parent.context
             val density = ctx.resources.displayMetrics.density
             val root = LinearLayout(ctx).apply {
@@ -2423,6 +2574,36 @@ private class ListVH private constructor(
 
             row.addView(textColumn)
 
+            // ── 普通相册菜单：与父级相册同规格（48dp 容器 + 24dp 图标）──
+            val menuBtn = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (48 * density).toInt(),
+                    (48 * density).toInt()
+                ).apply {
+                    setMargins(0, 0, (3 * density).toInt(), 0)
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                isClickable = true
+                focusable = View.FOCUSABLE
+            }
+            val menuIv = ImageView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    (24 * density).toInt(),
+                    (24 * density).toInt(),
+                    android.view.Gravity.CENTER
+                )
+                scaleType = ImageView.ScaleType.FIT_XY
+                setImageBitmap(
+                    createVerticalDotsBitmap(
+                        (24 * density).toInt(),
+                        (24 * density).toInt(),
+                        android.graphics.Color.GRAY
+                    )
+                )
+            }
+            menuBtn.addView(menuIv)
+            row.addView(menuBtn)
+
             // ── 星标：方形大触控区域（48dp，图标 24dp 居中）──
             val starContainer = FrameLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -2465,6 +2646,25 @@ private class ListVH private constructor(
                 onToggleStar(bucketId)
             }
 
+            menuBtn.setOnClickListener {
+                val rv = root.parent as? RecyclerView ?: return@setOnClickListener
+                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
+                val bucketId = root.tag as? String ?: return@setOnClickListener
+                val album = adapter.albumMap[bucketId] ?: return@setOnClickListener
+                android.widget.PopupMenu(ctx, menuBtn).apply {
+                    menu.add(0, 1, 0, "重命名")
+                    menu.add(0, 2, 1, "迁移存储路径")
+                    setOnMenuItemClickListener { menuItem ->
+                        when (menuItem.itemId) {
+                            1 -> { onLongClick(album); true }
+                            2 -> { onMigrateAlbum(album); true }
+                            else -> false
+                        }
+                    }
+                    show()
+                }
+            }
+
             root.setOnClickListener {
                 val rv = root.parent as? RecyclerView ?: return@setOnClickListener
                 val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnClickListener
@@ -2472,10 +2672,7 @@ private class ListVH private constructor(
                 adapter.albumMap[bucketId]?.let { onClick(it) }
             }
             root.setOnLongClickListener {
-                val rv = root.parent as? RecyclerView ?: return@setOnLongClickListener true
-                val adapter = rv.adapter as? AlbumGridAdapter ?: return@setOnLongClickListener true
-                val bucketId = root.tag as? String ?: return@setOnLongClickListener true
-                adapter.albumMap[bucketId]?.let { onLongClick(it) }
+                // 预留普通相册长按入口；当前不绑定功能。
                 true
             }
             return ListVH(root, starContainer, starIv, onManageTags)
@@ -3349,29 +3546,29 @@ private sealed class DateViewItem {
 private fun buildDateViewItems(allItems: List<MediaItem>): List<DateViewItem> {
     if (allItems.isEmpty()) return emptyList()
     val cal = java.util.Calendar.getInstance()
-    val grouped = allItems.withIndex().groupBy { (_, item) ->
+    val result = ArrayList<DateViewItem>(allItems.size + 512)
+    var previousDateKey = Int.MIN_VALUE
+
+    allItems.forEachIndexed { index, item ->
         cal.timeInMillis = item.dateAdded * 1000L
         val y = cal.get(java.util.Calendar.YEAR)
         val m = cal.get(java.util.Calendar.MONTH)
         val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
-        "$y-${m + 1}-$d"
-    }
-    return grouped.entries
-        .sortedByDescending { it.key }
-        .flatMap { (dateKey, entries) ->
-            listOf(DateViewItem.Header(formatDateLabel(dateKey))) + entries.map { (idx, item) ->
-                DateViewItem.Media(item, allMediaIndex = idx)
-            }
+        val dateKey = y * 10000 + (m + 1) * 100 + d
+        if (dateKey != previousDateKey) {
+            result.add(DateViewItem.Header(formatDateLabel(dateKey)))
+            previousDateKey = dateKey
         }
+        result.add(DateViewItem.Media(item, allMediaIndex = index))
+    }
+    return result
 }
 
 /** 将 "YYYY-M-D" 转为自然语言日期标签 */
-private fun formatDateLabel(dateKey: String): String {
-    val parts = dateKey.split("-")
-    if (parts.size < 3) return dateKey
-    val y = parts[0].toIntOrNull() ?: return dateKey
-    val m = parts[1].toIntOrNull() ?: return dateKey
-    val d = parts[2].toIntOrNull() ?: return dateKey
+private fun formatDateLabel(dateKey: Int): String {
+    val y = dateKey / 10000
+    val m = (dateKey / 100) % 100
+    val d = dateKey % 100
     val now = java.util.Calendar.getInstance()
     val target = java.util.Calendar.getInstance().apply {
         set(y, m - 1, d, 0, 0, 0)
@@ -3397,8 +3594,8 @@ private fun DateGroupRecyclerView(
     columns: Int,
     onClick: (MediaItem, allMediaIndex: Int) -> Unit,
     onLongClick: (MediaItem) -> Unit = {},
-    selectedPaths: Set<String> = emptySet(),
-    onDragSelectRange: (startPos: Int, endPos: Int) -> Unit = { _, _ -> },
+    selectedUris: Set<String> = emptySet(),
+    onDragSelectUris: (Set<String>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     AndroidView(
@@ -3407,7 +3604,8 @@ private fun DateGroupRecyclerView(
             val topPad = (44 * density).toInt()
             val adapter = DateGroupAdapter(emptyList(), columns, onClick).apply {
                 this.onLongClick = onLongClick
-                this.selectedPaths = selectedPaths
+                this.onDragSelectUris = onDragSelectUris
+                this.selectedUris = selectedUris
             }
             val rv = RecyclerView(ctx).apply {
                 layoutManager = GridLayoutManager(ctx, columns).apply {
@@ -3425,6 +3623,8 @@ private fun DateGroupRecyclerView(
             // ── 滑动手势多选 ──
             val dragState = object {
                 var dragStartIdx = -1
+                var dragStartUri = ""
+                var dragStartVersion = -1
                 var isDragging = false
             }
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -3437,16 +3637,19 @@ private fun DateGroupRecyclerView(
                         MotionEvent.ACTION_DOWN -> {
                             dragState.isDragging = false
                             dragState.dragStartIdx = -1
+                            dragState.dragStartUri = ""
                             downX = e.x; downY = e.y
                             handler.removeCallbacksAndMessages(null)
                             handler.postDelayed({
                                 val child = rv.findChildViewUnder(downX, downY) ?: return@postDelayed
                                 val pos = rv.getChildAdapterPosition(child)
                                 if (pos < 0) return@postDelayed
-                                val item = items.getOrNull(pos) as? DateViewItem.Media ?: return@postDelayed
+                                val item = adapter.items.getOrNull(pos) as? DateViewItem.Media ?: return@postDelayed
                                 dragState.dragStartIdx = pos
+                                dragState.dragStartUri = item.item.uri.toString()
+                                dragState.dragStartVersion = adapter.listVersion
                                 dragState.isDragging = true
-                                onLongClick(item.item)
+                                adapter.onLongClick(item.item)
                             }, longPressMs)
                             return false
                         }
@@ -3459,10 +3662,14 @@ private fun DateGroupRecyclerView(
                             return false
                         }
                         MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            val wasDragging = dragState.isDragging
                             handler.removeCallbacksAndMessages(null)
                             dragState.isDragging = false
                             dragState.dragStartIdx = -1
-                            return false
+                            dragState.dragStartUri = ""
+                            // Consume the release after a recognized long press so the item
+                            // click listener cannot immediately toggle the selection back off.
+                            return wasDragging
                         }
                     }
                     return false
@@ -3474,11 +3681,29 @@ private fun DateGroupRecyclerView(
                         MotionEvent.ACTION_MOVE -> {
                             val child = rv.findChildViewUnder(e.x, e.y)
                             val pos = child?.let { rv.getChildAdapterPosition(it) } ?: return
-                            onDragSelectRange(dragState.dragStartIdx, pos)
+                            val startPos = if (dragState.dragStartVersion == adapter.listVersion) {
+                                dragState.dragStartIdx
+                            } else {
+                                adapter.positionOfUri(dragState.dragStartUri)
+                            }
+                            if (startPos < 0) {
+                                dragState.isDragging = false
+                                dragState.dragStartIdx = -1
+                                dragState.dragStartUri = ""
+                                return
+                            }
+                            val minPos = minOf(startPos, pos)
+                            val maxPos = maxOf(startPos, pos)
+                            val rangeUris = (minPos..maxPos).mapNotNull { index ->
+                                (adapter.items.getOrNull(index) as? DateViewItem.Media)
+                                    ?.item?.uri?.toString()
+                            }.toSet()
+                            adapter.onDragSelectUris(rangeUris)
                         }
                         MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                             dragState.isDragging = false
                             dragState.dragStartIdx = -1
+                            dragState.dragStartUri = ""
                         }
                     }
                 }
@@ -3488,27 +3713,19 @@ private fun DateGroupRecyclerView(
         },
         update = { rv ->
             val adapter = rv.adapter as DateGroupAdapter
-            val oldSelectedPaths = adapter.selectedPaths
             val oldColumns = adapter.columns
             adapter.columns = columns
+            adapter.onClick = onClick
             adapter.onLongClick = onLongClick
-            adapter.selectedPaths = selectedPaths
+            adapter.onDragSelectUris = onDragSelectUris
+            adapter.updateSelection(selectedUris)
 
-            val oldItems = adapter.items
             val columnsChanged = oldColumns != columns
-            if (oldItems !== items || columnsChanged) {
-                adapter.items = items
-                if (columnsChanged) {
-                    // 列数变化：全量重建 VH，确保 onCreateViewHolder 用正确列数计算 side
-                    adapter.notifyDataSetChanged()
-                } else {
-                    val diff = DiffUtil.calculateDiff(DateGroupDiffCallback(oldItems, items))
-                    diff.dispatchUpdatesTo(adapter)
-                    rv.requestLayout()
-                }
-            } else if (oldSelectedPaths != selectedPaths) {
-                adapter.notifyItemRangeChanged(0, adapter.itemCount)
+            if (columnsChanged) {
+                // 列数变化：全量重建 VH，确保 onCreateViewHolder 使用正确尺寸和类型。
+                adapter.notifyDataSetChanged()
             }
+            adapter.submitItems(items)
 
             (rv.layoutManager as GridLayoutManager).spanCount = columns
             (rv.layoutManager as GridLayoutManager).spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
@@ -3522,22 +3739,122 @@ private fun DateGroupRecyclerView(
 }
 
 /** 日期分组 RecyclerView 适配器 */
+private object DateThumbnailLoader {
+    private const val CACHE_SIZE_KB = 24 * 1024
+    private val cache = object : android.util.LruCache<String, android.graphics.Bitmap>(CACHE_SIZE_KB) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int =
+            (value.allocationByteCount / 1024).coerceAtLeast(1)
+    }
+    private val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val jobs = java.util.WeakHashMap<ImageView, Job>()
+
+    fun load(imageView: ImageView, uri: Uri, targetSizePx: Int) {
+        cancel(imageView)
+        val requestSize = targetSizePx.coerceAtLeast(1)
+        val key = "$uri@$requestSize"
+        imageView.tag = key
+        imageView.setImageDrawable(null)
+
+        cache.get(key)?.takeUnless(android.graphics.Bitmap::isRecycled)?.let {
+            imageView.setImageBitmap(it)
+            return
+        }
+
+        jobs[imageView] = scope.launch {
+            val bitmap = loadSystemThumbnail(imageView, uri, requestSize)
+            if (imageView.tag != key) return@launch
+            if (bitmap != null) {
+                cache.put(key, bitmap)
+                imageView.setImageBitmap(bitmap)
+            } else {
+                imageView.load(uri) {
+                    size(requestSize)
+                    precision(Precision.INEXACT)
+                    bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
+                    crossfade(false)
+                }
+            }
+        }
+    }
+
+    fun cancel(imageView: ImageView) {
+        jobs.remove(imageView)?.cancel()
+        imageView.tag = null
+    }
+
+    private suspend fun loadSystemThumbnail(
+        imageView: ImageView,
+        uri: Uri,
+        size: Int
+    ): android.graphics.Bitmap? = suspendCancellableCoroutine { continuation ->
+        val signal = android.os.CancellationSignal()
+        continuation.invokeOnCancellation { signal.cancel() }
+        executor.execute {
+            val bitmap = runCatching {
+                imageView.context.contentResolver.loadThumbnail(
+                    uri,
+                    android.util.Size(size, size),
+                    signal
+                )
+            }.getOrNull()
+            if (continuation.isActive) continuation.resume(bitmap)
+        }
+    }
+}
+
 private class DateGroupAdapter(
-    var items: List<DateViewItem>,
+    initialItems: List<DateViewItem>,
     var columns: Int,
-    private val onClick: (MediaItem, allMediaIndex: Int) -> Unit
+    var onClick: (MediaItem, allMediaIndex: Int) -> Unit
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
         const val VIEW_TYPE_HEADER = 0
         const val VIEW_TYPE_MEDIA = 1
         const val VIEW_TYPE_LIST_MEDIA = 2
+        private const val PAYLOAD_SELECTION = "date_selection"
     }
 
     var onLongClick: (MediaItem) -> Unit = {}
-    var selectedPaths: Set<String> = emptySet()
+    var onDragSelectUris: (Set<String>) -> Unit = {}
+    var selectedUris: Set<String> = emptySet()
+    var listVersion: Int = 0
+        private set
+    private var submittedItems: List<DateViewItem> = initialItems
+    private var mediaPositionByUri: Map<String, Int> = emptyMap()
+    private val differ = AsyncListDiffer(this, DateViewItemDiffCallback())
+    val items: List<DateViewItem> get() = differ.currentList
 
-    init { setHasStableIds(true) }
+    init {
+        setHasStableIds(true)
+        differ.submitList(initialItems)
+    }
+
+    fun submitItems(newItems: List<DateViewItem>) {
+        if (submittedItems === newItems) return
+        submittedItems = newItems
+        differ.submitList(newItems) {
+            listVersion++
+            mediaPositionByUri = items.mapIndexedNotNull { index, item ->
+                (item as? DateViewItem.Media)?.let { it.item.uri.toString() to index }
+            }.toMap()
+        }
+    }
+
+    fun positionOfUri(uri: String): Int = mediaPositionByUri[uri] ?: -1
+
+    fun updateSelection(newSelection: Set<String>) {
+        if (selectedUris == newSelection) return
+        val changedUris = (selectedUris - newSelection) + (newSelection - selectedUris)
+        selectedUris = newSelection
+        val changedPositions = changedUris.mapNotNull(mediaPositionByUri::get).distinct()
+        if (changedPositions.size > 64) {
+            notifyItemRangeChanged(0, itemCount, PAYLOAD_SELECTION)
+        } else {
+            changedPositions.forEach { position -> notifyItemChanged(position, PAYLOAD_SELECTION) }
+        }
+    }
 
     override fun getItemId(position: Int): Long {
         return when (val item = items[position]) {
@@ -3669,14 +3986,6 @@ private class DateGroupAdapter(
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item, item.allMediaIndex)
                 }
-                row.setOnLongClickListener {
-                    val pos = rv.getChildAdapterPosition(row)
-                    if (pos < 0) return@setOnLongClickListener true
-                    val item = items.getOrNull(pos) as? DateViewItem.Media
-                    if (item != null) onLongClick(item.item)
-                    true
-                }
-
                 ListMediaViewHolder(row, iv, nameTv, infoTv)
             }
             else -> {
@@ -3735,13 +4044,6 @@ private class DateGroupAdapter(
                     val item = items.getOrNull(pos) as? DateViewItem.Media
                     if (item != null) onClick(item.item, item.allMediaIndex)
                 }
-                frame.setOnLongClickListener {
-                    val pos = rv.getChildAdapterPosition(frame)
-                    if (pos < 0) return@setOnLongClickListener true
-                    val item = items.getOrNull(pos) as? DateViewItem.Media
-                    if (item != null) onLongClick(item.item)
-                    true
-                }
                 object : RecyclerView.ViewHolder(frame) {}
             }
         }
@@ -3753,10 +4055,14 @@ private class DateGroupAdapter(
                 (holder.itemView as TextView).text = item.label
             }
             is DateViewItem.Media -> {
-                val isSelected = item.item.filePath in selectedPaths
+                val isSelected = item.item.uri.toString() in selectedUris
                 if (holder is ListMediaViewHolder) {
                     holder.itemView.tag = position
-                    holder.imageView.load(item.item.uri) { crossfade(false) }
+                    DateThumbnailLoader.load(
+                        holder.imageView,
+                        item.item.uri,
+                        holder.imageView.layoutParams.width
+                    )
                     holder.nameView.text = item.item.fileName
                     holder.infoView.text = buildString {
                         if (item.item.isVideo && item.item.duration > 0) {
@@ -3800,7 +4106,7 @@ private class DateGroupAdapter(
                             outline.setRoundRect(0, 0, view.width, view.height, cornerRadiusPx)
                         }
                     }
-                    iv.load(item.item.uri) { crossfade(false) }
+                    DateThumbnailLoader.load(iv, item.item.uri, side)
                     val checkmark = frame.findViewById<FrameLayout>(android.R.id.checkbox)
                     if (checkmark != null) {
                         checkmark.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
@@ -3808,6 +4114,33 @@ private class DateGroupAdapter(
                 }
             }
         }
+    }
+
+    override fun onBindViewHolder(
+        holder: RecyclerView.ViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        if (PAYLOAD_SELECTION in payloads) {
+            val media = items.getOrNull(position) as? DateViewItem.Media ?: return
+            val isSelected = media.item.uri.toString() in selectedUris
+            val checkmark = holder.itemView.findViewById<FrameLayout>(android.R.id.checkbox)
+            checkmark?.visibility = if (isSelected) android.view.View.VISIBLE else android.view.View.GONE
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
+    }
+
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        val imageView = when (holder) {
+            is ListMediaViewHolder -> holder.imageView
+            else -> (holder.itemView as? FrameLayout)?.getChildAt(0) as? ImageView
+        }
+        imageView?.let {
+            DateThumbnailLoader.cancel(it)
+            it.setImageDrawable(null)
+        }
+        super.onViewRecycled(holder)
     }
 
     private class ListMediaViewHolder(
@@ -3818,26 +4151,16 @@ private class DateGroupAdapter(
     ) : RecyclerView.ViewHolder(itemView) {}
 }
 
-private class DateGroupDiffCallback(
-    private val old: List<DateViewItem>,
-    private val new: List<DateViewItem>
-) : DiffUtil.Callback() {
-    override fun getOldListSize() = old.size
-    override fun getNewListSize() = new.size
-
-    override fun areItemsTheSame(oldPos: Int, newPos: Int): Boolean {
+private class DateViewItemDiffCallback : DiffUtil.ItemCallback<DateViewItem>() {
+    override fun areItemsTheSame(old: DateViewItem, new: DateViewItem): Boolean {
         return when {
-            old[oldPos] is DateViewItem.Header && new[newPos] is DateViewItem.Header ->
-                (old[oldPos] as DateViewItem.Header).label == (new[newPos] as DateViewItem.Header).label
-            old[oldPos] is DateViewItem.Media && new[newPos] is DateViewItem.Media ->
-                (old[oldPos] as DateViewItem.Media).item.id == (new[newPos] as DateViewItem.Media).item.id
+            old is DateViewItem.Header && new is DateViewItem.Header -> old.label == new.label
+            old is DateViewItem.Media && new is DateViewItem.Media -> old.item.uri == new.item.uri
             else -> false
         }
     }
 
-    override fun areContentsTheSame(oldPos: Int, newPos: Int): Boolean {
-        return old[oldPos] == new[newPos]
-    }
+    override fun areContentsTheSame(old: DateViewItem, new: DateViewItem): Boolean = old == new
 }
 
 

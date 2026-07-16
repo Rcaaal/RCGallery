@@ -53,4 +53,8 @@ class ViewHistoryRepository(context: Context) {
     suspend fun deleteByKeys(targetKeys: List<String>) {
         if (targetKeys.isNotEmpty()) dao.deleteByKeys(targetKeys)
     }
+
+    suspend fun updateTargetKey(oldKey: String, newKey: String) {
+        if (oldKey != newKey) dao.updateTargetKey(oldKey, newKey)
+    }
 }

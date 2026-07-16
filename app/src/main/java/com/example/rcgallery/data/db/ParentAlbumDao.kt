@@ -72,6 +72,10 @@ interface ParentAlbumDao {
     @Query("SELECT parentId FROM parent_children WHERE childBucketId = :childBucketId LIMIT 1")
     suspend fun getParentIdForChild(childBucketId: String): Long?
 
+    /** 相册移动到新目录后同步 MediaStore bucketId，保留父级归属。 */
+    @Query("UPDATE parent_children SET childBucketId = :newBucketId WHERE childBucketId = :oldBucketId")
+    suspend fun replaceChildBucketId(oldBucketId: String, newBucketId: String)
+
     /** 批量添加子级 */
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun addChildren(children: List<ParentChildEntity>)

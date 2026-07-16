@@ -11,11 +11,17 @@ import jcifs.smb.SmbRandomAccessFile
 import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * SMB 仓库 — 封装 jcifs-ng 的所有操作。
@@ -66,8 +72,8 @@ class SmbRepository {
         /** 单次 readBytes 最大读取字节数（50MB，防止 OOM） */
         private const val MAX_READ_BYTES = 50L * 1024 * 1024
 
-        /** 认证缓存生存时间（10 分钟） */
-        private const val AUTH_CACHE_TTL_MS = 10 * 60 * 1000L
+        /** SMB 读取和本地写入之间的固定缓冲池，避免传输期间反复分配大数组。 */
+        private const val TRANSFER_BUFFER_COUNT = 3
     }
 
     private val baseCtx: CIFSContext by lazy {
@@ -79,42 +85,59 @@ class SmbRepository {
     //  认证系统
     // ══════════════════════════════════════
 
-    private data class CachedAuth(
-        val context: CIFSContext,
-        val timestamp: Long = System.currentTimeMillis()
-    ) {
-        fun isFresh(): Boolean = (System.currentTimeMillis() - timestamp) < AUTH_CACHE_TTL_MS
-    }
+    private data class CachedAuth(val context: CIFSContext)
 
-    private val authCache = HashMap<String, CachedAuth>()
+    private val authCache = ConcurrentHashMap<String, CachedAuth>()
+    private val authLocks = ConcurrentHashMap<String, Any>()
 
     /**
-     * 针对路径获取认证上下文（按 host 缓存，带 TTL 失效）。
+     * 针对路径获取认证上下文。认证方式不是短期令牌，不做定时失效；
+     * 只有真实 SMB 操作失败时才由 [withConnectionRetry] 清理并重建。
      */
     private fun getContextForPath(path: String): CIFSContext {
         val host = extractHost(path)
-        val cached = authCache[host]
-        if (cached != null && cached.isFresh()) return cached.context
+        authCache[host]?.let { return it.context }
 
-        authCache.remove(host)
-        val dirPath = extractDirectory(path)
+        val hostLock = authLocks.computeIfAbsent(host) { Any() }
+        synchronized(hostLock) {
+            authCache[host]?.let { return it.context }
+            val dirPath = extractDirectory(path)
 
-        for (cred in listOf(
-            baseCtx.withAnonymousCredentials(),
-            baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "", "")),
-            baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "Guest", ""))
-        )) {
-            try {
-                val testFile = SmbFile(dirPath, cred)
-                testFile.listFiles()
-                authCache[host] = CachedAuth(cred)
-                return cred
-            } catch (_: SmbAuthException) {
+            for (cred in listOf(
+                baseCtx.withAnonymousCredentials(),
+                baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "", "")),
+                baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "Guest", ""))
+            )) {
+                try {
+                    val testFile = SmbFile(dirPath, cred)
+                    testFile.listFiles()
+                    authCache[host] = CachedAuth(cred)
+                    return cred
+                } catch (_: SmbAuthException) {
+                }
+            }
+            val fallback = baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "", ""))
+            authCache[host] = CachedAuth(fallback)
+            return fallback
+        }
+    }
+
+    /** 对只读/可安全重试的 SMB 操作执行一次断线恢复。 */
+    private fun <T> withConnectionRetry(path: String, operation: (CIFSContext) -> T): T {
+        try {
+            return operation(getContextForPath(path))
+        } catch (first: Exception) {
+            if (first is CancellationException) throw first
+            val host = extractHost(path)
+            authCache.remove(host)
+            AppLogger.e("SMB-Reconnect", "retry host=$host path=$path", first)
+            return try {
+                operation(getContextForPath(path))
+            } catch (second: Exception) {
+                second.addSuppressed(first)
+                throw second
             }
         }
-        val fallback = baseCtx.withCredentials(NtlmPasswordAuthenticator(null, "", ""))
-        authCache[host] = CachedAuth(fallback)
-        return fallback
     }
 
     /** 取路径的父目录，保证以 / 结尾，无双重 // */
@@ -134,12 +157,14 @@ class SmbRepository {
 
     suspend fun listShares(host: String): Result<List<SmbShare>> = withContext(Dispatchers.IO) {
         runCatching {
-            val ctx = getContextForPath("smb://$host/")
-            val root = SmbFile("smb://$host/", ctx)
-            root.listFiles().mapNotNull { smbFile ->
-                val rawName = smbFile.name.trimEnd('/')
-                if (rawName.endsWith("$")) null
-                else SmbShare(name = rawName, path = smbFile.path)
+            val rootPath = "smb://$host/"
+            withConnectionRetry(rootPath) { ctx ->
+                val root = SmbFile(rootPath, ctx)
+                root.listFiles().mapNotNull { smbFile ->
+                    val rawName = smbFile.name.trimEnd('/')
+                    if (rawName.endsWith("$")) null
+                    else SmbShare(name = rawName, path = smbFile.path)
+                }
             }
         }
     }
@@ -151,7 +176,7 @@ class SmbRepository {
     /**
      * 快速扫描文件夹内容 — 只做顶层 [listFiles]，不扫子文件夹内部。
      *
-     * 子文件夹的 [SmbSubFolder.mediaCount] 始终为 0，
+     * 子文件夹的 [SmbSubFolder.mediaCount] 初始为 -1（尚未扫描），
      * [SmbSubFolder.coverPath] 始终为空字符串。
      * 由调用方后续通过 [scanSingleFolder] 逐步填充。
      *
@@ -163,15 +188,9 @@ class SmbRepository {
     ): Result<SmbFolderScanResult> = withContext(Dispatchers.IO) {
         try {
             val dirPath = ensureTrailingSlash(url)
-            val ctx = getContextForPath(dirPath)
-            Result.success(doQuickScan(dirPath, ctx))
-        } catch (e: SmbAuthException) {
-            val host = extractHost(url)
-            authCache.remove(host)
-            val dirPath = ensureTrailingSlash(url)
-            val newCtx = getContextForPath(dirPath)
-            Result.success(doQuickScan(dirPath, newCtx))
+            Result.success(withConnectionRetry(dirPath) { ctx -> doQuickScan(dirPath, ctx) })
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
@@ -211,29 +230,34 @@ class SmbRepository {
      * 认证上下文从缓存获取（~0ms）。
      *
      * @param folder 原始文件夹信息（name 和 path），扫描后返回更新版
-     * @return 填充了 [mediaCount] 和 [coverPath] 的 [SmbSubFolder]
+     * @return 成功时返回填充了 [mediaCount] 和 [coverPath] 的文件夹；失败不伪装成 0 项
      */
-    suspend fun scanSingleFolder(folder: SmbSubFolder): SmbSubFolder = withContext(Dispatchers.IO) {
-        runCatching {
-            val ctx = getContextForPath(folder.path)
+    suspend fun scanSingleFolder(folder: SmbSubFolder): Result<SmbSubFolder> = withContext(Dispatchers.IO) {
+        try {
             val dirPath = ensureTrailingSlash(folder.path)
-            val dir = SmbFile(dirPath, ctx)
-            val children = dir.listFiles()
-            var cover = ""
-            var count = 0
-            for (c in children) {
-                if (!c.isDirectory) {
-                    val name = c.name
-                    val isImg = IMAGE_EXTS.any { name.endsWith(it, ignoreCase = true) }
-                    val isVid = VIDEO_EXTS.any { name.endsWith(it, ignoreCase = true) }
-                    if (isImg || isVid) {
-                        count++
-                        if (cover.isEmpty() && isImg) cover = c.path
+            Result.success(withConnectionRetry(dirPath) { ctx ->
+                val dir = SmbFile(dirPath, ctx)
+                val children = dir.listFiles()
+                var cover = ""
+                var count = 0
+                for (c in children) {
+                    if (!c.isDirectory) {
+                        val name = c.name
+                        val isImg = IMAGE_EXTS.any { name.endsWith(it, ignoreCase = true) }
+                        val isVid = VIDEO_EXTS.any { name.endsWith(it, ignoreCase = true) }
+                        if (isImg || isVid) {
+                            count++
+                            if (cover.isEmpty() && isImg) cover = c.path
+                        }
                     }
                 }
-            }
-            folder.copy(coverPath = cover, mediaCount = count)
-        }.getOrDefault(folder)
+                folder.copy(coverPath = cover, mediaCount = count)
+            })
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            AppLogger.e("SMB-SCAN", "child scan failed path=${folder.path}", e)
+            Result.failure(e)
+        }
     }
 
     // ══════════════════════════════════════
@@ -256,15 +280,9 @@ class SmbRepository {
     ): Result<SmbFolderScanResult> = withContext(Dispatchers.IO) {
         try {
             val dirPath = ensureTrailingSlash(url)
-            val ctx = getContextForPath(dirPath)
-            Result.success(doScan(dirPath, ctx, onProgress))
-        } catch (e: SmbAuthException) {
-            val host = extractHost(url)
-            authCache.remove(host)
-            val dirPath = ensureTrailingSlash(url)
-            val newCtx = getContextForPath(dirPath)
-            Result.success(doScan(dirPath, newCtx, onProgress))
+            Result.success(withConnectionRetry(dirPath) { ctx -> doScan(dirPath, ctx, onProgress) })
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
@@ -480,25 +498,76 @@ class SmbRepository {
             val smbFile = SmbFile(url, ctx)
             if (!smbFile.exists()) throw IllegalStateException("SMB source does not exist: $url")
             val totalSize = smbFile.length()
+            val readNanos = AtomicLong(0L)
+            val readCount = AtomicInteger(0)
+            var writeNanos = 0L
             var totalCopied = 0L
-            SmbFileInputStream(smbFile).use { input ->
-                val buffer = ByteArray(bufferSize)
-                while (true) {
-                    val bytesRead = input.read(buffer)
-                    if (bytesRead < 0) break
-                    output.write(buffer, 0, bytesRead)
-                    totalCopied += bytesRead
-                    onProgress?.invoke(totalCopied, totalSize)
+
+            data class TransferChunk(val buffer: ByteArray, val size: Int)
+
+            coroutineScope {
+                val freeBuffers = Channel<ByteArray>(TRANSFER_BUFFER_COUNT)
+                val filledBuffers = Channel<TransferChunk>(TRANSFER_BUFFER_COUNT)
+                repeat(TRANSFER_BUFFER_COUNT) {
+                    check(freeBuffers.trySend(ByteArray(bufferSize)).isSuccess)
+                }
+
+                val reader = launch(Dispatchers.IO) {
+                    try {
+                        SmbFileInputStream(smbFile).use { input ->
+                            while (true) {
+                                val buffer = freeBuffers.receive()
+                                val readStartedAt = System.nanoTime()
+                                val bytesRead = input.read(buffer)
+                                readNanos.addAndGet(System.nanoTime() - readStartedAt)
+                                if (bytesRead < 0) {
+                                    freeBuffers.trySend(buffer)
+                                    break
+                                }
+                                readCount.incrementAndGet()
+                                filledBuffers.send(TransferChunk(buffer, bytesRead))
+                            }
+                        }
+                        filledBuffers.close()
+                    } catch (error: Throwable) {
+                        filledBuffers.close(error)
+                        throw error
+                    }
+                }
+
+                try {
+                    for (chunk in filledBuffers) {
+                        val writeStartedAt = System.nanoTime()
+                        output.write(chunk.buffer, 0, chunk.size)
+                        writeNanos += System.nanoTime() - writeStartedAt
+                        totalCopied += chunk.size
+                        onProgress?.invoke(totalCopied, totalSize)
+                        freeBuffers.send(chunk.buffer)
+                    }
+                    reader.join()
+                    output.flush()
+                } finally {
+                    reader.cancel()
+                    freeBuffers.cancel()
+                    filledBuffers.cancel()
                 }
             }
-            output.flush()
+
             val elapsedSeconds = ((System.nanoTime() - startedAtNs) / 1_000_000_000.0)
                 .coerceAtLeast(0.001)
             val throughputMbps = totalCopied / (1024.0 * 1024.0) / elapsedSeconds
+            val averageReadKb = if (readCount.get() > 0) {
+                totalCopied / readCount.get() / 1024
+            } else {
+                0L
+            }
             AppLogger.d(
                 "SMB-Transfer",
                 "read complete: bytes=$totalCopied seconds=${"%.2f".format(elapsedSeconds)} " +
-                    "speed=${"%.1f".format(throughputMbps)}MB/s buffer=${bufferSize / 1024}KB"
+                    "speed=${"%.1f".format(throughputMbps)}MB/s " +
+                    "readMs=${readNanos.get() / 1_000_000} writeMs=${writeNanos / 1_000_000} " +
+                    "reads=${readCount.get()} avgRead=${averageReadKb}KB " +
+                    "buffer=${bufferSize / 1024}KB pipeline=$TRANSFER_BUFFER_COUNT"
             )
             Result.success(totalCopied)
         } catch (error: CancellationException) {
@@ -621,8 +690,9 @@ class SmbRepository {
     }
 
     fun getRandomAccessFile(url: String): Result<SmbRandomAccessFile> = runCatching {
-        val ctx = getContextForPath(url)
-        SmbRandomAccessFile(SmbFile(url, ctx), "r")
+        withConnectionRetry(url) { ctx ->
+            SmbRandomAccessFile(SmbFile(url, ctx), "r")
+        }
     }
 
     // ══════════════════════════════════════
@@ -642,5 +712,10 @@ class SmbRepository {
     fun clearAuthCache(host: String? = null) {
         if (host != null) authCache.remove(host)
         else authCache.clear()
+    }
+
+    /** 播放器检测到传输失效时，按路径清理对应主机的认证上下文。 */
+    fun invalidateConnection(path: String) {
+        authCache.remove(extractHost(path))
     }
 }

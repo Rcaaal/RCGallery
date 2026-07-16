@@ -38,4 +38,8 @@ interface ViewHistoryDao {
 
     @Query("DELETE FROM view_history WHERE targetKey IN (:targetKeys)")
     suspend fun deleteByKeys(targetKeys: List<String>)
+
+    /** 仅迁移路径键，不改变 viewedAt，避免移动文件改变最近访问顺序。 */
+    @Query("UPDATE OR IGNORE view_history SET targetKey = :newKey WHERE targetKey = :oldKey")
+    suspend fun updateTargetKey(oldKey: String, newKey: String)
 }

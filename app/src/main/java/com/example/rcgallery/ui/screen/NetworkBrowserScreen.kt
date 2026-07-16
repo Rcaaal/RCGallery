@@ -503,15 +503,43 @@ private fun SmbPasteProgressOverlay(progress: com.example.rcgallery.viewmodel.Ga
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (progress.totalBytes > 0L) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "${formatTransferBytes(progress.bytesCopied)} / " +
+                            "${formatTransferBytes(progress.totalBytes)}  ·  " +
+                            formatTransferRate(progress.bytesPerSecond),
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 LinearProgressIndicator(
-                    progress = { progress.current.toFloat() / progress.total.toFloat() },
+                    progress = {
+                        if (progress.totalBytes > 0L) {
+                            (progress.bytesCopied.toDouble() / progress.totalBytes.toDouble())
+                                .coerceIn(0.0, 1.0).toFloat()
+                        } else {
+                            progress.current.toFloat() / progress.total.toFloat()
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth().height(4.dp),
                 )
             }
         }
     }
 }
+
+private fun formatTransferBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> "%.2f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> "%.1f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+private fun formatTransferRate(bytesPerSecond: Long): String =
+    if (bytesPerSecond <= 0L) "计算速率…"
+    else "%.1f MB/s".format(bytesPerSecond / (1024.0 * 1024.0))
 
 // ══════════════════════════════════════
 //  设备列表
@@ -990,7 +1018,11 @@ private class FolderVH private constructor(
     fun bind(folder: SmbSubFolder, pos: Int) {
         itemView.tag = folder
         nameTv.text = folder.name
-        countTv.text = "${folder.mediaCount} 项"
+        countTv.text = when {
+            folder.mediaCount >= 0 -> "${folder.mediaCount} 项"
+            folder.mediaCount == -2 -> "加载失败"
+            else -> "加载中..."
+        }
 
         val path = folder.coverPath
         if (coverIv.tag != path) {
@@ -1241,7 +1273,11 @@ private class FolderListVH private constructor(
     fun bind(folder: SmbSubFolder) {
         itemView.tag = folder
         nameTv.text = folder.name
-        countTv.text = "${folder.mediaCount} 项"
+        countTv.text = when {
+            folder.mediaCount >= 0 -> "${folder.mediaCount} 项"
+            folder.mediaCount == -2 -> "加载失败"
+            else -> "加载中..."
+        }
     }
 }
 

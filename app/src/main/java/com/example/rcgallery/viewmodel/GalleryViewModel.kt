@@ -84,6 +84,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ── 日期视图：全部媒体项（按 dateAdded 降序，用于按天分组）──
     private val _allMediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val allMediaItems: StateFlow<List<MediaItem>> = _allMediaItems.asStateFlow()
+    private val _isAllMediaInitialLoading = MutableStateFlow(false)
+    val isAllMediaInitialLoading: StateFlow<Boolean> = _isAllMediaInitialLoading.asStateFlow()
+    private val _isAllMediaLoadingMore = MutableStateFlow(false)
+    val isAllMediaLoadingMore: StateFlow<Boolean> = _isAllMediaLoadingMore.asStateFlow()
     @Volatile private var allMediaViewActive = false
 
     private val albumsLoadMutex = Mutex()
@@ -165,6 +169,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _recentMoveAlbums = MutableStateFlow<List<RecentMoveAlbum>>(emptyList())
     val recentMoveAlbums: StateFlow<List<RecentMoveAlbum>> = _recentMoveAlbums.asStateFlow()
 
+    /** 最近使用过的相册迁移父目录，和文件 MOVE 的目标相册记录分开保存。 */
+    private val _recentMigrationRoots = MutableStateFlow<List<RecentMoveAlbum>>(emptyList())
+    val recentMigrationRoots: StateFlow<List<RecentMoveAlbum>> = _recentMigrationRoots.asStateFlow()
+
     /** 最近移动/复制操作记录（最多 50 条，持久化，用于"最近移动"Tab） */
     private val _moveRecords = MutableStateFlow<List<MoveRecord>>(emptyList())
     val moveRecords: StateFlow<List<MoveRecord>> = _moveRecords.asStateFlow()
@@ -178,7 +186,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val current: Int,
         val total: Int,
         val fileName: String,
-        val mode: PasteMode
+        val mode: PasteMode,
+        val bytesCopied: Long = 0L,
+        val totalBytes: Long = 0L,
+        val bytesPerSecond: Long = 0L
     )
 
     private val _pasteProgress = MutableStateFlow<PasteProgress?>(null)
@@ -588,6 +599,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         _smbOperationHistory.value = loadSmbOperationHistory()
         // 恢复最近移动相册记录
         _recentMoveAlbums.value = loadRecentMoveAlbums()
+        _recentMigrationRoots.value = loadRecentMigrationRoots()
         // 恢复最近移动/复制操作记录
         _moveRecords.value = loadMoveRecords()
         refreshRecordUndoability()
@@ -691,30 +703,92 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val generation = allMediaLoadGeneration.incrementAndGet()
         allMediaLoadJob?.cancel()
         allMediaLoadJob = viewModelScope.launch {
-            allMediaLoadMutex.withLock {
-                var loaded = withContext(Dispatchers.IO) {
-                    val mediaStoreItems = repository.loadMediaItems(albumId = null, pageSize = 10000)
-                        .getOrDefault(emptyList())
-                    val hiddenItems = _systemHiddenAlbumPaths.value.flatMap { path ->
-                        repository.loadMediaItemsFromDirectory(path).getOrDefault(emptyList())
+            val publishProgressively = _allMediaItems.value.isEmpty()
+            _isAllMediaInitialLoading.value = publishProgressively
+            _isAllMediaLoadingMore.value = !publishProgressively
+            try {
+                allMediaLoadMutex.withLock {
+                    val trashEntries = withContext(Dispatchers.IO) { trashManager.getAll() }
+                    val trashedUris = trashEntries.mapTo(HashSet()) { it.uri }
+                    val trashedPaths = trashEntries.mapTo(HashSet()) { normalizedPath(it.filePath) }
+                    val ignoredDirs = _ignoredFolderPaths.value
+                    val accumulated = LinkedHashMap<String, MediaItem>()
+
+                    fun addVisible(items: List<MediaItem>) {
+                        items.forEach { item ->
+                            val normalized = normalizedPath(item.filePath)
+                            val isTrashed = item.uri.toString() in trashedUris || normalized in trashedPaths
+                            val isIgnored = ignoredDirs.any { item.filePath.startsWith(it) }
+                            if (!isTrashed && !isIgnored) accumulated[normalized] = item
+                        }
                     }
-                    (mediaStoreItems + hiddenItems).distinctBy { normalizedPath(it.filePath) }
-                }
-                if (generation != allMediaLoadGeneration.get()) return@withLock
-                val trashEntries = withContext(Dispatchers.IO) { trashManager.getAll() }
-                val trashedUris = trashEntries.mapTo(HashSet()) { it.uri }
-                val trashedPaths = trashEntries.mapTo(HashSet()) { normalizedPath(it.filePath) }
-                loaded = loaded.filter {
-                    it.uri.toString() !in trashedUris && normalizedPath(it.filePath) !in trashedPaths
-                }
-                val ignoredDirs = _ignoredFolderPaths.value
-                if (ignoredDirs.isNotEmpty()) {
-                    loaded = loaded.filterNot { item ->
-                        ignoredDirs.any { item.filePath.startsWith(it) }
+
+                    suspend fun snapshot(): List<MediaItem> = withContext(Dispatchers.Default) {
+                        accumulated.values.sortedByDescending { it.dateAdded }
                     }
+
+                    val firstPage = withContext(Dispatchers.IO) {
+                        repository.loadAllMediaPage(pageSize = 500, offset = 0)
+                            .getOrDefault(emptyList())
+                    }
+                    val firstMergeStartedAt = System.nanoTime()
+                    withContext(Dispatchers.Default) {
+                        addVisible(firstPage)
+                    }
+
+                    val firstSnapshot = snapshot()
+                    val newest = firstSnapshot.firstOrNull()
+                    val oldest = firstSnapshot.lastOrNull()
+                    AppLogger.d(
+                        "DateLoad",
+                        "first query raw=${firstPage.size} visible=${firstSnapshot.size} " +
+                            "newest=${newest?.fileName}@${newest?.dateAdded} " +
+                            "oldest=${oldest?.fileName}@${oldest?.dateAdded} " +
+                            "mergeMs=${(System.nanoTime() - firstMergeStartedAt) / 1_000_000}"
+                    )
+                    if (publishProgressively) _allMediaItems.value = firstSnapshot
+                    _isAllMediaInitialLoading.value = false
+                    _isAllMediaLoadingMore.value = true
+
+                    // Complete the remaining MediaStore window in one background query.
+                    // This avoids repeatedly sorting the same provider rows for 40 OFFSET pages.
+                    val remainingItems = withContext(Dispatchers.IO) {
+                        repository.loadAllMediaPage(pageSize = 19500, offset = 500)
+                            .getOrDefault(emptyList())
+                    }
+
+                    // .nomedia/HID folders are filesystem-backed and are merged only into
+                    // the final snapshot, so the first visible page is never delayed.
+                    val hiddenItems = withContext(Dispatchers.IO) {
+                        _systemHiddenAlbumPaths.value.flatMap { path ->
+                            repository.loadMediaItemsFromDirectory(path).getOrDefault(emptyList())
+                        }
+                    }
+
+                    // Filtering, path normalization, de-duplication and sorting can process
+                    // tens of thousands of rows. Keep the whole merge off the main thread.
+                    val finalMergeStartedAt = System.nanoTime()
+                    val finalSnapshot = withContext(Dispatchers.Default) {
+                        addVisible(remainingItems)
+                        addVisible(hiddenItems)
+                        accumulated.values.sortedByDescending { it.dateAdded }
+                    }
+                    val finalMergeMs = (System.nanoTime() - finalMergeStartedAt) / 1_000_000
+
+                    if (generation != allMediaLoadGeneration.get()) return@withLock
+                    _allMediaItems.value = finalSnapshot
+                    AppLogger.d(
+                        "DatePerf",
+                        "final merge remaining=${remainingItems.size} hidden=${hiddenItems.size} " +
+                            "result=${finalSnapshot.size} mergeMs=$finalMergeMs"
+                    )
+                    AppLogger.d("VM", "loadAllMedia count=${finalSnapshot.size} progressive=$publishProgressively")
                 }
-                _allMediaItems.value = loaded
-                AppLogger.d("VM", "loadAllMedia count=${loaded.size}")
+            } finally {
+                if (generation == allMediaLoadGeneration.get()) {
+                    _isAllMediaInitialLoading.value = false
+                    _isAllMediaLoadingMore.value = false
+                }
             }
         }
     }
@@ -724,6 +798,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         if (!active) {
             allMediaLoadGeneration.incrementAndGet()
             allMediaLoadJob?.cancel()
+            _isAllMediaInitialLoading.value = false
+            _isAllMediaLoadingMore.value = false
         }
     }
 
@@ -896,6 +972,187 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             onResult(ok)
         }
+    }
+
+    /**
+     * 将普通本地相册迁移到另一个公共目录，同时保持媒体 URI 和 DATE_ADDED。
+     * 只使用 MediaStore RELATIVE_PATH；失败时回滚已移动项目，不走 copy-delete。
+     */
+    fun migrateAlbumStorage(
+        album: Album,
+        targetRootPath: String,
+        onResult: (Result<String>) -> Unit = {}
+    ): Job = viewModelScope.launch(Dispatchers.IO) {
+        val result = runCatching {
+            check(!isSystemHiddenAlbum(album.directoryPath)) {
+                "HID 相册暂不支持迁移，请先移除 HID"
+            }
+            val sourceDir = File(album.directoryPath).canonicalFile
+            val targetRoot = File(targetRootPath).canonicalFile
+            val externalRoot = Environment.getExternalStorageDirectory().canonicalFile
+            check(sourceDir.isDirectory) { "源相册目录不存在" }
+            check(
+                targetRoot.path.equals(externalRoot.path, ignoreCase = true) ||
+                    targetRoot.path.startsWith(externalRoot.path + File.separator, ignoreCase = true)
+            ) {
+                "目标必须位于本机公共存储中"
+            }
+            check(
+                !targetRoot.path.equals(sourceDir.path, ignoreCase = true) &&
+                    !targetRoot.path.startsWith(sourceDir.path + File.separator, ignoreCase = true)
+            ) { "不能把相册迁移到自身或其子目录" }
+            check(sourceDir.parentFile?.canonicalPath != targetRoot.canonicalPath) {
+                "相册已经位于该目录"
+            }
+
+            val targetDir = File(targetRoot, sourceDir.name).canonicalFile
+            check(!targetDir.exists()) { "目标位置已存在同名文件夹，当前版本不执行合并" }
+
+            val mediaItems = repository.loadMediaItems(album.bucketId, pageSize = 10000)
+                .getOrThrow()
+                .distinctBy { it.uri.toString() }
+            check(mediaItems.isNotEmpty()) { "相册中没有可迁移的媒体文件" }
+            check(mediaItems.size == album.count) {
+                "相册尚未完整加载（${mediaItems.size}/${album.count}），为避免遗漏已取消迁移"
+            }
+            check(mediaItems.all { it.uri.scheme == "content" }) {
+                "相册包含未登记到 MediaStore 的文件，当前版本不迁移"
+            }
+
+            val mediaPaths = mediaItems.mapTo(HashSet()) { mediaItem ->
+                runCatching { File(mediaItem.filePath).canonicalPath }
+                    .getOrElse { mediaItem.filePath }
+            }
+            val sourceEntries = sourceDir.listFiles().orEmpty().toList()
+            check(sourceEntries.none { it.isDirectory }) {
+                "相册中包含子文件夹，当前版本不迁移"
+            }
+            val sidecarFiles = sourceEntries.filter { entry ->
+                runCatching { entry.canonicalPath }.getOrElse { entry.absolutePath } !in mediaPaths
+            }
+
+            val movedItems = mutableListOf<MediaItem>()
+            val movedSidecars = mutableListOf<Pair<File, File>>()
+            var migratedBucketId: String? = null
+            try {
+                for (item in mediaItems) {
+                    check(moveMediaByMediaStore(getApplication(), item.uri, targetDir.path)) {
+                        "移动失败：${item.fileName}"
+                    }
+                    movedItems += item
+                    val after = queryMediaMoveIdentity(item.uri)
+                    if (after.dateAdded != item.dateAdded) {
+                        restoreMediaDates(item)
+                        check(queryMediaMoveIdentity(item.uri).dateAdded == item.dateAdded) {
+                            "无法保留创建时间：${item.fileName}"
+                        }
+                    }
+                }
+
+                // MediaStore 不管理普通附属文件；同卷 rename 不改文件时间。
+                if (sidecarFiles.isNotEmpty()) {
+                    check(targetDir.isDirectory || targetDir.mkdirs()) { "无法创建目标目录" }
+                    for (source in sidecarFiles) {
+                        val target = File(targetDir, source.name)
+                        check(source.renameTo(target)) { "附属文件迁移失败：${source.name}" }
+                        movedSidecars += source to target
+                    }
+                }
+                migratedBucketId = queryMediaMoveIdentity(mediaItems.first().uri).bucketId
+                check(!migratedBucketId.isNullOrEmpty()) { "无法读取迁移后的相册 ID" }
+            } catch (error: Throwable) {
+                movedSidecars.asReversed().forEach { (source, target) ->
+                    runCatching { target.renameTo(source) }
+                }
+                movedItems.asReversed().forEach { item ->
+                    runCatching {
+                        moveMediaByMediaStore(getApplication(), item.uri, sourceDir.path)
+                        restoreMediaDates(item)
+                    }
+                }
+                runCatching { if (targetDir.listFiles().isNullOrEmpty()) targetDir.delete() }
+                throw error
+            }
+
+            val newBucketId = checkNotNull(migratedBucketId)
+            val oldDirPath = sourceDir.path
+            val newDirPath = targetDir.path
+
+            tagRepository.updateTargetKey(
+                tagRepository.albumKey(oldDirPath),
+                tagRepository.albumKey(newDirPath)
+            )
+            mediaItems.forEach { item ->
+                val newPath = File(targetDir, item.fileName).path
+                tagRepository.updateTargetKey(
+                    tagRepository.mediaKey(item.filePath),
+                    tagRepository.mediaKey(newPath)
+                )
+                viewHistoryRepository.updateTargetKey(item.filePath, newPath)
+            }
+            viewHistoryRepository.updateTargetKey("album:$oldDirPath", "album:$newDirPath")
+
+            if (album.bucketId in _starredBucketIds.value) {
+                val updated = (_starredBucketIds.value - album.bucketId) + newBucketId
+                _starredBucketIds.value = updated
+                saveStarredIds(updated)
+            }
+            parentAlbumDao.replaceChildBucketId(album.bucketId, newBucketId)
+            parentSharedTagDao.replaceChildBucketId(album.bucketId, newBucketId)
+
+            if (oldDirPath in _ignoredFolderPaths.value) {
+                val updated = (_ignoredFolderPaths.value - oldDirPath) + newDirPath
+                _ignoredFolderPaths.value = updated
+                saveIgnoredFolderPaths(updated)
+            }
+            _recentAccessMap.value[oldDirPath]?.let { timestamp ->
+                _recentAccessMap.value = _recentAccessMap.value - oldDirPath + (newDirPath to timestamp)
+            }
+            if (_recentMoveAlbums.value.any { it.directoryPath == oldDirPath }) {
+                _recentMoveAlbums.value = _recentMoveAlbums.value.map {
+                    if (it.directoryPath == oldDirPath) it.copy(directoryPath = newDirPath) else it
+                }
+                saveRecentMoveAlbums(_recentMoveAlbums.value)
+            }
+
+            recordRecentMigrationRoot(targetRoot.path)
+
+            runCatching { if (sourceDir.listFiles().isNullOrEmpty()) sourceDir.delete() }
+            AppLogger.d("AlbumMigrate", "OK $oldDirPath -> $newDirPath items=${mediaItems.size}")
+            loadAlbums()
+            refreshAllMediaIfActive()
+            refreshTagSearch()
+            newDirPath
+        }
+        result.onFailure { AppLogger.e("AlbumMigrate", "failed album=${album.bucketName}", it) }
+        withContext(Dispatchers.Main) { onResult(result) }
+    }
+
+    private data class MediaMoveIdentity(val bucketId: String?, val dateAdded: Long)
+
+    private fun queryMediaMoveIdentity(uri: Uri): MediaMoveIdentity {
+        val projection = arrayOf(
+            MediaStore.MediaColumns.BUCKET_ID,
+            MediaStore.MediaColumns.DATE_ADDED
+        )
+        getApplication<Application>().contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return MediaMoveIdentity(cursor.getString(0), cursor.getLong(1))
+            }
+        }
+        error("MediaStore 中找不到移动后的文件")
+    }
+
+    private fun restoreMediaDates(item: MediaItem) {
+        getApplication<Application>().contentResolver.update(
+            item.uri,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DATE_ADDED, item.dateAdded)
+                put(MediaStore.MediaColumns.DATE_MODIFIED, item.dateModified)
+            },
+            null,
+            null
+        )
     }
 
     // ══════════════════════════════════════
@@ -1988,13 +2245,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     // 等全部完成再一次性更新
-                    var allDone = true
+                    var navigationStillActive = true
+                    var scanFailureCount = 0
                     for (d in deferreds) {
-                        if (pendingScanPath != path) { allDone = false; break }
-                        val (idx, updated) = d.await()
-                        mutableFolders[idx] = updated
+                        if (pendingScanPath != path) { navigationStillActive = false; break }
+                        val (idx, scanResult) = d.await()
+                        scanResult
+                            .onSuccess { updated -> mutableFolders[idx] = updated }
+                            .onFailure { e ->
+                                scanFailureCount++
+                                mutableFolders[idx] = mutableFolders[idx].copy(mediaCount = -2)
+                                AppLogger.e("SMB", "child scan kept unknown path=${mutableFolders[idx].path}", e)
+                            }
                     }
-                    if (allDone && pendingScanPath == path) {
+                    if (navigationStillActive && pendingScanPath == path) {
                         pendingScanPath = null
                         _smbBrowseState.value = SmbBrowseState.FolderContent(
                             host = host,
@@ -2003,6 +2267,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             subFolders = mutableFolders.toList(),
                             mediaFiles = result.mediaFiles
                         )
+                        if (scanFailureCount > 0) {
+                            AppLogger.d("SMB", "folder scan completed with failures=$scanFailureCount path=$path")
+                        }
                     }
                 }
                 .onFailure { e ->
@@ -2312,10 +2579,39 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         current = index + 1,
                         total = transferItems.size,
                         fileName = item.name,
-                        mode = mode
+                        mode = mode,
+                        totalBytes = item.size
                     )
 
-                    val localResult = copySmbItemToMediaStore(item, targetDir)
+                    val transferStartedAt = System.nanoTime()
+                    var lastUiUpdateAt = transferStartedAt
+                    var lastUiBytes = 0L
+                    var smoothedBytesPerSecond = 0.0
+                    val localResult = copySmbItemToMediaStore(item, targetDir) { copiedBytes, totalBytes ->
+                        val now = System.nanoTime()
+                        val updateInterval = now - lastUiUpdateAt
+                        val isComplete = totalBytes > 0L && copiedBytes >= totalBytes
+                        if (updateInterval >= 200_000_000L || isComplete) {
+                            val intervalSeconds = (updateInterval / 1_000_000_000.0).coerceAtLeast(0.001)
+                            val currentRate = (copiedBytes - lastUiBytes) / intervalSeconds
+                            smoothedBytesPerSecond = if (smoothedBytesPerSecond == 0.0) {
+                                currentRate
+                            } else {
+                                smoothedBytesPerSecond * 0.65 + currentRate * 0.35
+                            }
+                            _pasteProgress.value = PasteProgress(
+                                current = index + 1,
+                                total = transferItems.size,
+                                fileName = item.name,
+                                mode = mode,
+                                bytesCopied = copiedBytes,
+                                totalBytes = totalBytes,
+                                bytesPerSecond = smoothedBytesPerSecond.toLong()
+                            )
+                            lastUiUpdateAt = now
+                            lastUiBytes = copiedBytes
+                        }
+                    }
                     if (localResult.isFailure) {
                         val error = localResult.exceptionOrNull()
                         failures += SmbLocalTransferFailure(
@@ -2408,7 +2704,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private suspend fun copySmbItemToMediaStore(
         item: SmbFileInfo,
-        targetDir: String
+        targetDir: String,
+        onProgress: ((bytesCopied: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Uri> = withContext(Dispatchers.IO) {
         val resolver = getApplication<Application>().contentResolver
         var insertedUri: Uri? = null
@@ -2435,7 +2732,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             insertedUri = uri
 
             val copiedBytes = resolver.openOutputStream(uri, "w")?.use { output ->
-                smbRepository.copyToOutputStream(item.path, output).getOrThrow()
+                smbRepository.copyToOutputStream(item.path, output, onProgress).getOrThrow()
             } ?: error("MediaStore could not open the local target")
 
             if (item.size > 0L && copiedBytes != item.size) {
@@ -2626,6 +2923,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         private const val MAX_HISTORY_RECORDS = 50
         private const val HISTORY_PREFS_KEY = "smb_operation_history"
         private const val RECENT_ALBUMS_PREFS_KEY = "recent_move_albums"
+        private const val RECENT_MIGRATION_ROOTS_PREFS_KEY = "recent_migration_roots"
         private const val MOVE_RECORDS_PREFS_KEY = "move_records"
         internal const val MAX_MOVE_RECORDS = 50
     }
@@ -2667,6 +2965,57 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             AppLogger.e("VM", "saveRecentMoveAlbums failed", e)
         }
+    }
+
+    private fun loadRecentMigrationRoots(): List<RecentMoveAlbum> {
+        return try {
+            val prefs = getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+            val json = prefs.getString(RECENT_MIGRATION_ROOTS_PREFS_KEY, "") ?: ""
+            if (json.isEmpty()) return emptyList()
+            val array = JSONArray(json)
+            (0 until array.length()).map { index ->
+                val obj = array.getJSONObject(index)
+                RecentMoveAlbum(
+                    directoryPath = obj.getString("directoryPath"),
+                    movedAt = obj.getLong("movedAt")
+                )
+            }.filter { File(it.directoryPath).isDirectory }
+        } catch (e: Exception) {
+            AppLogger.e("AlbumMigrate", "load recent roots failed", e)
+            emptyList()
+        }
+    }
+
+    private fun saveRecentMigrationRoots(records: List<RecentMoveAlbum>) {
+        try {
+            val array = JSONArray()
+            records.forEach { record ->
+                array.put(JSONObject().apply {
+                    put("directoryPath", record.directoryPath)
+                    put("movedAt", record.movedAt)
+                })
+            }
+            getApplication<Application>()
+                .getSharedPreferences("rcgallery_prefs", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(RECENT_MIGRATION_ROOTS_PREFS_KEY, array.toString())
+                .apply()
+        } catch (e: Exception) {
+            AppLogger.e("AlbumMigrate", "save recent roots failed", e)
+        }
+    }
+
+    private fun recordRecentMigrationRoot(directoryPath: String) {
+        val canonical = runCatching { File(directoryPath).canonicalPath }
+            .getOrElse { directoryPath }
+        val updated = _recentMigrationRoots.value
+            .filterNot { it.directoryPath.equals(canonical, ignoreCase = true) }
+            .toMutableList()
+            .apply { add(0, RecentMoveAlbum(canonical, System.currentTimeMillis())) }
+            .take(20)
+        _recentMigrationRoots.value = updated
+        saveRecentMigrationRoots(updated)
     }
 
     // ══════════════════════════════════════

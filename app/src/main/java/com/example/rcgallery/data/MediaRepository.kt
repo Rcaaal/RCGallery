@@ -168,6 +168,82 @@ class MediaRepository(private val context: Context) {
         items.sortedByDescending { it.dateAdded }
     }
 
+    /** Load one globally date-sorted page containing both images and videos. */
+    fun loadAllMediaPage(pageSize: Int, offset: Int): Result<List<MediaItem>> = runCatching {
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.MEDIA_TYPE,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.DATE_ADDED,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.Images.Media.BUCKET_ID,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.MediaColumns.WIDTH,
+            MediaStore.MediaColumns.HEIGHT,
+            MediaStore.Video.Media.DURATION,
+            MediaStore.MediaColumns.DATA,
+            MediaStore.MediaColumns.RELATIVE_PATH
+        )
+        val extras = Bundle().apply {
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SELECTION,
+                "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
+            )
+            putStringArray(
+                ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                arrayOf(
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
+                )
+            )
+            // Use an explicit SQL order here. Some MediaStore Files providers do not
+            // reliably honor multi-column QUERY_ARG_SORT_COLUMNS, which can make the
+            // first page contain old media and insert newer rows above it later.
+            putString(
+                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC, ${MediaStore.Files.FileColumns._ID} DESC"
+            )
+            putInt(ContentResolver.QUERY_ARG_LIMIT, pageSize)
+            putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
+        }
+        val result = ArrayList<MediaItem>(pageSize)
+        context.contentResolver.query(
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL),
+            projection,
+            extras,
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(0)
+                val mediaType = cursor.getInt(1)
+                val displayName = cursor.getString(2) ?: ""
+                val mimeType = cursor.getString(3) ?: ""
+                if (displayName.startsWith(".")) continue
+                if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/")) continue
+                val isVideo = mediaType == MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
+                result += MediaItem(
+                    id = id,
+                    uri = ContentUriBuilder.getContentUri(id, isVideo),
+                    filePath = cursor.getString(12) ?: "",
+                    fileName = displayName,
+                    mimeType = mimeType,
+                    dateAdded = cursor.getLong(4),
+                    dateModified = cursor.getLong(5),
+                    size = cursor.getLong(6),
+                    albumId = cursor.getString(7),
+                    albumName = cursor.getString(8),
+                    width = cursor.getInt(9),
+                    height = cursor.getInt(10),
+                    duration = if (isVideo) cursor.getLong(11) else 0L,
+                    relativePath = cursor.getString(13) ?: ""
+                )
+            }
+        }
+        result
+    }
+
     private fun queryMediaItems(
         proj: MediaProjection,
         selection: String?,
