@@ -14,3 +14,5 @@ local.properties
 Test/
 launch_emu.bat
 test_images/
+/test_data/
+/screenshot_*.png
