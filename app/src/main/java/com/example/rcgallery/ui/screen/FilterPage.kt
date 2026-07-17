@@ -28,6 +28,7 @@ import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.FilterLogic
 import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.model.FilterScope
+import com.example.rcgallery.model.ParentDisplayFilter
 import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
@@ -54,6 +55,8 @@ fun FilterPage(
     onSaveRule: (TagRule) -> String?,  // 返回 null=成功，非 null=冲突规则名
     onDeleteRule: (String) -> Unit,
     onSetTempFilter: (TempFilter) -> Unit,
+    parentDisplayFilter: ParentDisplayFilter = ParentDisplayFilter.ALL,
+    onSetParentDisplayFilter: (ParentDisplayFilter) -> Unit = {},
     onReset: () -> Unit,
     // ── 忽略文件夹 ──
     ignoredFolderPaths: Set<String> = emptySet(),
@@ -107,11 +110,12 @@ fun FilterPage(
     if (showResetDialog) {
         val hasPersistent = persistentRules.any { it.enabled }
         val hasTemp = tempFilter.isActive
+        val hasParentFilter = parentDisplayFilter != ParentDisplayFilter.ALL
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
             title = { Text("重置筛选") },
             text = {
-                Text(if (hasPersistent) "将清除所有生效的筛选设置？" else "将清除临时筛选设置？")
+                Text(if (hasPersistent || hasParentFilter) "将清除所有生效的筛选设置？" else "将清除临时筛选设置？")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -193,6 +197,32 @@ fun FilterPage(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
+            Text("父级相册", style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = parentDisplayFilter == ParentDisplayFilter.ALL,
+                    onClick = { onSetParentDisplayFilter(ParentDisplayFilter.ALL) },
+                    label = { Text("全部") }
+                )
+                FilterChip(
+                    selected = parentDisplayFilter == ParentDisplayFilter.ONLY_PARENTS,
+                    onClick = { onSetParentDisplayFilter(ParentDisplayFilter.ONLY_PARENTS) },
+                    label = { Text("仅显示父级") }
+                )
+                FilterChip(
+                    selected = parentDisplayFilter == ParentDisplayFilter.HIDE_PARENTS,
+                    onClick = { onSetParentDisplayFilter(ParentDisplayFilter.HIDE_PARENTS) },
+                    label = { Text("不显示父级") }
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+
             // ── 持久规则 ──
             Text("持久规则", style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)

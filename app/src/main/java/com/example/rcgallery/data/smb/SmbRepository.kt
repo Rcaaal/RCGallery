@@ -22,6 +22,7 @@ import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
+import java.util.TreeMap
 
 /**
  * SMB 仓库 — 封装 jcifs-ng 的所有操作。
@@ -72,8 +73,8 @@ class SmbRepository {
         /** 单次 readBytes 最大读取字节数（50MB，防止 OOM） */
         private const val MAX_READ_BYTES = 50L * 1024 * 1024
 
-        /** SMB 读取和本地写入之间的固定缓冲池，避免传输期间反复分配大数组。 */
-        private const val TRANSFER_BUFFER_COUNT = 3
+        /** 单文件并发区块数；只并发同一文件的 READ，不并发多个文件。 */
+        private const val TRANSFER_READ_CONCURRENCY = 4
     }
 
     private val baseCtx: CIFSContext by lazy {
@@ -503,51 +504,82 @@ class SmbRepository {
             var writeNanos = 0L
             var totalCopied = 0L
 
-            data class TransferChunk(val buffer: ByteArray, val size: Int)
+            data class TransferChunk(val offset: Long, val buffer: ByteArray, val size: Int)
 
             coroutineScope {
-                val freeBuffers = Channel<ByteArray>(TRANSFER_BUFFER_COUNT)
-                val filledBuffers = Channel<TransferChunk>(TRANSFER_BUFFER_COUNT)
-                repeat(TRANSFER_BUFFER_COUNT) {
+                val chunkCount = if (totalSize <= 0L) 1 else
+                    ((totalSize + bufferSize - 1L) / bufferSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                val workerCount = minOf(TRANSFER_READ_CONCURRENCY, chunkCount).coerceAtLeast(1)
+                val freeBuffers = Channel<ByteArray>(workerCount)
+                val filledBuffers = Channel<TransferChunk>(workerCount)
+                repeat(workerCount) {
                     check(freeBuffers.trySend(ByteArray(bufferSize)).isSuccess)
                 }
+                val nextReadOffset = AtomicLong(0L)
 
-                val reader = launch(Dispatchers.IO) {
-                    try {
-                        SmbFileInputStream(smbFile).use { input ->
+                val readers = List(workerCount) {
+                    launch(Dispatchers.IO) {
+                        val input = SmbRandomAccessFile(SmbFile(url, ctx), "r")
+                        try {
                             while (true) {
+                                val offset = nextReadOffset.getAndAdd(bufferSize.toLong())
+                                if (offset >= totalSize) break
+                                val expectedSize = minOf(bufferSize.toLong(), totalSize - offset).toInt()
                                 val buffer = freeBuffers.receive()
-                                val readStartedAt = System.nanoTime()
-                                val bytesRead = input.read(buffer)
-                                readNanos.addAndGet(System.nanoTime() - readStartedAt)
-                                if (bytesRead < 0) {
+                                try {
+                                    input.seek(offset)
+                                    var chunkSize = 0
+                                    while (chunkSize < expectedSize) {
+                                        val readStartedAt = System.nanoTime()
+                                        val bytesRead = input.read(buffer, chunkSize, expectedSize - chunkSize)
+                                        readNanos.addAndGet(System.nanoTime() - readStartedAt)
+                                        if (bytesRead <= 0) break
+                                        readCount.incrementAndGet()
+                                        chunkSize += bytesRead
+                                    }
+                                    check(chunkSize == expectedSize) {
+                                        "SMB short read at $offset: expected $expectedSize, got $chunkSize"
+                                    }
+                                    filledBuffers.send(TransferChunk(offset, buffer, chunkSize))
+                                } catch (error: Throwable) {
                                     freeBuffers.trySend(buffer)
-                                    break
+                                    throw error
                                 }
-                                readCount.incrementAndGet()
-                                filledBuffers.send(TransferChunk(buffer, bytesRead))
                             }
+                        } finally {
+                            runCatching { input.close() }
                         }
-                        filledBuffers.close()
-                    } catch (error: Throwable) {
-                        filledBuffers.close(error)
-                        throw error
                     }
+                }
+                val closeFilledBuffers = launch {
+                    readers.forEach { it.join() }
+                    filledBuffers.close()
                 }
 
                 try {
+                    val pendingChunks = TreeMap<Long, TransferChunk>()
+                    var nextWriteOffset = 0L
                     for (chunk in filledBuffers) {
-                        val writeStartedAt = System.nanoTime()
-                        output.write(chunk.buffer, 0, chunk.size)
-                        writeNanos += System.nanoTime() - writeStartedAt
-                        totalCopied += chunk.size
-                        onProgress?.invoke(totalCopied, totalSize)
-                        freeBuffers.send(chunk.buffer)
+                        pendingChunks[chunk.offset] = chunk
+                        while (true) {
+                            val nextChunk = pendingChunks.remove(nextWriteOffset) ?: break
+                            val writeStartedAt = System.nanoTime()
+                            output.write(nextChunk.buffer, 0, nextChunk.size)
+                            writeNanos += System.nanoTime() - writeStartedAt
+                            totalCopied += nextChunk.size
+                            nextWriteOffset += nextChunk.size
+                            onProgress?.invoke(totalCopied, totalSize)
+                            freeBuffers.send(nextChunk.buffer)
+                        }
                     }
-                    reader.join()
+                    closeFilledBuffers.join()
+                    check(pendingChunks.isEmpty() && nextWriteOffset == totalSize) {
+                        "SMB transfer incomplete: expected $totalSize, wrote $nextWriteOffset"
+                    }
                     output.flush()
                 } finally {
-                    reader.cancel()
+                    readers.forEach { it.cancel() }
+                    closeFilledBuffers.cancel()
                     freeBuffers.cancel()
                     filledBuffers.cancel()
                 }
@@ -567,7 +599,7 @@ class SmbRepository {
                     "speed=${"%.1f".format(throughputMbps)}MB/s " +
                     "readMs=${readNanos.get() / 1_000_000} writeMs=${writeNanos / 1_000_000} " +
                     "reads=${readCount.get()} avgRead=${averageReadKb}KB " +
-                    "buffer=${bufferSize / 1024}KB pipeline=$TRANSFER_BUFFER_COUNT"
+                    "buffer=${bufferSize / 1024}KB parallelReads=$TRANSFER_READ_CONCURRENCY"
             )
             Result.success(totalCopied)
         } catch (error: CancellationException) {

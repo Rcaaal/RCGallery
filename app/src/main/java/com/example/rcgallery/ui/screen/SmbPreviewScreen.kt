@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.smb.SmbDataSource
 import com.example.rcgallery.data.smb.SmbFileInfo
@@ -124,12 +127,6 @@ fun SmbPreviewScreen(
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
 
-    // ── 进入静音：预览页进入时自动将系统媒体音量压到 0，退出时恢复 ──
-    DisposableEffect(Unit) {
-        playbackSettingsVM.muteSystemOnEnter()
-        onDispose { playbackSettingsVM.restoreSystemVolume() }
-    }
-
     val scope = rememberCoroutineScope()
 
     // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
@@ -138,6 +135,60 @@ fun SmbPreviewScreen(
     // 通知 MainActivity 隐藏/显示底部导航栏
     LaunchedEffect(Unit) { PipState.isSmbPreviewActive = true }
     DisposableEffect(Unit) { onDispose { PipState.isSmbPreviewActive = false } }
+
+    val activeFile = mutableItems.getOrNull(pagerState.currentPage)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var previewForeground by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    val lifecycleVideoActive by rememberUpdatedState(activeFile?.isVideo == true)
+    val lifecyclePipProtected by rememberUpdatedState(
+        PipState.isInPip || pipOverlayHidden || pipTriggered
+    )
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    previewForeground = true
+                    if (lifecycleVideoActive && !lifecyclePipProtected) {
+                        playbackSettingsVM.muteSystemOnEnter()
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    previewForeground = false
+                    if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
+                }
+                Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
+        }
+    }
+
+    LaunchedEffect(
+        activeFile?.isVideo,
+        previewForeground,
+        pipOverlayHidden,
+        pipTriggered,
+        PipState.isInPip
+    ) {
+        if (!previewForeground) {
+            if (!PipState.isInPip && !pipOverlayHidden && !pipTriggered) {
+                playbackSettingsVM.restoreSystemVolume()
+            }
+            return@LaunchedEffect
+        }
+        if (activeFile?.isVideo != true) {
+            playbackSettingsVM.restoreSystemVolume()
+        } else if (!pipOverlayHidden && !pipTriggered && !PipState.isInPip) {
+            playbackSettingsVM.muteSystemOnEnter()
+        }
+    }
 
     if (pipTriggered) {
         LaunchedEffect(Unit) {
@@ -156,7 +207,8 @@ fun SmbPreviewScreen(
                     }
                 }
             }
-            activity.enterPictureInPictureMode(PipState.buildPipParams())
+            val entered = activity.enterPictureInPictureMode(PipState.buildPipParams())
+            if (!entered) pipOverlayHidden = false
             pipTriggered = false
         }
     }

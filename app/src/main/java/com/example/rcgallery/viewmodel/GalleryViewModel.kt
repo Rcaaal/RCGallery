@@ -23,6 +23,9 @@ import com.example.rcgallery.data.smb.SmbRepository
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.data.db.TargetResult
 import com.example.rcgallery.data.db.SystemAlbumRuleEntity
+import com.example.rcgallery.data.db.ParentHidRuleEntity
+import com.example.rcgallery.data.db.ParentMigrationStateEntity
+import com.example.rcgallery.data.db.SystemAlbumHideSourceEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.util.MediaStoreObserver
 import com.example.rcgallery.model.Album
@@ -30,12 +33,14 @@ import com.example.rcgallery.model.FilterLogic
 import com.example.rcgallery.model.FilterMode
 import com.example.rcgallery.model.FilterScope
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.ParentDisplayFilter
 import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.TrashEntry
 import com.example.rcgallery.model.findFirstConflict
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -80,6 +85,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _mediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val mediaItems: StateFlow<List<MediaItem>> = _mediaItems.asStateFlow()
+    private val _isMediaInitialLoading = MutableStateFlow(false)
+    val isMediaInitialLoading: StateFlow<Boolean> = _isMediaInitialLoading.asStateFlow()
 
     // ── 日期视图：全部媒体项（按 dateAdded 降序，用于按天分组）──
     private val _allMediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -96,6 +103,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val allMediaLoadGeneration = AtomicInteger(0)
     private var albumsLoadJob: Job? = null
     private var allMediaLoadJob: Job? = null
+    private val permanentlyDeletedUris = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -232,6 +240,24 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val message: String
     )
 
+    data class AlbumMergePreparation(
+        val albums: List<Album>,
+        val items: List<MediaItem>,
+        val targetDir: String,
+        val plannedTargetNames: Map<String, String>,
+        val sourceDuplicateCount: Int,
+        val targetConflictCount: Int
+    ) {
+        val hasConflicts: Boolean
+            get() = sourceDuplicateCount > 0 || targetConflictCount > 0
+    }
+
+    data class AlbumMergeExecutionResult(
+        val successCount: Int,
+        val totalCount: Int,
+        val failureCount: Int
+    )
+
     /** MOVE 失败明细（UI 按原因分组展示），空列表表示无失败 */
     private val _moveFailures = MutableStateFlow<List<MoveFailure>>(emptyList())
     val moveFailures: StateFlow<List<MoveFailure>> = _moveFailures.asStateFlow()
@@ -288,6 +314,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val parentAlbumDao = AppDatabase.getInstance(getApplication()).parentAlbumDao()
     private val parentSharedTagDao = AppDatabase.getInstance(getApplication()).parentSharedTagDao()
     private val systemAlbumRuleDao = AppDatabase.getInstance(getApplication()).systemAlbumRuleDao()
+    private val hierarchySystemDao = AppDatabase.getInstance(getApplication()).hierarchySystemDao()
 
     private val _systemHiddenAlbumPaths = MutableStateFlow<Set<String>>(emptySet())
     val systemHiddenAlbumPaths: StateFlow<Set<String>> = _systemHiddenAlbumPaths.asStateFlow()
@@ -325,6 +352,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _parentSharedTagMap = MutableStateFlow<Map<Long, List<TagEntity>>>(emptyMap())
     val parentSharedTagMap: StateFlow<Map<Long, List<TagEntity>>> = _parentSharedTagMap.asStateFlow()
 
+    private val _parentHidIds = MutableStateFlow<Set<Long>>(emptySet())
+    val parentHidIds: StateFlow<Set<Long>> = _parentHidIds.asStateFlow()
+
+    private val _parentMigrationStateMap = MutableStateFlow<Map<Long, ParentMigrationStateEntity>>(emptyMap())
+    val parentMigrationStateMap: StateFlow<Map<Long, ParentMigrationStateEntity>> = _parentMigrationStateMap.asStateFlow()
+
     init { loadParents() }
 
     private fun loadParents() {
@@ -355,6 +388,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 map.mapValues { (_, tags) -> tags.distinctBy { it.id } }
             }.collect { map ->
                 _parentSharedTagMap.value = map
+            }
+        }
+        viewModelScope.launch {
+            hierarchySystemDao.getParentHidRulesFlow().collect { rules ->
+                _parentHidIds.value = rules.mapTo(linkedSetOf()) { it.parentId }
+            }
+        }
+        viewModelScope.launch {
+            hierarchySystemDao.getMigrationStatesFlow().collect { states ->
+                _parentMigrationStateMap.value = states.associateBy { it.parentId }
             }
         }
     }
@@ -394,8 +437,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun deleteParentAlbum(id: Long) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                if (hierarchySystemDao.isParentHidEnabled(id)) {
+                    setParentSystemGalleryHiddenInternal(id, false)
+                }
                 // ① 删除父级共享 TAG 关系
                 parentSharedTagDao.removeAllTagsForParent(id)
+                hierarchySystemDao.deleteMigrationState(id)
                 // ② 删除父子关系
                 parentAlbumDao.removeAllChildren(id)
                 // ③ 删除父级
@@ -452,7 +499,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 val existing = parentAlbumDao.getChildBucketIdsForParent(parentId).toSet()
-                val newItems = childBucketIds.filterNot { it in existing }
+                val newBucketIds = childBucketIds.filterNot { it in existing }
+                val newItems = newBucketIds
                     .mapIndexed { index, bucketId ->
                         ParentChildEntity(
                             parentId = parentId,
@@ -461,6 +509,38 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         )
                     }
                 parentAlbumDao.addChildren(newItems)
+                if (hierarchySystemDao.isParentHidEnabled(parentId)) {
+                    val albumMap = _albums.value.associateBy { it.bucketId }
+                    val appliedPaths = mutableListOf<String>()
+                    try {
+                        newBucketIds.forEach { bucketId ->
+                            val album = checkNotNull(albumMap[bucketId]) { "新增子相册尚未加载" }
+                            val path = File(album.directoryPath).canonicalPath
+                            hierarchySystemDao.insertHideSource(
+                                SystemAlbumHideSourceEntity(
+                                    path,
+                                    SystemAlbumHideSourceEntity.TYPE_PARENT,
+                                    parentId.toString()
+                                )
+                            )
+                            ensurePhysicalHid(path)
+                            appliedPaths += path
+                        }
+                    } catch (error: Throwable) {
+                        appliedPaths.forEach { path ->
+                            runCatching {
+                                hierarchySystemDao.deleteHideSource(
+                                    path,
+                                    SystemAlbumHideSourceEntity.TYPE_PARENT,
+                                    parentId.toString()
+                                )
+                                reconcilePhysicalHid(path)
+                            }
+                        }
+                        newBucketIds.forEach { parentAlbumDao.removeChildByBucketId(parentId, it) }
+                        throw error
+                    }
+                }
             }
         }
     }
@@ -469,6 +549,10 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun removeChildFromParent(parentId: Long, childBucketId: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                _albums.value.firstOrNull { it.bucketId == childBucketId }?.let { album ->
+                    val path = File(album.directoryPath).canonicalPath
+                    removeHideSourceSafely(path, SystemAlbumHideSourceEntity.TYPE_PARENT, parentId.toString())
+                }
                 parentAlbumDao.removeChildByBucketId(parentId, childBucketId)
             }
         }
@@ -479,6 +563,13 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 childBucketIds.forEach { bucketId ->
+                    _albums.value.firstOrNull { it.bucketId == bucketId }?.let { album ->
+                        removeHideSourceSafely(
+                            File(album.directoryPath).canonicalPath,
+                            SystemAlbumHideSourceEntity.TYPE_PARENT,
+                            parentId.toString()
+                        )
+                    }
                     parentAlbumDao.removeChildByBucketId(parentId, bucketId)
                 }
             }
@@ -492,6 +583,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val _tempFilter = MutableStateFlow(TempFilter())
     val tempFilter: StateFlow<TempFilter> = _tempFilter.asStateFlow()
 
+    private val _parentDisplayFilter = MutableStateFlow(ParentDisplayFilter.ALL)
+    val parentDisplayFilter: StateFlow<ParentDisplayFilter> = _parentDisplayFilter.asStateFlow()
+
     // ── 图片筛选状态（纯内存，不持久化，重启即失）──
     private val _mediaPersistentRules = MutableStateFlow<List<TagRule>>(emptyList())
     val mediaPersistentRules: StateFlow<List<TagRule>> = _mediaPersistentRules.asStateFlow()
@@ -500,6 +594,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     val mediaTempFilter: StateFlow<TempFilter> = _mediaTempFilter.asStateFlow()
 
     private var loadMediaJob: Job? = null
+    private var albumTagSyncJob: Job? = null
+    private val mediaLoadGeneration = AtomicInteger(0)
     private var pendingAlbumId: String? = null
 
     // ── 忽略文件夹 ──
@@ -522,47 +618,146 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         directoryPath: String,
         hidden: Boolean,
         onResult: (Result<Unit>) -> Unit = {}
-    ) {
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    check(Environment.isExternalStorageManager()) {
-                        "需要授予所有文件访问权限"
-                    }
-                    val directory = File(directoryPath)
-                    check(directory.isDirectory) { "相册目录不存在" }
-                    val canonicalDirectory = directory.canonicalFile
-                    val canonicalPath = canonicalDirectory.path
-                    val marker = File(canonicalDirectory, MediaStore.MEDIA_IGNORE_FILENAME)
-
-                    if (hidden) {
-                        val markerExisted = marker.exists()
-                        if (!markerExisted) {
-                            check(marker.createNewFile()) { "无法创建 .nomedia" }
-                        }
-                        systemAlbumRuleDao.upsert(
-                            SystemAlbumRuleEntity(
-                                directoryPath = canonicalPath,
-                                markerOwnedByApp = !markerExisted
-                            )
+    ): Job = viewModelScope.launch {
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                check(Environment.isExternalStorageManager()) { "需要授予所有文件访问权限" }
+                val canonicalPath = File(directoryPath).canonicalPath
+                if (hidden) {
+                    hierarchySystemDao.insertHideSource(
+                        SystemAlbumHideSourceEntity(
+                            directoryPath = canonicalPath,
+                            sourceType = SystemAlbumHideSourceEntity.TYPE_DIRECT,
+                            sourceId = SystemAlbumHideSourceEntity.DIRECT_ID
                         )
-                        requestDirectoryRescan(canonicalDirectory, includeMarker = true)
-                    } else {
-                        val rule = systemAlbumRuleDao.getByPath(canonicalPath)
-                        if (rule?.markerOwnedByApp == false && marker.exists()) {
-                            error(".nomedia 不是由 RCGallery 创建，无法安全删除")
-                        }
-                        if (rule?.markerOwnedByApp == true && marker.exists()) {
-                            check(marker.delete()) { "无法删除 .nomedia" }
-                        }
-                        systemAlbumRuleDao.deleteByPath(canonicalPath)
-                        requestDirectoryRescan(canonicalDirectory, includeMarker = false)
+                    )
+                    runCatching { ensurePhysicalHid(canonicalPath) }.getOrElse { error ->
+                        hierarchySystemDao.deleteHideSource(
+                            canonicalPath,
+                            SystemAlbumHideSourceEntity.TYPE_DIRECT,
+                            SystemAlbumHideSourceEntity.DIRECT_ID
+                        )
+                        throw error
                     }
+                } else {
+                    removeHideSourceSafely(
+                        canonicalPath,
+                        SystemAlbumHideSourceEntity.TYPE_DIRECT,
+                        SystemAlbumHideSourceEntity.DIRECT_ID
+                    )
                 }
             }
-            result.onFailure { AppLogger.e("SystemTag", "toggle failed path=$directoryPath hidden=$hidden", it) }
-            onResult(result)
         }
+        result.onFailure { AppLogger.e("SystemTag", "toggle failed path=$directoryPath hidden=$hidden", it) }
+        onResult(result)
+    }
+
+    /** Parent HID is independent from a child's own HID source. */
+    fun setParentSystemGalleryHidden(
+        parentId: Long,
+        hidden: Boolean,
+        onResult: (Result<Unit>) -> Unit = {}
+    ): Job = viewModelScope.launch {
+        val result = withContext(Dispatchers.IO) {
+            runCatching { setParentSystemGalleryHiddenInternal(parentId, hidden) }
+        }
+        result.onFailure { AppLogger.e("SystemTag", "parent HID failed parent=$parentId hidden=$hidden", it) }
+        onResult(result)
+    }
+
+    private suspend fun setParentSystemGalleryHiddenInternal(parentId: Long, hidden: Boolean) {
+        check(Environment.isExternalStorageManager()) { "需要授予所有文件访问权限" }
+        val childBucketIds = parentAlbumDao.getChildBucketIdsForParent(parentId).toSet()
+        val childPaths = _albums.value
+            .filter { it.bucketId in childBucketIds }
+            .map { File(it.directoryPath).canonicalPath }
+            .distinct()
+        val sourceId = parentId.toString()
+        if (hidden) {
+            val applied = mutableListOf<String>()
+            try {
+                childPaths.forEach { path ->
+                    hierarchySystemDao.insertHideSource(
+                        SystemAlbumHideSourceEntity(path, SystemAlbumHideSourceEntity.TYPE_PARENT, sourceId)
+                    )
+                    ensurePhysicalHid(path)
+                    applied += path
+                }
+                hierarchySystemDao.upsertParentHidRule(ParentHidRuleEntity(parentId))
+            } catch (error: Throwable) {
+                applied.forEach { path ->
+                    runCatching {
+                        hierarchySystemDao.deleteHideSource(path, SystemAlbumHideSourceEntity.TYPE_PARENT, sourceId)
+                        reconcilePhysicalHid(path)
+                    }
+                }
+                throw error
+            }
+        } else {
+            hierarchySystemDao.getParentHideSources(sourceId).forEach { source ->
+                removeHideSourceSafely(source.directoryPath, source.sourceType, source.sourceId)
+            }
+            hierarchySystemDao.deleteParentHidRule(parentId)
+        }
+    }
+
+    private suspend fun ensurePhysicalHid(directoryPath: String) {
+        val directory = File(directoryPath).canonicalFile
+        check(directory.isDirectory) { "相册目录不存在：${directory.name}" }
+        val marker = File(directory, MediaStore.MEDIA_IGNORE_FILENAME)
+        val existingRule = systemAlbumRuleDao.getByPath(directory.path)
+        val markerExisted = marker.exists()
+        if (!markerExisted) check(marker.createNewFile()) { "无法创建 .nomedia：${directory.name}" }
+        systemAlbumRuleDao.upsert(
+            SystemAlbumRuleEntity(
+                directoryPath = directory.path,
+                markerOwnedByApp = existingRule?.markerOwnedByApp ?: !markerExisted,
+                createdAt = existingRule?.createdAt ?: System.currentTimeMillis()
+            )
+        )
+        requestDirectoryRescan(directory, includeMarker = true)
+    }
+
+    private suspend fun removeHideSourceSafely(path: String, type: String, sourceId: String) {
+        val canonicalPath = File(path).canonicalPath
+        val remaining = hierarchySystemDao.getHideSources(canonicalPath)
+            .filterNot { it.sourceType == type && it.sourceId == sourceId }
+        val rule = systemAlbumRuleDao.getByPath(canonicalPath)
+        val marker = File(canonicalPath, MediaStore.MEDIA_IGNORE_FILENAME)
+        if (remaining.isEmpty() && rule?.markerOwnedByApp == false && marker.exists()) {
+            error("${File(canonicalPath).name} 的 .nomedia 不是由 RCGallery 创建，无法安全删除")
+        }
+        hierarchySystemDao.deleteHideSource(canonicalPath, type, sourceId)
+        reconcilePhysicalHid(canonicalPath)
+    }
+
+    private suspend fun reconcilePhysicalHid(path: String) {
+        val canonicalPath = File(path).canonicalPath
+        if (hierarchySystemDao.countHideSources(canonicalPath) > 0) {
+            ensurePhysicalHid(canonicalPath)
+            return
+        }
+        val directory = File(canonicalPath)
+        val marker = File(directory, MediaStore.MEDIA_IGNORE_FILENAME)
+        val rule = systemAlbumRuleDao.getByPath(canonicalPath)
+        if (rule?.markerOwnedByApp == true && marker.exists()) {
+            check(marker.delete()) { "无法删除 .nomedia：${directory.name}" }
+        }
+        systemAlbumRuleDao.deleteByPath(canonicalPath)
+        requestDirectoryRescan(directory, includeMarker = false)
+    }
+
+    /** Temporarily expose a managed HID folder without deleting its logical sources. */
+    private suspend fun suspendPhysicalHid(path: String) {
+        val canonicalPath = File(path).canonicalPath
+        val rule = systemAlbumRuleDao.getByPath(canonicalPath)
+        val marker = File(canonicalPath, MediaStore.MEDIA_IGNORE_FILENAME)
+        check(rule?.markerOwnedByApp == true) {
+            "${File(canonicalPath).name} 的 .nomedia 不是由 RCGallery 创建，无法自动迁移"
+        }
+        if (marker.exists()) check(marker.delete()) { "无法临时取消 HID：${File(canonicalPath).name}" }
+        systemAlbumRuleDao.deleteByPath(canonicalPath)
+        requestDirectoryRescan(File(canonicalPath), includeMarker = false)
     }
 
     private fun requestDirectoryRescan(directory: File, includeMarker: Boolean) {
@@ -717,7 +912,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     fun addVisible(items: List<MediaItem>) {
                         items.forEach { item ->
                             val normalized = normalizedPath(item.filePath)
-                            val isTrashed = item.uri.toString() in trashedUris || normalized in trashedPaths
+                            val isTrashed = item.uri.toString() in trashedUris ||
+                                normalized in trashedPaths ||
+                                item.uri.toString() in permanentlyDeletedUris
                             val isIgnored = ignoredDirs.any { item.filePath.startsWith(it) }
                             if (!isTrashed && !isIgnored) accumulated[normalized] = item
                         }
@@ -765,13 +962,33 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
 
+                    // Trash can change while the remaining MediaStore query is running.
+                    // Re-read it immediately before the final merge so an old snapshot cannot
+                    // re-introduce items that the user just moved to or deleted from trash.
+                    val latestTrashEntries = withContext(Dispatchers.IO) { trashManager.getAll() }
+                    val latestTrashedUris = latestTrashEntries.mapTo(HashSet()) { it.uri }
+                    val latestTrashedPaths = latestTrashEntries.mapTo(HashSet()) {
+                        normalizedPath(it.filePath)
+                    }
+                    val latestIgnoredDirs = _ignoredFolderPaths.value
+
                     // Filtering, path normalization, de-duplication and sorting can process
-                    // tens of thousands of rows. Keep the whole merge off the main thread.
+                    // tens of thousands of rows. Rebuild from raw rows off the main thread.
                     val finalMergeStartedAt = System.nanoTime()
                     val finalSnapshot = withContext(Dispatchers.Default) {
-                        addVisible(remainingItems)
-                        addVisible(hiddenItems)
-                        accumulated.values.sortedByDescending { it.dateAdded }
+                        val finalItems = LinkedHashMap<String, MediaItem>(
+                            firstPage.size + remainingItems.size + hiddenItems.size
+                        )
+                        (firstPage.asSequence() + remainingItems.asSequence() + hiddenItems.asSequence())
+                            .forEach { item ->
+                                val normalized = normalizedPath(item.filePath)
+                                val isTrashed = item.uri.toString() in latestTrashedUris ||
+                                    normalized in latestTrashedPaths ||
+                                    item.uri.toString() in permanentlyDeletedUris
+                                val isIgnored = latestIgnoredDirs.any { item.filePath.startsWith(it) }
+                                if (!isTrashed && !isIgnored) finalItems[normalized] = item
+                            }
+                        finalItems.values.sortedByDescending { it.dateAdded }
                     }
                     val finalMergeMs = (System.nanoTime() - finalMergeStartedAt) / 1_000_000
 
@@ -809,59 +1026,107 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     fun loadMedia(albumId: String? = null) {
         AppLogger.d("VM", "loadMedia albumId=[$albumId] cancel prev=$pendingAlbumId")
+        val generation = mediaLoadGeneration.incrementAndGet()
         loadMediaJob?.cancel()
+        albumTagSyncJob?.cancel()
         pendingAlbumId = albumId
-        _mediaItems.value = emptyList()  // 立即清空旧数据，防止相册切换时残留
-        _isLoading.value = true
+        _mediaItems.value = emptyList()
+        _isMediaInitialLoading.value = true
 
         loadMediaJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
+            try {
                 val albumPath = _albums.value.firstOrNull { it.bucketId == albumId }?.directoryPath
+                val trashEntries = withContext(Dispatchers.IO) { trashManager.getAll() }
+                val trashedUris = trashEntries.mapTo(HashSet()) { it.uri }
+                val trashedPaths = trashEntries.mapTo(HashSet()) { normalizedPath(it.filePath) }
+                val ignoredDirs = _ignoredFolderPaths.value
+
+                fun visibleItems(items: List<MediaItem>): List<MediaItem> = items.filter { item ->
+                    item.uri.toString() !in trashedUris &&
+                        item.uri.toString() !in permanentlyDeletedUris &&
+                        normalizedPath(item.filePath) !in trashedPaths &&
+                        ignoredDirs.none { dir -> item.filePath.startsWith(dir) }
+                }
+
                 if (albumPath != null && isSystemHiddenAlbum(albumPath)) {
-                    repository.loadMediaItemsFromDirectory(albumPath)
+                    val hiddenItems = withContext(Dispatchers.IO) {
+                        repository.loadMediaItemsFromDirectory(albumPath).getOrThrow()
+                    }
+                    val visible = withContext(Dispatchers.Default) { visibleItems(hiddenItems) }
+                    if (generation != mediaLoadGeneration.get()) return@launch
+                    _mediaItems.value = visible
+                    _isMediaInitialLoading.value = false
+                    AppLogger.d("MediaPerf", "hidden album=[$albumId] visible=${visible.size}")
+                } else if (albumId != null) {
+                    val firstStartedAt = System.nanoTime()
+                    val firstPage = withContext(Dispatchers.IO) {
+                        repository.loadAlbumMediaPage(albumId, pageSize = 500, offset = 0)
+                            .getOrThrow()
+                    }
+                    val firstVisible = withContext(Dispatchers.Default) { visibleItems(firstPage) }
+                    if (generation != mediaLoadGeneration.get()) return@launch
+                    _mediaItems.value = firstVisible
+                    _isMediaInitialLoading.value = false
+                    AppLogger.d(
+                        "MediaPerf",
+                        "first album=[$albumId] raw=${firstPage.size} visible=${firstVisible.size} " +
+                            "ms=${(System.nanoTime() - firstStartedAt) / 1_000_000}"
+                    )
+
+                    if (firstPage.size == 500) {
+                        val remaining = withContext(Dispatchers.IO) {
+                            repository.loadAlbumMediaPage(albumId, pageSize = 19500, offset = 500)
+                                .getOrThrow()
+                        }
+                        val finalStartedAt = System.nanoTime()
+                        val finalItems = withContext(Dispatchers.Default) {
+                            val unique = LinkedHashMap<String, MediaItem>(firstPage.size + remaining.size)
+                            visibleItems(firstPage).forEach { unique[it.uri.toString()] = it }
+                            visibleItems(remaining).forEach { unique[it.uri.toString()] = it }
+                            unique.values.sortedWith(
+                                compareByDescending<MediaItem> { it.dateAdded }.thenByDescending { it.id }
+                            )
+                        }
+                        if (generation != mediaLoadGeneration.get()) return@launch
+                        _mediaItems.value = finalItems
+                        AppLogger.d(
+                            "MediaPerf",
+                            "final album=[$albumId] remaining=${remaining.size} result=${finalItems.size} " +
+                                "mergeMs=${(System.nanoTime() - finalStartedAt) / 1_000_000}"
+                        )
+                    }
                 } else {
-                    repository.loadMediaItems(albumId = albumId, pageSize = 10000)
+                    val allItems = withContext(Dispatchers.IO) {
+                        repository.loadMediaItems(albumId = null, pageSize = 10000).getOrThrow()
+                    }
+                    val visible = withContext(Dispatchers.Default) { visibleItems(allItems) }
+                    if (generation != mediaLoadGeneration.get()) return@launch
+                    _mediaItems.value = visible
+                    _isMediaInitialLoading.value = false
                 }
-            }
-            result
-                .onSuccess {
-                    val match = pendingAlbumId == albumId
-                    AppLogger.d("VM", "loadMedia OK albumId=[$albumId] items=${it.size} pendingMatch=$match")
-                    if (match) {
-                        // 过滤已回收文件
-                        val trashEntries = trashManager.getAll()
-                        val trashedUris = trashEntries.mapTo(HashSet()) { entry -> entry.uri }
-                        val trashedPaths = trashEntries.mapTo(HashSet()) { entry -> normalizedPath(entry.filePath) }
-                        val filtered = it.filter { item ->
-                            item.uri.toString() !in trashedUris && normalizedPath(item.filePath) !in trashedPaths
-                        }
-                        // 过滤已忽略文件夹中的文件
-                        val ignoredDirs = _ignoredFolderPaths.value
-                        val finalFiltered = if (ignoredDirs.isNotEmpty()) {
-                            filtered.filterNot { item ->
-                                ignoredDirs.any { dir -> item.filePath.startsWith(dir) }
-                            }
-                        } else filtered
-                        _mediaItems.value = finalFiltered
-                        // 自动同步相册 TAG 到相册内所有文件（新文件继承相册 TAG）
-                        if (albumId != null) {
-                            val dir = finalFiltered.firstOrNull()?.let { item ->
-                                item.filePath.substringBeforeLast("/").takeIf { it.isNotEmpty() }
-                            }
-                            if (dir != null) {
-                                syncAlbumTagsToMedia(dir)
-                            }
-                        }
+
+                val syncDirectory = albumPath
+                    ?: _mediaItems.value.firstOrNull()?.filePath?.substringBeforeLast("/")
+                if (albumId != null && !syncDirectory.isNullOrEmpty()) {
+                    albumTagSyncJob = viewModelScope.launch(Dispatchers.IO) {
+                        runCatching { syncAlbumTagsToMedia(syncDirectory) }
+                            .onFailure { AppLogger.e("VM", "album TAG sync failed dir=$syncDirectory", it) }
                     }
                 }
-                .onFailure {
-                    AppLogger.e("VM", "loadMedia FAIL albumId=[$albumId]", it)
-                    if (pendingAlbumId == albumId) {
-                        _mediaItems.value = emptyList()
-                    }
+                AppLogger.d(
+                    "VM",
+                    "loadMedia OK albumId=[$albumId] items=${_mediaItems.value.size} " +
+                        "pendingMatch=${pendingAlbumId == albumId}"
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                AppLogger.e("VM", "loadMedia FAIL albumId=[$albumId]", error)
+                if (generation == mediaLoadGeneration.get()) _mediaItems.value = emptyList()
+            } finally {
+                if (generation == mediaLoadGeneration.get()) {
+                    _isMediaInitialLoading.value = false
                 }
-            if (pendingAlbumId == albumId) {
-                _isLoading.value = false
             }
         }
     }
@@ -869,6 +1134,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private fun refreshCurrentView() {
         AppLogger.d("VM", "refreshCurrentView (observer)")
         loadAlbums()
+        // 日期视图使用独立的 allMediaItems 数据源；仅在该视图活跃时刷新，
+        // 继续沿用首批 500 条快速发布和后台全量合并，不影响普通相册快照。
+        refreshAllMediaIfActive()
         // 注意：不调用 loadMedia()。mediaItems 由 LaunchedEffect(albumId) 在相册入口时加载，
         // 以及 moveToTrash/restoreFromTrash 等用户操作增量修改。observer 异步调用 loadMedia
         // 会替换 _mediaItems 导致网格与预览之间的 index 错位。
@@ -885,22 +1153,43 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun renameNow(bucketId: String, newName: String, onResult: (Boolean) -> Unit = {}) {
         AppLogger.d("Rename", "renameNow bucket=$bucketId → $newName")
 
+        val normalizedName = newName.trim()
+        if (normalizedName.isEmpty() || normalizedName == "." || normalizedName == ".." ||
+            normalizedName.contains('/') || normalizedName.contains('\\')) {
+            AppLogger.d("Rename", "Invalid album name: $newName")
+            onResult(false)
+            return
+        }
+
+        // 相册列表本身已持有稳定目录路径，不能依赖仅包含当前打开相册的 _mediaItems。
+        val album = _albums.value.firstOrNull { it.bucketId == bucketId }
         val allItems = _mediaItems.value.filter { it.albumId == bucketId }
-        val dirPath = allItems.firstOrNull()?.let { item ->
-            item.filePath.substringBeforeLast("/").takeIf { it.isNotEmpty() }
-        } ?: run {
-            val rp = allItems.firstOrNull()?.relativePath
-            if (rp.isNullOrEmpty()) {
-                AppLogger.d("Rename", "No path available, skip renameNow")
-                onResult(false)
-                return
-            }
-            "/storage/emulated/0/$rp"
+        val dirPath = album?.directoryPath?.takeIf { it.isNotBlank() }
+            ?: allItems.firstOrNull()?.filePath?.substringBeforeLast("/")?.takeIf { it.isNotEmpty() }
+        if (dirPath.isNullOrBlank()) {
+            AppLogger.d("Rename", "No album path available for bucket=$bucketId")
+            onResult(false)
+            return
         }
 
         viewModelScope.launch {
             val oldDir = File(dirPath)
-            val newDir = File(oldDir.parentFile, newName)
+            val parentDir = oldDir.parentFile
+            if (!oldDir.isDirectory || parentDir == null) {
+                AppLogger.d("Rename", "Source directory unavailable: $dirPath")
+                onResult(false)
+                return@launch
+            }
+            val newDir = File(parentDir, normalizedName)
+            if (oldDir.name == normalizedName) {
+                onResult(true)
+                return@launch
+            }
+            if (newDir.exists()) {
+                AppLogger.d("Rename", "Target directory already exists: ${newDir.absolutePath}")
+                onResult(false)
+                return@launch
+            }
             val ok = withContext(Dispatchers.IO) {
                 try {
                     oldDir.renameTo(newDir)
@@ -912,7 +1201,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             AppLogger.d("Rename", "renameTo result=$ok: $dirPath → ${newDir.absolutePath}")
             if (ok) {
                 _albums.value = _albums.value.map {
-                    if (it.bucketId == bucketId) it.copy(bucketName = newName) else it
+                    if (it.bucketId == bucketId) {
+                        it.copy(bucketName = normalizedName, directoryPath = newDir.absolutePath)
+                    } else it
                 }
                 // 同步更新 _mediaItems 中的 albumName 和 filePath
                 val oldDirStr = dirPath.trimEnd('/')
@@ -924,7 +1215,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         } else {
                             item.filePath
                         }
-                        item.copy(albumName = newName, filePath = newFilePath)
+                        item.copy(albumName = normalizedName, filePath = newFilePath)
                     } else {
                         item
                     }
@@ -981,10 +1272,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun migrateAlbumStorage(
         album: Album,
         targetRootPath: String,
+        relationBucketId: String = album.bucketId,
+        allowTemporarilyUnhidden: Boolean = false,
         onResult: (Result<String>) -> Unit = {}
     ): Job = viewModelScope.launch(Dispatchers.IO) {
         val result = runCatching {
-            check(!isSystemHiddenAlbum(album.directoryPath)) {
+            check(allowTemporarilyUnhidden || !isSystemHiddenAlbum(album.directoryPath)) {
                 "HID 相册暂不支持迁移，请先移除 HID"
             }
             val sourceDir = File(album.directoryPath).canonicalFile
@@ -1012,28 +1305,34 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 .getOrThrow()
                 .distinctBy { it.uri.toString() }
             check(mediaItems.isNotEmpty()) { "相册中没有可迁移的媒体文件" }
-            check(mediaItems.size == album.count) {
-                "相册尚未完整加载（${mediaItems.size}/${album.count}），为避免遗漏已取消迁移"
-            }
             check(mediaItems.all { it.uri.scheme == "content" }) {
                 "相册包含未登记到 MediaStore 的文件，当前版本不迁移"
             }
 
             val mediaPaths = mediaItems.mapTo(HashSet()) { mediaItem ->
-                runCatching { File(mediaItem.filePath).canonicalPath }
-                    .getOrElse { mediaItem.filePath }
+                normalizedPath(mediaItem.filePath)
+            }
+            val filesystemMediaPaths = repository.loadMediaItemsFromDirectory(sourceDir.path)
+                .getOrThrow()
+                .mapTo(HashSet()) { normalizedPath(it.filePath) }
+            check(mediaPaths == filesystemMediaPaths) {
+                val missingFromMediaStore = filesystemMediaPaths - mediaPaths
+                val outsideSource = mediaPaths - filesystemMediaPaths
+                "相册媒体索引不完整（MediaStore=${mediaPaths.size}，目录=${filesystemMediaPaths.size}" +
+                    "，未索引=${missingFromMediaStore.size}，路径异常=${outsideSource.size}），为避免遗漏已取消迁移"
             }
             val sourceEntries = sourceDir.listFiles().orEmpty().toList()
             check(sourceEntries.none { it.isDirectory }) {
                 "相册中包含子文件夹，当前版本不迁移"
             }
             val sidecarFiles = sourceEntries.filter { entry ->
-                runCatching { entry.canonicalPath }.getOrElse { entry.absolutePath } !in mediaPaths
+                normalizedPath(entry.path) !in mediaPaths
             }
 
             val movedItems = mutableListOf<MediaItem>()
             val movedSidecars = mutableListOf<Pair<File, File>>()
             var migratedBucketId: String? = null
+            var migratedTrashCount = 0
             try {
                 for (item in mediaItems) {
                     check(moveMediaByMediaStore(getApplication(), item.uri, targetDir.path)) {
@@ -1060,6 +1359,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
                 migratedBucketId = queryMediaMoveIdentity(mediaItems.first().uri).bucketId
                 check(!migratedBucketId.isNullOrEmpty()) { "无法读取迁移后的相册 ID" }
+                val newBucketId = checkNotNull(migratedBucketId)
+                val movedItemsByOldPath = mediaItems.associate { item ->
+                    normalizedPath(item.filePath) to (
+                        item.uri.toString() to File(targetDir, item.fileName).path
+                    )
+                }
+                migratedTrashCount = trashManager.updateAfterAlbumMigration(
+                    oldDirectoryPath = sourceDir.path,
+                    newAlbumId = newBucketId,
+                    newAlbumName = targetDir.name,
+                    movedItemsByOldPath = movedItemsByOldPath
+                )
             } catch (error: Throwable) {
                 movedSidecars.asReversed().forEach { (source, target) ->
                     runCatching { target.renameTo(source) }
@@ -1092,13 +1403,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             }
             viewHistoryRepository.updateTargetKey("album:$oldDirPath", "album:$newDirPath")
 
-            if (album.bucketId in _starredBucketIds.value) {
-                val updated = (_starredBucketIds.value - album.bucketId) + newBucketId
+            if (relationBucketId in _starredBucketIds.value) {
+                val updated = (_starredBucketIds.value - relationBucketId) + newBucketId
                 _starredBucketIds.value = updated
                 saveStarredIds(updated)
             }
-            parentAlbumDao.replaceChildBucketId(album.bucketId, newBucketId)
-            parentSharedTagDao.replaceChildBucketId(album.bucketId, newBucketId)
+            hierarchySystemDao.replaceHideSourcePath(oldDirPath, newDirPath)
+            parentAlbumDao.replaceChildBucketId(relationBucketId, newBucketId)
+            parentSharedTagDao.replaceChildBucketId(relationBucketId, newBucketId)
 
             if (oldDirPath in _ignoredFolderPaths.value) {
                 val updated = (_ignoredFolderPaths.value - oldDirPath) + newDirPath
@@ -1118,7 +1430,14 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             recordRecentMigrationRoot(targetRoot.path)
 
             runCatching { if (sourceDir.listFiles().isNullOrEmpty()) sourceDir.delete() }
-            AppLogger.d("AlbumMigrate", "OK $oldDirPath -> $newDirPath items=${mediaItems.size}")
+            if (migratedTrashCount > 0) {
+                _trashEntries.value = trashManager.getAll()
+                refreshTrashCount()
+            }
+            AppLogger.d(
+                "AlbumMigrate",
+                "OK $oldDirPath -> $newDirPath items=${mediaItems.size} trash=$migratedTrashCount"
+            )
             loadAlbums()
             refreshAllMediaIfActive()
             refreshTagSearch()
@@ -1126,6 +1445,184 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
         result.onFailure { AppLogger.e("AlbumMigrate", "failed album=${album.bucketName}", it) }
         withContext(Dispatchers.Main) { onResult(result) }
+    }
+
+    data class ParentMigrationPreparation(
+        val parentId: Long,
+        val targetRootPath: String,
+        val albums: List<Album>,
+        val alreadyInTarget: List<Album>,
+        val hidAlbums: List<Album>,
+        val directHidAlbums: List<Album>,
+        val parentHidAlbums: List<Album>,
+        val externalHidAlbums: List<Album>,
+        val targetConflictAlbums: List<Album>
+    )
+
+    data class ParentMigrationExecutionResult(
+        val successCount: Int,
+        val failureMessages: List<String>,
+        val skippedCount: Int,
+        val hidRestoredAlbumNames: List<String>,
+        val targetRootPath: String
+    )
+
+    fun prepareParentMigration(
+        parentId: Long,
+        targetRootPath: String,
+        onResult: (Result<ParentMigrationPreparation>) -> Unit
+    ): Job = viewModelScope.launch(Dispatchers.IO) {
+        val result = runCatching {
+            val targetRoot = File(targetRootPath).canonicalFile
+            val childIds = parentAlbumDao.getChildBucketIdsForParent(parentId)
+            check(childIds.isNotEmpty()) { "父级中暂无可迁移的子相册" }
+            val albumMap = _albums.value.associateBy { it.bucketId }
+            val children = childIds.map { id ->
+                checkNotNull(albumMap[id]) { "子相册尚未完整加载，请刷新后重试" }
+            }
+            val already = children.filter { album ->
+                runCatching {
+                    File(album.directoryPath).canonicalFile.parentFile?.canonicalPath
+                        .equals(targetRoot.canonicalPath, ignoreCase = true)
+                }.getOrDefault(false)
+            }
+            val candidates = children - already.toSet()
+            val hidAlbums = candidates.filter { isSystemHiddenAlbum(it.directoryPath) }
+            val hidSources = hidAlbums.associateWith { album ->
+                hierarchySystemDao.getHideSources(File(album.directoryPath).canonicalPath)
+            }
+            val directHidAlbums = hidAlbums.filter { album ->
+                hidSources[album].orEmpty().any { it.sourceType == SystemAlbumHideSourceEntity.TYPE_DIRECT }
+            }
+            val parentHidAlbums = hidAlbums.filter { album ->
+                hidSources[album].orEmpty().any { it.sourceType == SystemAlbumHideSourceEntity.TYPE_PARENT }
+            }
+            val externalHid = hidAlbums.filter { album ->
+                systemAlbumRuleDao.getByPath(File(album.directoryPath).canonicalPath)?.markerOwnedByApp != true
+            }
+            val conflicts = candidates.filter { album ->
+                File(targetRoot, File(album.directoryPath).name).exists()
+            }
+            ParentMigrationPreparation(
+                parentId = parentId,
+                targetRootPath = targetRoot.path,
+                albums = candidates,
+                alreadyInTarget = already,
+                hidAlbums = hidAlbums,
+                directHidAlbums = directHidAlbums,
+                parentHidAlbums = parentHidAlbums,
+                externalHidAlbums = externalHid,
+                targetConflictAlbums = conflicts
+            )
+        }
+        withContext(Dispatchers.Main) { onResult(result) }
+    }
+
+    fun executeParentMigration(
+        preparation: ParentMigrationPreparation,
+        onProgress: (Int, Int, String) -> Unit = { _, _, _ -> },
+        onResult: (Result<ParentMigrationExecutionResult>) -> Unit
+    ): Job = viewModelScope.launch(Dispatchers.IO) {
+        val hidRecoveryPaths = preparation.hidAlbums.associate { album ->
+            val oldPath = File(album.directoryPath).canonicalPath
+            oldPath to oldPath
+        }.toMutableMap()
+        val result = runCatching {
+            check(preparation.externalHidAlbums.isEmpty()) {
+                "以下相册的 .nomedia 不是由 RCGallery 创建，无法自动迁移：" +
+                    preparation.externalHidAlbums.joinToString { it.bucketName }
+            }
+            check(preparation.targetConflictAlbums.isEmpty()) {
+                "目标位置存在同名文件夹：" + preparation.targetConflictAlbums.joinToString { it.bucketName }
+            }
+            if (preparation.hidAlbums.isNotEmpty()) {
+                // 迁移只临时解除物理 .nomedia，所有父级/子级 HID 逻辑来源保持不变。
+                preparation.hidAlbums.forEach { suspendPhysicalHid(it.directoryPath) }
+            }
+
+            val resolvedAlbums = preparation.albums.associate { original ->
+                val path = File(original.directoryPath).canonicalPath
+                val resolved = if (original in preparation.hidAlbums) {
+                    awaitMediaStoreAlbum(path)
+                } else {
+                    original
+                }
+                path to resolved
+            }
+
+            var successCount = 0
+            val restoredHidNames = mutableListOf<String>()
+            val failures = mutableListOf<String>()
+            preparation.albums.forEachIndexed { index, original ->
+                withContext(Dispatchers.Main) {
+                    onProgress(index + 1, preparation.albums.size, original.bucketName)
+                }
+                val oldPath = File(original.directoryPath).canonicalPath
+                val migrationAlbum = checkNotNull(resolvedAlbums[oldPath])
+                var migrationResult: Result<String>? = null
+                migrateAlbumStorage(
+                    album = migrationAlbum,
+                    targetRootPath = preparation.targetRootPath,
+                    relationBucketId = original.bucketId,
+                    allowTemporarilyUnhidden = original in preparation.hidAlbums
+                ) { migrationResult = it }.join()
+                val itemResult = checkNotNull(migrationResult)
+                if (itemResult.isSuccess) {
+                    successCount++
+                    if (original in preparation.hidAlbums) {
+                        val newPath = itemResult.getOrThrow()
+                        hidRecoveryPaths[oldPath] = newPath
+                        runCatching { ensurePhysicalHid(newPath) }
+                            .onSuccess { restoredHidNames += original.bucketName }
+                            .onFailure { error ->
+                                failures += "${original.bucketName}：迁移成功，但 HID 恢复失败（${error.message ?: "未知错误"}）"
+                            }
+                    }
+                } else {
+                    if (original in preparation.hidAlbums) {
+                        runCatching { ensurePhysicalHid(oldPath) }
+                            .onFailure { error ->
+                                failures += "${original.bucketName}：迁移失败且原路径 HID 恢复失败（${error.message ?: "未知错误"}）"
+                            }
+                    }
+                    failures += "${original.bucketName}：${itemResult.exceptionOrNull()?.message ?: "迁移失败"}"
+                }
+            }
+
+            if (failures.isEmpty()) {
+                hierarchySystemDao.upsertMigrationState(
+                    ParentMigrationStateEntity(preparation.parentId, preparation.targetRootPath)
+                )
+            }
+            loadAlbums()
+            refreshAllMediaIfActive()
+            refreshTagSearch()
+            ParentMigrationExecutionResult(
+                successCount = successCount,
+                failureMessages = failures,
+                skippedCount = preparation.alreadyInTarget.size,
+                hidRestoredAlbumNames = restoredHidNames,
+                targetRootPath = preparation.targetRootPath
+            )
+        }
+        result.onFailure { error ->
+            // 任意阶段失败都按当前所在路径恢复 HID，避免留下临时暴露目录。
+            hidRecoveryPaths.values.distinct().forEach { path ->
+                runCatching { ensurePhysicalHid(path) }
+            }
+        }
+        withContext(Dispatchers.Main) { onResult(result) }
+    }
+
+    private suspend fun awaitMediaStoreAlbum(directoryPath: String): Album {
+        repeat(50) {
+            val match = repository.loadAlbums().getOrDefault(emptyList()).firstOrNull {
+                normalizedPath(it.directoryPath) == normalizedPath(directoryPath)
+            }
+            if (match != null && match.count > 0) return match
+            delay(300)
+        }
+        error("${File(directoryPath).name} 取消 HID 后媒体索引超时，请稍后重试")
     }
 
     private data class MediaMoveIdentity(val bucketId: String?, val dateAdded: Long)
@@ -1206,6 +1703,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             AppLogger.d("VM", "moveToTrash batch: ${distinctItems.size} items")
+            refreshAllMediaIfActive()
             refreshRecent()
         }
     }
@@ -1262,6 +1760,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     fun permanentlyDeleteConfirmed(uri: String, albumId: String? = null) {
         // 先查 filePath 再移除（需要用于清理浏览历史）
         val filePath = _trashEntries.value.find { it.uri == uri }?.filePath
+        permanentlyDeletedUris += uri
         trashManager.remove(uri)
         refreshTrashCount()
         _trashEntries.value = trashManager.getAll()
@@ -1282,6 +1781,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 viewHistoryRepository.deleteByKey(filePath)
             }
         }
+        _allMediaItems.value = _allMediaItems.value.filterNot { it.uri.toString() == uri }
+        refreshAllMediaIfActive()
         refreshRecent()
         AppLogger.d("VM", "permanentlyDeleteConfirmed: $uri")
     }
@@ -1352,6 +1853,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         val uris = entries.map { it.first }
         // 先查 filePaths 再移除（需要用于清理浏览历史）
         val uriSet = uris.toSet()
+        permanentlyDeletedUris.addAll(uriSet)
         val filePaths = _trashEntries.value.filter { it.uri in uriSet }.map { it.filePath }.filter { it.isNotEmpty() }
         trashManager.removeAll(uris)
         refreshTrashCount()
@@ -1375,6 +1877,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 filePaths.forEach { viewHistoryRepository.deleteByKey(it) }
             }
         }
+        _allMediaItems.value = _allMediaItems.value.filterNot { it.uri.toString() in uriSet }
+        refreshAllMediaIfActive()
         refreshRecent()
         AppLogger.d("VM", "batchPermanentlyDeleteConfirmed: ${uris.size} items")
     }
@@ -1651,6 +2155,48 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+    }
+
+    /** 为多个相册批量添加同一个 TAG；整个批次只创建一次 TAG 定义并顺序处理。 */
+    fun addTagToAlbums(
+        albums: List<Album>,
+        tagName: String,
+        onResult: (Result<Int>) -> Unit = {}
+    ): Job = viewModelScope.launch {
+        val targets = albums.distinctBy { normalizedPath(it.directoryPath) }
+        val result = runCatching {
+            check(targets.isNotEmpty()) { "没有可处理的相册" }
+            if (SystemTags.isHidName(tagName)) {
+                targets.forEach { album ->
+                    var itemResult: Result<Unit>? = null
+                    setSystemGalleryHidden(album.directoryPath, true) { itemResult = it }.join()
+                    checkNotNull(itemResult) { "HID 设置未返回结果" }.getOrThrow()
+                }
+            } else {
+                withContext(Dispatchers.IO) {
+                    val tag = tagRepository.getOrCreateTag(tagName)
+                    targets.forEach { album ->
+                        tagRepository.addTagToTarget(
+                            tag.id,
+                            tagRepository.albumKey(album.directoryPath),
+                            TagRepository.TYPE_ALBUM
+                        )
+                        loadItemsForAlbum(album).forEach { item ->
+                            if (item.filePath.isNotEmpty()) {
+                                tagRepository.addTagToTarget(
+                                    tag.id,
+                                    tagRepository.mediaKey(item.filePath),
+                                    TagRepository.TYPE_MEDIA
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            targets.size
+        }
+        result.onFailure { AppLogger.e("BatchAlbumTag", "failed tag=$tagName", it) }
+        onResult(result)
     }
 
     /** 从相册移除 TAG，同时清理相册内所有文件的此 TAG */
@@ -2076,6 +2622,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     /** 重置临时筛选 */
     fun resetTempFilter() {
         _tempFilter.value = TempFilter()
+    }
+
+    /** 设置父级相册显示范围；该状态仅在当前进程内生效。 */
+    fun setParentDisplayFilter(filter: ParentDisplayFilter) {
+        _parentDisplayFilter.value = filter
+    }
+
+    fun resetParentDisplayFilter() {
+        _parentDisplayFilter.value = ParentDisplayFilter.ALL
     }
 
     // ── 图片筛选 CRUD（纯内存，不持久化）──
@@ -3469,12 +4024,154 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         AppLogger.d("VM", "clearClipboard")
     }
 
+    fun prepareAlbumMerge(
+        albums: List<Album>,
+        targetDir: String,
+        onResult: (Result<AlbumMergePreparation>) -> Unit
+    ): Job = viewModelScope.launch(Dispatchers.IO) {
+        val result = runCatching {
+            val selectedAlbums = albums.distinctBy { it.bucketId }
+            check(selectedAlbums.isNotEmpty()) { "没有选中可合并的相册" }
+            check(selectedAlbums.none { isSystemHiddenAlbum(it.directoryPath) }) {
+                "HID 相册暂不支持合并，请先移除 HID"
+            }
+
+            val targetDirectory = File(targetDir).canonicalFile
+            check(targetDirectory.isDirectory || targetDirectory.mkdirs()) { "无法创建目标文件夹" }
+            check(targetDirectory.canWrite()) { "目标文件夹没有写入权限" }
+            selectedAlbums.forEach { album ->
+                val sourceDirectory = File(album.directoryPath).canonicalFile
+                check(!targetDirectory.path.equals(sourceDirectory.path, ignoreCase = true)) {
+                    "目标不能是选中的源相册自身"
+                }
+                check(!targetDirectory.path.startsWith(sourceDirectory.path + File.separator, ignoreCase = true)) {
+                    "目标不能位于选中相册的子目录中"
+                }
+            }
+
+            val trashEntries = trashManager.getAll()
+            val trashedUris = trashEntries.mapTo(HashSet()) { it.uri }
+            val trashedPaths = trashEntries.mapTo(HashSet()) { normalizedPath(it.filePath) }
+            val allItems = ArrayList<MediaItem>(selectedAlbums.sumOf { it.count })
+            val pageSize = 500
+
+            selectedAlbums.forEach { album ->
+                val albumItems = LinkedHashMap<String, MediaItem>()
+                var offset = 0
+                val maxPages = ((album.count + trashEntries.size) / pageSize) + 20
+                repeat(maxPages.coerceAtLeast(1)) {
+                    if (albumItems.size >= album.count) return@repeat
+                    val page = repository.loadAlbumMediaPage(album.bucketId, pageSize, offset).getOrThrow()
+                    page.forEach { item ->
+                        val normalized = normalizedPath(item.filePath)
+                        val trashed = item.uri.toString() in trashedUris ||
+                            normalized in trashedPaths ||
+                            item.uri.toString() in permanentlyDeletedUris
+                        if (!trashed) albumItems.putIfAbsent(item.uri.toString(), item)
+                    }
+                    offset += pageSize
+                }
+                check(albumItems.size == album.count) {
+                    "相册“${album.bucketName}”尚未完整加载（${albumItems.size}/${album.count}），请刷新后重试"
+                }
+                allItems += albumItems.values
+            }
+
+            val items = allItems.distinctBy { it.uri.toString() }
+            check(items.isNotEmpty()) { "选中的相册中没有可合并的图片、GIF 或视频" }
+
+            val sourceDuplicateCount = items
+                .groupBy { it.fileName.lowercase() }
+                .values
+                .sumOf { (it.size - 1).coerceAtLeast(0) }
+            val targetNames = targetDirectory.listFiles().orEmpty()
+                .mapTo(HashSet()) { it.name.lowercase() }
+            val targetConflictCount = items.count { it.fileName.lowercase() in targetNames }
+            val reservedNames = HashSet(targetNames)
+            val plannedNames = HashMap<String, String>(items.size)
+
+            items.forEach { item ->
+                val original = item.fileName
+                var candidate = original
+                if (candidate.lowercase() in reservedNames) {
+                    val dot = original.lastIndexOf('.').takeIf { it > 0 }
+                    val base = if (dot == null) original else original.substring(0, dot)
+                    val extension = if (dot == null) "" else original.substring(dot)
+                    var suffix = 1
+                    do {
+                        candidate = "$base($suffix)$extension"
+                        suffix++
+                    } while (candidate.lowercase() in reservedNames)
+                }
+                reservedNames += candidate.lowercase()
+                plannedNames[item.filePath] = candidate
+            }
+
+            AlbumMergePreparation(
+                albums = selectedAlbums,
+                items = items,
+                targetDir = targetDirectory.path,
+                plannedTargetNames = plannedNames,
+                sourceDuplicateCount = sourceDuplicateCount,
+                targetConflictCount = targetConflictCount
+            )
+        }
+        withContext(Dispatchers.Main) { onResult(result) }
+    }
+
+    fun executeAlbumMerge(
+        preparation: AlbumMergePreparation,
+        onResult: (Result<AlbumMergeExecutionResult>) -> Unit = {}
+    ): Job = viewModelScope.launch(Dispatchers.IO) {
+        val result = runCatching {
+            moveItemsToAlbum(
+                items = preparation.items,
+                targetDir = preparation.targetDir,
+                targetName = File(preparation.targetDir).name,
+                preplannedTargetNames = preparation.plannedTargetNames,
+                failOnUnexpectedConflict = true
+            ).join()
+
+            val failures = _moveFailures.value
+            val emptiedBucketIds = if (failures.isEmpty()) {
+                preparation.albums.mapTo(HashSet()) { it.bucketId }
+            } else {
+                emptySet()
+            }
+            if (emptiedBucketIds.isNotEmpty()) {
+                preparation.albums.forEach { album ->
+                    parentAlbumDao.getParentIdForChild(album.bucketId)?.let { parentId ->
+                        parentAlbumDao.removeChildByBucketId(parentId, album.bucketId)
+                    }
+                    parentSharedTagDao.removeByChildBucketId(album.bucketId)
+                }
+            }
+            if (emptiedBucketIds.isNotEmpty() && _starredBucketIds.value.any { it in emptiedBucketIds }) {
+                val updated = _starredBucketIds.value - emptiedBucketIds
+                _starredBucketIds.value = updated
+                saveStarredIds(updated)
+            }
+            if (preparation.items.size > failures.size) {
+                recordRecentMigrationRoot(preparation.targetDir)
+            }
+            loadAlbums()
+            refreshAllMediaIfActive()
+            refreshTagSearch()
+            AlbumMergeExecutionResult(
+                successCount = (preparation.items.size - failures.size).coerceAtLeast(0),
+                totalCount = preparation.items.size,
+                failureCount = failures.size
+            )
+        }
+        withContext(Dispatchers.Main) { onResult(result) }
+    }
+
     /**
      * 独立 MOVE 入口：直接将指定文件移动到目标相册，不经过 clipboard 中转站。
      *
      * 与 pasteToAlbum(MOVE) 的区别：
      * - 直接吃 items 参数，不读 _clipboardItems
-     * - 不写 _clipboardItems（MOVE 成功后不清空 clipboard — clipboard 只是 COPY 的中转站）
+     * - 默认不写 _clipboardItems；只有中转站入口显式要求时才消费成功项
      * - 收集失败原因到 _moveFailures，而不是单一计数
      *
      * @param items 待移动的媒体文件列表
@@ -3486,20 +4183,25 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         items: List<MediaItem>,
         targetDir: String,
         targetName: String,
-        currentAlbumId: String? = null
+        currentAlbumId: String? = null,
+        consumeFromClipboard: Boolean = false,
+        preplannedTargetNames: Map<String, String> = emptyMap(),
+        failOnUnexpectedConflict: Boolean = false
     ): kotlinx.coroutines.Job {
         return viewModelScope.launch(Dispatchers.IO) {
             var successCount = 0
             val failures = mutableListOf<MoveFailure>()
+            val successfulSourcePaths = mutableSetOf<String>()
             val completedEntries = mutableListOf<MoveFileEntry>()
             val thumbRecordId = UUID.randomUUID().toString().take(8)
             val app = getApplication<Application>()
             val context = app
             resetConflictState()
+            _moveFailures.value = emptyList()
 
-            for (item in items) {
+            for ((itemIndex, item) in items.withIndex()) {
                 _pasteProgress.value = PasteProgress(
-                    current = items.indexOf(item) + 1,
+                    current = itemIndex + 1,
                     total = items.size,
                     fileName = item.fileName,
                     mode = PasteMode.MOVE
@@ -3511,14 +4213,18 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         continue
                     }
                     // ── 目标路径 ──
-                    var targetFile = File(targetDir, srcFile.name)
+                    var targetFile = File(targetDir, preplannedTargetNames[item.filePath] ?: srcFile.name)
                     // ── 文件冲突处理 ──
                     if (targetFile.exists()) {
+                        if (failOnUnexpectedConflict) {
+                            failures.add(MoveFailure(item.fileName, MoveFailureReason.UNKNOWN_ERROR, "预检后目标位置又出现同名文件"))
+                            continue
+                        }
                         val action = globalConflictAction ?: suspendCancellableCoroutine { cont ->
                             conflictContinuation = cont
                             _fileConflict.value = FileConflictInfo(
                                 sourceFileName = srcFile.name,
-                                index = items.indexOf(item) + 1,
+                                index = itemIndex + 1,
                                 total = items.size
                             )
                         }
@@ -3544,7 +4250,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     var mediaStoreMoved = false
                     var resultMediaUri: String? = null
                     AppLogger.d("VM", "MOVE start: ${item.fileName} src=${srcFile.absolutePath} dst=${targetFile.absolutePath}")
-                    mediaStoreMoved = moveMediaByMediaStore(context, item.uri, targetDir)
+                    mediaStoreMoved = moveMediaByMediaStore(
+                        context = context,
+                        uri = item.uri,
+                        targetDir = targetDir,
+                        targetFileName = targetFile.name
+                    )
                     if (mediaStoreMoved) {
                         val targetOk = targetFile.exists() && targetFile.length() == item.size
                         if (!targetOk) {
@@ -3614,6 +4325,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     successCount++
+                    successfulSourcePaths += item.filePath
                     completedEntries.add(MoveFileEntry(
                         fileName = targetFile.name,
                         sourcePath = item.filePath,
@@ -3652,9 +4364,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _fileConflict.value = null
             conflictContinuation = null
 
-            // ── 收集失败结果 ──
-            if (successCount < items.size) {
-                _moveFailures.value = failures.toList()
+            // 每轮操作都覆盖失败状态，避免旧失败污染下一次成功结果。
+            _moveFailures.value = failures.toList()
+            if (consumeFromClipboard && successfulSourcePaths.isNotEmpty()) {
+                _clipboardItems.value = _clipboardItems.value.filterNot {
+                    it.filePath in successfulSourcePaths
+                }
             }
 
             // 更新最近移动记录
@@ -3878,6 +4593,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             val items = _clipboardItems.value.toList()
             var successCount = 0
+            val successfulSourcePaths = mutableSetOf<String>()
             val completedEntries = mutableListOf<MoveFileEntry>()
             // 提前生成 recordId，用于缩略图缓存目录
             val thumbRecordId = UUID.randomUUID().toString().take(8)
@@ -3885,6 +4601,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             val context = app
             // 重置冲突状态（每次粘贴开始时）
             resetConflictState()
+            _moveRollbackCount.value = 0
 
             for (item in items) {
                     _pasteProgress.value = PasteProgress(
@@ -3936,7 +4653,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     var resultMediaUri: String? = null
                     if (mode == PasteMode.MOVE) {
                         AppLogger.d("Paste", "MOVE start: ${item.fileName} src=${srcFile.absolutePath} dst=${targetFile.absolutePath}")
-                        mediaStoreMoved = moveMediaByMediaStore(context, item.uri, targetDir)
+                        mediaStoreMoved = moveMediaByMediaStore(
+                            context = context,
+                            uri = item.uri,
+                            targetDir = targetDir,
+                            targetFileName = targetFile.name
+                        )
                         if (mediaStoreMoved) {
                             AppLogger.d("Paste", "MOVE MediaStore RELATIVE_PATH OK: ${item.fileName}")
                             // 验证目标文件确实存在（update 返回 > 0 只是 MediaStore 接受了变更）
@@ -4007,6 +4729,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     successCount++
+                    successfulSourcePaths += item.filePath
                     completedEntries.add(MoveFileEntry(
                         fileName = targetFile.name,
                         sourcePath = item.filePath,
@@ -4057,9 +4780,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             conflictContinuation = null
 
             // ── MOVE 回滚提示（UI 层消费 moveRollbackCount 弹对话框）──
-            if (mode == PasteMode.MOVE && successCount < items.size) {
-                _moveRollbackCount.value = items.size - successCount
-            }
+            _moveRollbackCount.value =
+                if (mode == PasteMode.MOVE) items.size - successCount else 0
 
             // 更新最近移动记录（持久化）
             if (successCount > 0) {
@@ -4094,9 +4816,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
 
-            // 移动模式：全部成功后才清空中转站（否则失败的文件留在中转站可重试）
-            if (mode == PasteMode.MOVE && successCount == items.size) {
-                _clipboardItems.value = emptyList()
+            // 中转站操作会消费成功项；部分失败时只保留失败项供用户重试。
+            if (successfulSourcePaths.isNotEmpty()) {
+                _clipboardItems.value = _clipboardItems.value.filterNot {
+                    it.filePath in successfulSourcePaths
+                }
             }
 
             // 刷新相册列表和所有媒体（确保目标相册的 count 和内容在 UI 中更新）
@@ -4153,7 +4877,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         val targetUri = if (entry.mediaUri.isNotBlank()) Uri.parse(entry.mediaUri) else null
                         val sourceDir = sourceFile.parent
                         if (targetUri != null && sourceDir != null) {
-                            mediaStoreReverted = moveMediaByMediaStore(context, targetUri, sourceDir)
+                            mediaStoreReverted = moveMediaByMediaStore(
+                                context = context,
+                                uri = targetUri,
+                                targetDir = sourceDir,
+                                targetFileName = sourceFile.name
+                            )
                             if (mediaStoreReverted) {
                                 AppLogger.d("Undo", "MOVE undo RELATIVE_PATH OK: ${entry.fileName}")
                             }
@@ -4306,12 +5035,16 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private suspend fun moveMediaByMediaStore(
         context: Context,
         uri: Uri,
-        targetDir: String
+        targetDir: String,
+        targetFileName: String? = null
     ): Boolean {
         return try {
             val relativePath = toRelativePath(targetDir)
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                if (!targetFileName.isNullOrBlank()) {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, targetFileName)
+                }
             }
             context.contentResolver.update(uri, values, null, null) > 0
         } catch (_: Exception) { false }

@@ -169,7 +169,22 @@ class MediaRepository(private val context: Context) {
     }
 
     /** Load one globally date-sorted page containing both images and videos. */
-    fun loadAllMediaPage(pageSize: Int, offset: Int): Result<List<MediaItem>> = runCatching {
+    fun loadAllMediaPage(pageSize: Int, offset: Int): Result<List<MediaItem>> =
+        loadCombinedMediaPage(albumId = null, pageSize = pageSize, offset = offset)
+
+    /** Load one date-sorted album page with images and videos in the same MediaStore query. */
+    fun loadAlbumMediaPage(
+        albumId: String,
+        pageSize: Int,
+        offset: Int
+    ): Result<List<MediaItem>> =
+        loadCombinedMediaPage(albumId = albumId, pageSize = pageSize, offset = offset)
+
+    private fun loadCombinedMediaPage(
+        albumId: String?,
+        pageSize: Int,
+        offset: Int
+    ): Result<List<MediaItem>> = runCatching {
         val projection = arrayOf(
             MediaStore.Files.FileColumns._ID,
             MediaStore.Files.FileColumns.MEDIA_TYPE,
@@ -187,16 +202,18 @@ class MediaRepository(private val context: Context) {
             MediaStore.MediaColumns.RELATIVE_PATH
         )
         val extras = Bundle().apply {
-            putString(
-                ContentResolver.QUERY_ARG_SQL_SELECTION,
-                "${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)"
-            )
+            val selection = buildString {
+                append("${MediaStore.Files.FileColumns.MEDIA_TYPE} IN (?, ?)")
+                if (albumId != null) append(" AND ${MediaStore.Images.Media.BUCKET_ID} = ?")
+            }
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
             putStringArray(
                 ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
-                arrayOf(
-                    MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
-                    MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
-                )
+                buildList {
+                    add(MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString())
+                    add(MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString())
+                    if (albumId != null) add(albumId)
+                }.toTypedArray()
             )
             // Use an explicit SQL order here. Some MediaStore Files providers do not
             // reliably honor multi-column QUERY_ARG_SORT_COLUMNS, which can make the

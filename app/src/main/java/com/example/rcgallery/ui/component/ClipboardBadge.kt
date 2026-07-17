@@ -23,13 +23,13 @@ import com.example.rcgallery.viewmodel.PasteMode
  * 中转站浮动 badge。
  *
  * 显示在中转站有内容时，圆形红底白字计数器。
- * 点击弹出菜单：复制/移动到当前相册、选择目标相册、清空。
+ * 点击弹出菜单：复制/移动到当前相册、选择目标相册、解散中转站。
  *
  * @param clipboardCount 中转站中媒体数量
  * @param currentAlbumDir 当前正在浏览的相册目录路径，null=不在相册中
  * @param onPasteToAlbum 复制/移动到当前相册，参数为 (模式, 目标相册目录)
  * @param onPickTargetAlbum 打开目标相册选择对话框
- * @param onClear 清空中转站
+ * @param onClear 解散中转站（只清空临时列表，不操作真实文件）
  */
 @Composable
 fun ClipboardBadge(
@@ -93,7 +93,7 @@ fun ClipboardBadge(
                 }
             )
             DropdownMenuItem(
-                text = { Text("清空中转站", fontSize = 14.sp, color = Color.Gray) },
+                text = { Text("解散中转站", fontSize = 14.sp, color = Color.Gray) },
                 onClick = {
                     expanded = false
                     onClear()

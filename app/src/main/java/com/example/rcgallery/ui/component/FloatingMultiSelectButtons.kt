@@ -22,10 +22,15 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun FloatingMultiSelectButtons(
     selectedCount: Int,
-    onBatchTag: () -> Unit,
-    onDeleteToTrash: () -> Unit,
-    onAddToClipboard: () -> Unit,
-    onPickTargetAlbum: () -> Unit,
+    onBatchTag: (() -> Unit)? = null,
+    onDeleteToTrash: (() -> Unit)? = null,
+    onAddToClipboard: (() -> Unit)? = null,
+    onPickTargetAlbum: (() -> Unit)? = null,
+    onAddToParent: (() -> Unit)? = null,
+    onMergeToFolder: (() -> Unit)? = null,
+    batchTagLabel: String = "批量加标签",
+    pickTargetLabel: String = "选择目标相册",
+    addToParentLabel: String = "添加到父级",
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -34,29 +39,51 @@ fun FloatingMultiSelectButtons(
         horizontalAlignment = Alignment.End
     ) {
         // ── 批量加标签 ──
-        ActionButton(
-            text = "批量加标签 ($selectedCount)",
-            containerColor = Color(0xFF555555),
-            onClick = onBatchTag
-        )
+        onBatchTag?.let { action ->
+            ActionButton(
+                text = "$batchTagLabel ($selectedCount)",
+                containerColor = Color(0xFF555555),
+                onClick = action
+            )
+        }
+        onAddToParent?.let { action ->
+            ActionButton(
+                text = "$addToParentLabel ($selectedCount)",
+                containerColor = Color(0xFF607D8B),
+                onClick = action
+            )
+        }
+        onMergeToFolder?.let { action ->
+            ActionButton(
+                text = "合并至 ($selectedCount)",
+                containerColor = Color(0xFF00897B),
+                onClick = action
+            )
+        }
         // ── 删除到回收站 ──
-        ActionButton(
-            text = "删除到回收站 ($selectedCount)",
-            containerColor = MaterialTheme.colorScheme.error,
-            onClick = onDeleteToTrash
-        )
+        onDeleteToTrash?.let { action ->
+            ActionButton(
+                text = "删除到回收站 ($selectedCount)",
+                containerColor = MaterialTheme.colorScheme.error,
+                onClick = action
+            )
+        }
         // ── 加入中转站 ──
-        ActionButton(
-            text = "加入中转站 ($selectedCount)",
-            containerColor = Color(0xCCFF9800),
-            onClick = onAddToClipboard
-        )
+        onAddToClipboard?.let { action ->
+            ActionButton(
+                text = "加入中转站 ($selectedCount)",
+                containerColor = Color(0xCCFF9800),
+                onClick = action
+            )
+        }
         // ── 选择目标相册 ──
-        ActionButton(
-            text = "选择目标相册 ($selectedCount)",
-            containerColor = Color(0xFF448AFF),
-            onClick = onPickTargetAlbum
-        )
+        onPickTargetAlbum?.let { action ->
+            ActionButton(
+                text = "$pickTargetLabel ($selectedCount)",
+                containerColor = Color(0xFF448AFF),
+                onClick = action
+            )
+        }
     }
 }
 

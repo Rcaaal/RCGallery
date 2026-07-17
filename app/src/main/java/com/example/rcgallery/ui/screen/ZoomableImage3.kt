@@ -32,6 +32,7 @@ import coil.load
 import com.example.rcgallery.ui.component.InertiaSettings
 import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlin.math.absoluteValue
 import kotlin.math.min
@@ -44,6 +45,7 @@ enum class LoadTier { Full, Preview }
 private const val DOUBLE_TAP_ZOOM = 2.5f
 private const val EDGE_THRESHOLD_PX = 3f
 private const val DOUBLE_TAP_TIME_MS = 300L
+private const val MIN_INERTIA_PAN_PX = 2.5f
 
 private data class InertiaParams(
     val targetX: Float,
@@ -156,6 +158,18 @@ fun ZoomableImage3(
         animationSpec = animSpec,
         label = "panY"
     )
+
+    // Commit the animated target back into the gesture state. Without this,
+    // clearing/interruption can briefly expose the pre-fling offset and look like a jump.
+    LaunchedEffect(inertiaState) {
+        val state = inertiaState ?: return@LaunchedEffect
+        delay(state.durationMs.toLong())
+        if (inertiaState == state) {
+            offsetX = state.targetX
+            offsetY = state.targetY
+            inertiaState = null
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -298,7 +312,9 @@ fun ZoomableImage3(
                     }
 
                     // ── 惯性 ──
-                    if (scale > 1f && !didEdgeSwipe && frameCount > 0) {
+                    val releasePan = maxOf(smoothX.absoluteValue, smoothY.absoluteValue)
+                    if (scale > 1f && !didEdgeSwipe && frameCount > 0 &&
+                        releasePan >= MIN_INERTIA_PAN_PX) {
                         val fit = computeFitRender(size, rawIntrinsicSize)
                         val maxX = maxScrollX(size.width.toFloat(), fit, scale)
                         val maxY = maxScrollY(size.height.toFloat(), fit, scale)

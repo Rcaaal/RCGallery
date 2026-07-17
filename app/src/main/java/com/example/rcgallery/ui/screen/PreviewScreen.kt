@@ -51,6 +51,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.Player
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.db.TagEntity
@@ -88,12 +91,6 @@ fun PreviewScreen(
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
     val starredUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
 
-    // ── 进入静音：预览页进入时自动将系统媒体音量压到 0，退出时恢复 ──
-    DisposableEffect(Unit) {
-        playbackSettingsVM.muteSystemOnEnter()
-        onDispose { playbackSettingsVM.restoreSystemVolume() }
-    }
-
     // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
     var controllerVisible by remember { mutableStateOf(false) }
     // 本地可变快照，初始值来自 items 参数。删除/改名等操作直接修改此快照，
@@ -124,10 +121,10 @@ fun PreviewScreen(
     val screenWidth = remember { context.resources.displayMetrics.widthPixels }
     var isDraggingSeek by remember { mutableStateOf(false) }
     var seekIndicatorPosition by remember { mutableLongStateOf(0L) }
-    // 每页独立的回调映射（防 pager 翻页时多个 VideoPlayer 互相覆盖，手势过程状态在 pointerInput 内局部化）
-    val seekToPlayer = remember { mutableMapOf<Int, (Long) -> Unit>() }
-    val getPlayerPositions = remember { mutableMapOf<Int, () -> Long>() }
-    val getPlayerDurations = remember { mutableMapOf<Int, () -> Long>() }
+    // 按媒体 URI 隔离回调。删除项目后页码会复用，不能用 page 作为播放器身份。
+    val seekToPlayer = remember { mutableMapOf<String, (Long) -> Unit>() }
+    val getPlayerPositions = remember { mutableMapOf<String, () -> Long>() }
+    val getPlayerDurations = remember { mutableMapOf<String, () -> Long>() }
     val speedSettingsTrigger = remember { mutableStateOf<(() -> Unit)?>(null) }
 
     // ── 播放模式 ──
@@ -164,14 +161,31 @@ fun PreviewScreen(
         if (targetUri != null) viewModel.renameFile(targetUri, newFileName)
     }
 
+    /** 按 URI 从预览快照移除，避免异步删除返回时 page 已指向其他媒体。 */
+    fun removeItemFromPreviewSnapshot(item: com.example.rcgallery.model.MediaItem): Pair<Int, Boolean>? {
+        val itemKey = item.uri.toString()
+        val deletedPage = mediaItems.indexOfFirst { it.uri.toString() == itemKey }
+        if (deletedPage < 0) return null
+        val wasLastPage = deletedPage >= mediaItems.lastIndex
+
+        // 删除会让后一个媒体复用同一页码；先清除旧媒体的瞬时播放器状态。
+        seekToPlayer.remove(itemKey)
+        getPlayerPositions.remove(itemKey)
+        getPlayerDurations.remove(itemKey)
+        controllerVisible = false
+        isDraggingSeek = false
+        pagerScrollEnabled = true
+        speedSettingsTrigger.value = null
+        showInfo = false
+        mediaItems = mediaItems.filterNot { it.uri.toString() == itemKey }
+        return deletedPage to wasLastPage
+    }
+
     // ── 移至回收站并翻到下一个（提取为公共函数，按钮和 VideoPlayer 共用）──
     fun moveCurrentToTrash() {
         val trashItem = mediaItems.getOrNull(pagerState.currentPage) ?: return
-        if (showInfo) showInfo = false
         viewModel.moveToTrash(trashItem)
-        val deletedPage = pagerState.currentPage
-        val wasLastPage = deletedPage >= mediaItems.lastIndex
-        mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
+        val (deletedPage, wasLastPage) = removeItemFromPreviewSnapshot(trashItem) ?: return
         scope.launch {
             if (!wasLastPage && mediaItems.isNotEmpty()) {
                 delay(50)
@@ -206,6 +220,9 @@ fun PreviewScreen(
     // 3. 触发 PiP
     if (pipTriggered) {
         LaunchedEffect(Unit) {
+            showInfo = false
+            isDraggingSeek = false
+            pagerScrollEnabled = true
             pipOverlayHidden = true
             withFrameNanos { }
             delay(200)  // 等 LaunchedEffect(hideUiOverlays) → useController=false 生效
@@ -225,22 +242,83 @@ fun PreviewScreen(
                 AppLogger.d("PiP", "synced size: ${PipState.videoWidth}x${PipState.videoHeight} rot=${vs?.unappliedRotationDegrees}°")
             }
 
-            activity.enterPictureInPictureMode(
+            val entered = activity.enterPictureInPictureMode(
                 PipState.buildPipParams()
             )
+            if (!entered) pipOverlayHidden = false
             pipTriggered = false
         }
     }
 
     // PiP 退出 → 恢复 UI 覆盖层
     LaunchedEffect(PipState.isInPip) {
-        if (!PipState.isInPip && pipOverlayHidden) {
+        if (PipState.isInPip) {
+            showInfo = false
+            isDraggingSeek = false
+            pagerScrollEnabled = true
+        } else if (pipOverlayHidden) {
             AppLogger.d("PiP", "exit PiP → restore overlays")
             pipOverlayHidden = false
         }
     }
 
     val currentItem = mediaItems.getOrNull(pagerState.currentPage)
+
+    // Images never change system volume. Videos mute only while this preview is
+    // foreground; ordinary backgrounding restores volume, while PiP keeps it.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var previewForeground by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    val lifecycleVideoActive by rememberUpdatedState(currentItem?.isVideo == true)
+    val lifecyclePipProtected by rememberUpdatedState(
+        PipState.isInPip || pipOverlayHidden || pipTriggered
+    )
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    previewForeground = true
+                    if (lifecycleVideoActive && !lifecyclePipProtected) {
+                        playbackSettingsVM.muteSystemOnEnter()
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    previewForeground = false
+                    if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
+                }
+                Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            // PiP may rebuild composition while playback remains active.
+            if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
+        }
+    }
+
+    LaunchedEffect(
+        currentItem?.isVideo,
+        previewForeground,
+        pipOverlayHidden,
+        pipTriggered,
+        PipState.isInPip
+    ) {
+        if (!previewForeground) {
+            if (!PipState.isInPip && !pipOverlayHidden && !pipTriggered) {
+                playbackSettingsVM.restoreSystemVolume()
+            }
+            return@LaunchedEffect
+        }
+        if (currentItem?.isVideo != true) {
+            playbackSettingsVM.restoreSystemVolume()
+        } else if (!pipOverlayHidden && !pipTriggered && !PipState.isInPip) {
+            playbackSettingsVM.muteSystemOnEnter()
+        }
+    }
 
     // ── TAG 相关 ──
     val allTags by viewModel.allTags.collectAsStateWithLifecycle()
@@ -281,15 +359,12 @@ fun PreviewScreen(
                 val item = pendingDeleteItem
                 if (item != null) {
                     viewModel.removeFromMediaItems(item)
-                    val page = pagerState.currentPage
-                    val newSize = mediaItems.size - 1
-                    mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
-                    showInfo = false
+                    val removal = removeItemFromPreviewSnapshot(item)
                     pendingDeleteItem = null
                     Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
                     // 动画翻到下一页
-                    if (newSize > 0) {
-                        val targetPage = page.coerceIn(0, newSize - 1)
+                    if (removal != null && mediaItems.isNotEmpty()) {
+                        val targetPage = removal.first.coerceIn(0, mediaItems.lastIndex)
                         scope.launch {
                             delay(50)
                             pagerState.animateScrollToPage(targetPage)
@@ -458,15 +533,12 @@ fun PreviewScreen(
                             try {
                                 context.contentResolver.delete(item.uri, null, null)
                                 viewModel.removeFromMediaItems(item)
-                                val page = pagerState.currentPage
-                                val newSize = mediaItems.size - 1
-                                mediaItems = mediaItems.filterIndexed { i, _ -> i != page }
-                                showInfo = false
+                                val removal = removeItemFromPreviewSnapshot(item)
                                 Toast.makeText(context, "已永久删除", Toast.LENGTH_SHORT).show()
-                                if (newSize > 0) {
+                                if (removal != null && mediaItems.isNotEmpty()) {
                                     scope.launch {
                                         delay(50)
-                                        pagerState.animateScrollToPage(page.coerceIn(0, newSize - 1))
+                                        pagerState.animateScrollToPage(removal.first.coerceIn(0, mediaItems.lastIndex))
                                     }
                                 }
                             } catch (e: Exception) {
@@ -507,7 +579,7 @@ fun PreviewScreen(
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // ── 图片/视频区域（信息面板展开时被推到上半部分）──
-                val isInfoShown = showInfo && currentItem != null
+                val isInfoShown = showInfo && currentItem != null && !pipOverlayHidden
                 Box(
                     modifier = Modifier
                         .weight(
@@ -547,11 +619,15 @@ fun PreviewScreen(
                                             isActive = true,
                                             volumeLevel = volumeState.level,
                                             onToggleMute = { playbackSettingsVM.toggleMute() },
-                                            onControllerVisibilityChanged = { controllerVisible = it },
+                                            onControllerVisibilityChanged = { visible ->
+                                                if (mediaItems.getOrNull(pagerState.currentPage)?.uri == item.uri) {
+                                                    controllerVisible = visible
+                                                }
+                                            },
                                             savedPositions = savedPositions,
-                                            onRegisterSeekHandler = { fn -> seekToPlayer[page] = fn },
-                                            onRegisterPositionProvider = { fn -> getPlayerPositions[page] = fn },
-                                            onRegisterDurationProvider = { fn -> getPlayerDurations[page] = fn },
+                                            onRegisterSeekHandler = { fn -> seekToPlayer[item.uri.toString()] = fn },
+                                            onRegisterPositionProvider = { fn -> getPlayerPositions[item.uri.toString()] = fn },
+                                            onRegisterDurationProvider = { fn -> getPlayerDurations[item.uri.toString()] = fn },
                                             onRegisterSpeedSettingsTrigger = { fn -> speedSettingsTrigger.value = fn },
                                             onRequestPip = { pipTriggered = true },
                                             hideUiOverlays = pipOverlayHidden,
@@ -604,38 +680,7 @@ fun PreviewScreen(
                                     onSwipeUpToShowInfo = {
                                         if (showInfo) {
                                             // 信息栏已展开 → 上划快删
-                                            val item = currentItem ?: return@ZoomableImage3
-                                            showInfo = false  // 关闭信息栏，防快速连击
-                                            viewModel.moveToTrash(item)
-                                            val deletedPage = pagerState.currentPage
-                                            val wasLastPage = deletedPage >= mediaItems.lastIndex
-                                            mediaItems = mediaItems.filterIndexed { i, _ -> i != deletedPage }
-                                            scope.launch {
-                                                // 先翻到下一页
-                                                if (!wasLastPage && mediaItems.isNotEmpty()) {
-                                                    delay(50)
-                                                    pagerState.animateScrollToPage(deletedPage.coerceAtMost(mediaItems.lastIndex))
-                                                }
-                                                // 再显示 Snackbar
-                                                snackbarHostState.currentSnackbarData?.dismiss()
-                                                val result = snackbarHostState.showSnackbar(
-                                                    message = "已移至回收站",
-                                                    actionLabel = "撤销",
-                                                    duration = SnackbarDuration.Short
-                                                )
-                                                if (result == SnackbarResult.ActionPerformed) {
-                                                    // 撤销：清索引 + 加回列表（增量，不走 loadMedia）
-                                                    viewModel.restoreFromTrash(item.uri.toString())
-                                                    viewModel.addMediaItemBack(item)
-                                                    // 撤销后恢复本地快照
-                                                    mediaItems = (listOf(item) + mediaItems)
-                                                        .sortedByDescending { it.dateAdded }
-                                                }
-                                                // Snackbar 结束后再退出（保留 coroutine scope 给撤销用）
-                                                if (wasLastPage) {
-                                                    onBackClick()
-                                                }
-                                            }
+                                            moveCurrentToTrash()
                                         } else {
                                             showInfo = true
                                         }
@@ -645,11 +690,14 @@ fun PreviewScreen(
                             }
                         }
                     // 页面离开时清理回调映射，防残留
-                    DisposableEffect(page) {
+                    DisposableEffect(item?.uri) {
+                        val mediaKey = item?.uri?.toString()
                         onDispose {
-                            seekToPlayer.remove(page)
-                            getPlayerPositions.remove(page)
-                            getPlayerDurations.remove(page)
+                            if (mediaKey != null) {
+                                seekToPlayer.remove(mediaKey)
+                                getPlayerPositions.remove(mediaKey)
+                                getPlayerDurations.remove(mediaKey)
+                            }
                         }
                     }
                     }   // ← key(uri) end
@@ -764,9 +812,10 @@ fun PreviewScreen(
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val curPage = pagerState.currentPage
-                            val seekHandler = seekToPlayer[curPage]
-                            val durProvider = getPlayerDurations[curPage]
-                            val posProvider = getPlayerPositions[curPage]
+                            val mediaKey = mediaItems.getOrNull(curPage)?.uri?.toString()
+                            val seekHandler = mediaKey?.let(seekToPlayer::get)
+                            val durProvider = mediaKey?.let(getPlayerDurations::get)
+                            val posProvider = mediaKey?.let(getPlayerPositions::get)
                             if (seekHandler == null || durProvider == null || posProvider == null) {
                                 AppLogger.e("Preview", "seek callbacks not ready: seek=${seekHandler != null} dur=${durProvider != null} pos=${posProvider != null}")
                                 return@awaitEachGesture
@@ -832,13 +881,15 @@ fun PreviewScreen(
         VideoSeekIndicator(
             visible = isDraggingSeek,
             positionMs = seekIndicatorPosition,
-            totalDurationMs = getPlayerDurations[pagerState.currentPage]?.invoke() ?: 1L
+            totalDurationMs = currentItem?.uri?.toString()
+                ?.let(getPlayerDurations::get)
+                ?.invoke() ?: 1L
         )
 
         // ── 顶部标题区（页码 + 可点击文件名，PiP 时隐藏）──
         if (!pipOverlayHidden && currentItem != null) {
             Column(
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 48.dp),
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
@@ -851,10 +902,13 @@ fun PreviewScreen(
                     color = Color.White,
                     fontSize = 13.sp,
                     maxLines = 1,
-                    modifier = Modifier.clickable {
-                        topRenameText = currentItem?.fileName ?: ""
-                        showTopRenameDialog = true
-                    }
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(horizontal = 48.dp)
+                        .clickable {
+                            topRenameText = currentItem?.fileName ?: ""
+                            showTopRenameDialog = true
+                        }
                 )
             }
         }

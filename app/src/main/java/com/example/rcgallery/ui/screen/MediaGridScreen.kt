@@ -65,10 +65,15 @@ import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.resume
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -83,7 +88,6 @@ fun MediaGridScreen(
     val activity = LocalContext.current as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
-    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
     val albumTags by viewModel.albumTags.collectAsStateWithLifecycle()
@@ -135,9 +139,9 @@ fun MediaGridScreen(
     LaunchedEffect(albumId) {
         isLoadingAlbum = true
         viewModel.loadMedia(albumId = albumId)
-        // 等加载完成（true → false）后显示网格，防竞态
-        viewModel.isLoading.first { it }
-        viewModel.isLoading.first { !it }
+        // loadMedia synchronously marks this state true, then releases it after
+        // the first 500 items are ready. The remaining rows continue in background.
+        viewModel.isMediaInitialLoading.first { !it }
         isLoadingAlbum = false
     }
 
@@ -259,37 +263,51 @@ fun MediaGridScreen(
             }
         }
     }
-    // 星标排序：星标永久置顶 + 按当前排序模式排列
-    val sortedItems = remember(filteredItems, starredMediaUris, mediaSortMode) {
-        filteredItems.sortedWith(
-            compareByDescending<com.example.rcgallery.model.MediaItem> { it.uri.toString() in starredMediaUris }
-                .then(when (mediaSortMode) {
-                    MediaSortMode.DATE -> compareByDescending { it.dateAdded }
-                    MediaSortMode.NAME -> compareBy { it.fileName }
-                    MediaSortMode.SIZE -> compareByDescending { it.size }
-                    MediaSortMode.IMAGE_SIZE -> compareByDescending<com.example.rcgallery.model.MediaItem> { it.isImage }
-                        .thenByDescending { it.size }
-                    MediaSortMode.VIDEO_SIZE -> compareByDescending<com.example.rcgallery.model.MediaItem> { it.isVideo }
-                        .thenByDescending { it.size }
-                })
-        )
-    }
-
-    // ── 标签筛选（持久规则 + 临时筛选）—— 在 sortedItems 之后过滤 ──
-    val tagFilteredItems = remember(
-        sortedItems,
+    // Sorting and filtering can touch tens of thousands of rows. Keep both off
+    // the main thread and retain the previous list until the new result is ready.
+    val mediaListResult by produceState(
+        initialValue = MediaListResult(emptyList(), mediaSortMode),
+        filteredItems,
+        starredMediaUris,
+        mediaSortMode,
         mediaTempFilter,
         mediaPersistentRules,
         mediaTags,
         albumTags,
         systemHiddenAlbumPaths
     ) {
-        sortedItems.filter { item ->
-            val mTags = mediaTags[item.filePath]?.map { it.name } ?: emptyList()
-            val aTags = albumTags[albumDirectoryPath]?.map { it.name } ?: emptyList()
-            !viewModel.shouldHideMedia(item.filePath, mTags, aTags)
+        val resultSortMode = mediaSortMode
+        val resultItems = withContext(Dispatchers.Default) {
+            val comparator = compareByDescending<com.example.rcgallery.model.MediaItem> {
+                it.uri.toString() in starredMediaUris
+            }.then(
+                when (mediaSortMode) {
+                    MediaSortMode.DATE -> compareByDescending { it.dateAdded }
+                    MediaSortMode.NAME -> compareBy { it.fileName }
+                    MediaSortMode.SIZE -> compareByDescending { it.size }
+                    MediaSortMode.IMAGE_SIZE ->
+                        compareByDescending<com.example.rcgallery.model.MediaItem> { it.isImage }
+                            .thenByDescending { it.size }
+                    MediaSortMode.VIDEO_SIZE ->
+                        compareByDescending<com.example.rcgallery.model.MediaItem> { it.isVideo }
+                            .thenByDescending { it.size }
+                }
+            )
+            val sorted = filteredItems.sortedWith(comparator)
+            if (!hasActiveMediaFilter) {
+                sorted
+            } else {
+                val albumTagNames = albumTags[albumDirectoryPath]?.map { it.name }.orEmpty()
+                sorted.filter { item ->
+                    val mediaTagNames = mediaTags[item.filePath]?.map { it.name }.orEmpty()
+                    !viewModel.shouldHideMedia(item.filePath, mediaTagNames, albumTagNames)
+                }
+            }
         }
+        value = MediaListResult(resultItems, resultSortMode)
     }
+    val tagFilteredItems = mediaListResult.items
+    val resolvedSortMode = mediaListResult.sortMode
     // ── RecyclerView 引用（给 FloatingJumpButton 用）──
     val mediaRvRef = remember { mutableStateOf<RecyclerView?>(null) }
 
@@ -633,7 +651,10 @@ fun MediaGridScreen(
                                     onManageTags = { item -> tagDialogMediaItem = item },
                                     context = ctx,
                                     onLongClick = null  // 由触摸监听器接管长按
-                                ).apply { currentMode = mediaDisplayMode }
+                                ).apply {
+                                    currentMode = mediaDisplayMode
+                                    currentSortMode = resolvedSortMode
+                                }
                                 rv.adapter = adapter
                                 mediaRvRef.value = rv
                                 val scroller = FastScrollerView(ctx, rv)
@@ -649,13 +670,26 @@ fun MediaGridScreen(
                                 val prevMode = adapter.currentMode
                                 val currentMode = mediaDisplayMode
                                 val modeChanged = prevMode != currentMode
+                                val sortChanged = adapter.currentSortMode != resolvedSortMode
                                 val oldItems = adapter.items
                                 val oldStarredUris = adapter.starredUris
                                 val oldMediaTagsMap = adapter.mediaTagsMap
                                 val oldSelectedUris = adapter.selectedUris
                                 val oldMultiSelectMode = adapter.isMultiSelectMode
 
-                                val itemDiff = if (!modeChanged && oldItems !== tagFilteredItems) {
+                                val listChanged = oldItems !== tagFilteredItems
+                                val useDiff = !modeChanged && !sortChanged && listChanged &&
+                                    maxOf(oldItems.size, tagFilteredItems.size) <= 2_000
+                                val layoutManager = rv.layoutManager as? GridLayoutManager
+                                val anchorPosition = if (listChanged && !sortChanged) {
+                                    layoutManager?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+                                } else RecyclerView.NO_POSITION
+                                val anchorUri = oldItems.getOrNull(anchorPosition)?.uri?.toString()
+                                val anchorOffset = if (anchorPosition != RecyclerView.NO_POSITION) {
+                                    layoutManager?.findViewByPosition(anchorPosition)?.top ?: 0
+                                } else 0
+
+                                val itemDiff = if (useDiff) {
                                     DiffUtil.calculateDiff(object : DiffUtil.Callback() {
                                         override fun getOldListSize() = oldItems.size
                                         override fun getNewListSize() = tagFilteredItems.size
@@ -667,6 +701,7 @@ fun MediaGridScreen(
                                 } else null
 
                                 adapter.replaceItems(tagFilteredItems)
+                                adapter.currentSortMode = resolvedSortMode
                                 adapter.starredUris = starredMediaUris
                                 adapter.mediaTagsMap = mediaTags
                                 if (!isDragInProgress) {
@@ -685,9 +720,23 @@ fun MediaGridScreen(
                                     }
                                     adapter.notifyDataSetChanged()
                                     scroller.refresh()
+                                } else if (sortChanged) {
+                                    adapter.notifyDataSetChanged()
                                 } else {
-                                    itemDiff?.dispatchUpdatesTo(adapter)
-                                    if (oldMultiSelectMode != isMediaMultiSelect) {
+                                    if (itemDiff != null) {
+                                        itemDiff.dispatchUpdatesTo(adapter)
+                                    } else if (listChanged) {
+                                        adapter.notifyDataSetChanged()
+                                        if (anchorUri != null) {
+                                            rv.post {
+                                                val newPosition = adapter.indexOfUri(anchorUri)
+                                                if (newPosition >= 0) {
+                                                    (rv.layoutManager as? GridLayoutManager)
+                                                        ?.scrollToPositionWithOffset(newPosition, anchorOffset)
+                                                }
+                                            }
+                                        }
+                                    } else if (oldMultiSelectMode != isMediaMultiSelect) {
                                         adapter.notifyItemRangeChanged(0, adapter.itemCount)
                                     } else {
                                         val changedUris = (oldStarredUris - starredMediaUris) +
@@ -706,6 +755,13 @@ fun MediaGridScreen(
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                                if (sortChanged) {
+                                    rv.post {
+                                        (rv.layoutManager as? GridLayoutManager)
+                                            ?.scrollToPositionWithOffset(0, 0)
+                                        scroller.refresh()
                                     }
                                 }
                                 // ── 列表刷新后对齐多选状态：清除已不存在的 URI ──
@@ -886,21 +942,19 @@ fun MediaGridScreen(
             if (!isMediaMultiSelect) {
                 val clipboardItems by viewModel.clipboardItems.collectAsStateWithLifecycle()
                 if (clipboardItems.isNotEmpty()) {
-                    val clipboardScope = rememberCoroutineScope()
                     ClipboardBadge(
                         clipboardCount = clipboardItems.size,
                         currentAlbumDir = albumDirectoryPath.ifEmpty { null },
                         onPasteToAlbum = { mode, dir ->
                             if (mode == PasteMode.MOVE) {
                                 // MOVE 走独立入口：不从 clipboard 塞入后再 paste，直接 moveItemsToAlbum
-                                val job = viewModel.moveItemsToAlbum(clipboardItems, dir, albumName, albumId.ifEmpty { null })
-                                // 全部移动成功后清空 clipboard，失败后保留以便重试
-                                clipboardScope.launch {
-                                    job.join()
-                                    if (viewModel.moveFailures.value.isEmpty()) {
-                                        viewModel.clearClipboard()
-                                    }
-                                }
+                                viewModel.moveItemsToAlbum(
+                                    clipboardItems,
+                                    dir,
+                                    albumName,
+                                    albumId.ifEmpty { null },
+                                    consumeFromClipboard = true
+                                )
                             } else {
                                 viewModel.pasteToAlbum(mode, dir, albumName, albumId.ifEmpty { null })
                             }
@@ -1265,6 +1319,74 @@ private const val VIEW_TYPE_GRID = 0
 private const val VIEW_TYPE_LIST = 1
 private const val PAYLOAD_SELECTION = "selection"
 
+/**
+ * MediaGrid-only thumbnail pipeline. This intentionally mirrors the proven date-view
+ * strategy without sharing state or changing DateThumbnailLoader.
+ */
+private object MediaGridThumbnailLoader {
+    private const val CACHE_SIZE_KB = 24 * 1024
+    private val cache = object : android.util.LruCache<String, android.graphics.Bitmap>(CACHE_SIZE_KB) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int =
+            (value.allocationByteCount / 1024).coerceAtLeast(1)
+    }
+    private val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val jobs = java.util.WeakHashMap<ImageView, Job>()
+
+    fun load(imageView: ImageView, uri: Uri, targetSizePx: Int) {
+        cancel(imageView)
+        val requestSize = targetSizePx.coerceAtLeast(1)
+        val key = "$uri@$requestSize"
+        imageView.tag = key
+        imageView.setImageDrawable(null)
+
+        cache.get(key)?.takeUnless(android.graphics.Bitmap::isRecycled)?.let {
+            imageView.setImageBitmap(it)
+            return
+        }
+
+        jobs[imageView] = scope.launch {
+            val bitmap = loadSystemThumbnail(imageView, uri, requestSize)
+            if (imageView.tag != key) return@launch
+            if (bitmap != null) {
+                cache.put(key, bitmap)
+                imageView.setImageBitmap(bitmap)
+            } else {
+                imageView.load(uri) {
+                    size(requestSize)
+                    precision(coil.size.Precision.INEXACT)
+                    bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
+                    crossfade(false)
+                }
+            }
+        }
+    }
+
+    fun cancel(imageView: ImageView) {
+        jobs.remove(imageView)?.cancel()
+        imageView.tag = null
+    }
+
+    private suspend fun loadSystemThumbnail(
+        imageView: ImageView,
+        uri: Uri,
+        size: Int
+    ): android.graphics.Bitmap? = suspendCancellableCoroutine { continuation ->
+        val signal = android.os.CancellationSignal()
+        continuation.invokeOnCancellation { signal.cancel() }
+        executor.execute {
+            val bitmap = runCatching {
+                imageView.context.contentResolver.loadThumbnail(
+                    uri,
+                    android.util.Size(size, size),
+                    signal
+                )
+            }.getOrNull()
+            if (continuation.isActive) continuation.resume(bitmap)
+        }
+    }
+}
+
 /** 星标缩放因子：根据 Grid 列数调整，列数越多星标越小 */
 private fun getMediaStarScale(columns: Int): Float = when (columns) {
     2 -> 1.15f
@@ -1291,6 +1413,7 @@ private class SimpleGridAdapter(
     var items: List<com.example.rcgallery.model.MediaItem> = emptyList()
     var starredUris: Set<String> = emptySet()
     var currentMode: MediaDisplayMode = MediaDisplayMode.Grid(DEFAULT_MEDIA_GRID_COLUMNS)
+    var currentSortMode: MediaSortMode = MediaSortMode.DATE
     var mediaTagsMap: Map<String, List<TagEntity>> = emptyMap()
     var selectedUris: Set<String> = emptySet()
     var isMultiSelectMode: Boolean = false
@@ -1378,6 +1501,14 @@ private class SimpleGridAdapter(
             return
         }
         super.onBindViewHolder(holder, position, payloads)
+    }
+
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        when (holder) {
+            is GridVH -> holder.recycleThumbnail()
+            is ListVH -> holder.recycleThumbnail()
+        }
+        super.onViewRecycled(holder)
     }
 
     // ── Grid ViewHolder ──
@@ -1532,7 +1663,9 @@ private class SimpleGridAdapter(
                 android.graphics.PorterDuff.Mode.SRC_IN
             )
             if (previousUri != item.uri || iv.drawable == null) {
-                iv.load(item.uri) { crossfade(false) }
+                val targetSize = iv.width.takeIf { it > 0 }
+                    ?: (iv.resources.displayMetrics.widthPixels / columns.coerceAtLeast(1))
+                MediaGridThumbnailLoader.load(iv, item.uri, targetSize)
             }
             if (item.isVideo) {
                 val formatCode = item.fileName.substringAfterLast('.', "")
@@ -1551,6 +1684,12 @@ private class SimpleGridAdapter(
             val inMultiSelect = isMultiSelectMode || selectedUris.isNotEmpty()
             val isSelected = item.uri.toString() in selectedUris
             bindSelection(isSelected, inMultiSelect, columns)
+        }
+
+        fun recycleThumbnail() {
+            MediaGridThumbnailLoader.cancel(iv)
+            iv.setImageDrawable(null)
+            currentItem = null
         }
 
         fun bindSelection(isSelected: Boolean, inMultiSelect: Boolean, columns: Int) {
@@ -1834,7 +1973,9 @@ private class SimpleGridAdapter(
             val isSelected = item.uri.toString() in selectedUris
             bindSelection(isSelected, inMultiSelect)
             if (previousUri != item.uri || iv.drawable == null) {
-                iv.load(item.uri) { crossfade(false) }
+                val targetSize = iv.layoutParams.width.takeIf { it > 0 }
+                    ?: (LIST_THUMB_SIZE_DP * iv.resources.displayMetrics.density).toInt()
+                MediaGridThumbnailLoader.load(iv, item.uri, targetSize)
             }
             nameTv.text = item.fileName
             infoTv.text = buildString {
@@ -1883,6 +2024,12 @@ private class SimpleGridAdapter(
                 itemView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
             }
 
+        }
+
+        fun recycleThumbnail() {
+            MediaGridThumbnailLoader.cancel(iv)
+            iv.setImageDrawable(null)
+            currentItem = null
         }
     }
 }
@@ -2213,3 +2360,8 @@ private fun AlbumTagBarBottom(
         }
     }
 }
+
+private data class MediaListResult(
+    val items: List<com.example.rcgallery.model.MediaItem>,
+    val sortMode: MediaSortMode
+)

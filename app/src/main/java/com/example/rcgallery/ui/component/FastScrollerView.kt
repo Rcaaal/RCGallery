@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -32,6 +33,8 @@ class FastScrollerView(
     private val thumbWidthPx = (20 * density).toInt()
     private val thumbHeightPx = (36 * density).toInt()
     private val touchRangePx = (32 * density).toInt()
+    private val thumbTouchPaddingPx = (8 * density).toInt()
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val thumbRadiusPx = thumbWidthPx / 2f
 
     // ── Paint ──
@@ -52,6 +55,8 @@ class FastScrollerView(
     // ── 滑块位置 ──
     private var thumbCenterY = 0f
     private var isDragging = false
+    private var pendingDrag = false
+    private var downY = 0f
     private var dragOffsetY = 0f
 
     // ── 淡入淡出 ──
@@ -173,27 +178,44 @@ class FastScrollerView(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (visibility != VISIBLE) return false
+                if (alpha <= 0.1f || thumbCenterY <= 0f) return false
                 if (event.x < width - touchRangePx) return false
-                isDragging = true
+                val hitTop = thumbCenterY - thumbHeightPx / 2f - thumbTouchPaddingPx
+                val hitBottom = thumbCenterY + thumbHeightPx / 2f + thumbTouchPaddingPx
+                if (event.y !in hitTop..hitBottom) return false
+
+                pendingDrag = true
+                isDragging = false
+                downY = event.y
                 dragOffsetY = event.y - thumbCenterY
-                doDrag(event.y)
                 showWithTimeout()
-                recyclerView.parent?.requestDisallowInterceptTouchEvent(true)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!isDragging) return false
+                if (!pendingDrag && !isDragging) return false
+                if (!isDragging) {
+                    if (kotlin.math.abs(event.y - downY) < touchSlop) return true
+                    isDragging = true
+                    pendingDrag = false
+                    recyclerView.parent?.requestDisallowInterceptTouchEvent(true)
+                }
                 doDrag(event.y)
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val wasPending = pendingDrag
+                pendingDrag = false
                 isDragging = false
+                recyclerView.parent?.requestDisallowInterceptTouchEvent(false)
                 invalidate()
+                if (wasPending && event.actionMasked == MotionEvent.ACTION_UP) performClick()
                 return true
             }
         }
         return super.onTouchEvent(event)
     }
+
+    override fun performClick(): Boolean = super.performClick()
 
     private fun doDrag(fingerY: Float) {
         val viewHeight = height.toFloat()

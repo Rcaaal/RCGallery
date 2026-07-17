@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class],
-    version = 5,
+    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class, ParentHidRuleEntity::class, SystemAlbumHideSourceEntity::class, ParentMigrationStateEntity::class],
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -19,6 +19,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun parentAlbumDao(): ParentAlbumDao
     abstract fun parentSharedTagDao(): ParentSharedTagDao
     abstract fun systemAlbumRuleDao(): SystemAlbumRuleDao
+    abstract fun hierarchySystemDao(): HierarchySystemDao
 
     companion object {
         @Volatile
@@ -96,6 +97,43 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `parent_hid_rules` (
+                        `parentId` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`parentId`)
+                    )
+                """)
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `system_album_hide_sources` (
+                        `directoryPath` TEXT NOT NULL,
+                        `sourceType` TEXT NOT NULL,
+                        `sourceId` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`directoryPath`, `sourceType`, `sourceId`)
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_system_album_hide_sources_directoryPath` ON `system_album_hide_sources` (`directoryPath`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_system_album_hide_sources_sourceType_sourceId` ON `system_album_hide_sources` (`sourceType`, `sourceId`)")
+                db.execSQL("""
+                    INSERT OR IGNORE INTO `system_album_hide_sources`
+                        (`directoryPath`, `sourceType`, `sourceId`, `createdAt`)
+                    SELECT `directoryPath`, 'DIRECT', 'direct', `createdAt`
+                    FROM `system_album_rules`
+                """)
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `parent_migration_states` (
+                        `parentId` INTEGER NOT NULL,
+                        `targetRootPath` TEXT NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`parentId`)
+                    )
+                """)
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -103,7 +141,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "rcgallery_tags.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

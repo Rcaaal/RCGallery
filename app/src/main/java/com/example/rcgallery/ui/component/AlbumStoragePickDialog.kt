@@ -34,6 +34,11 @@ private enum class StorageFolderMode(val label: String) {
     RECENT("最近移动过")
 }
 
+enum class AlbumStoragePickPurpose {
+    MIGRATE_ALBUM_DIRECTORIES,
+    MERGE_MEDIA
+}
+
 private fun migrationTimeAgo(movedAt: Long): String {
     val minutes = ((System.currentTimeMillis() - movedAt) / 60_000L).coerceAtLeast(0L)
     return when {
@@ -48,16 +53,23 @@ private fun migrationTimeAgo(movedAt: Long): String {
 @Composable
 fun AlbumStoragePickDialog(
     sourceAlbum: Album,
+    sourceAlbums: List<Album> = listOf(sourceAlbum),
     recentRoots: List<RecentMoveAlbum>,
+    purpose: AlbumStoragePickPurpose = AlbumStoragePickPurpose.MIGRATE_ALBUM_DIRECTORIES,
     onDismiss: () -> Unit,
     onSelectRoot: (File) -> Unit
 ) {
     val context = LocalContext.current
     val curatedStore = remember { CuratedFolderStore(context.applicationContext) }
     val storageRoot = remember { Environment.getExternalStorageDirectory().canonicalFile }
-    val sourceDir = remember(sourceAlbum.directoryPath) {
-        runCatching { File(sourceAlbum.directoryPath).canonicalFile }
-            .getOrElse { File(sourceAlbum.directoryPath).absoluteFile }
+    val effectiveSourceAlbums = remember(sourceAlbum, sourceAlbums) {
+        sourceAlbums.ifEmpty { listOf(sourceAlbum) }.distinctBy { it.bucketId }
+    }
+    val sourceDirs = remember(effectiveSourceAlbums) {
+        effectiveSourceAlbums.map { album ->
+            runCatching { File(album.directoryPath).canonicalFile }
+                .getOrElse { File(album.directoryPath).absoluteFile }
+        }
     }
     var currentDir by remember { mutableStateOf(storageRoot) }
     var mode by remember { mutableStateOf(StorageFolderMode.CURATED) }
@@ -76,8 +88,10 @@ fun AlbumStoragePickDialog(
     }
     fun isSourceOrChild(file: File): Boolean {
         val path = canonical(file).path
-        return path.equals(sourceDir.path, ignoreCase = true) ||
-            path.startsWith(sourceDir.path + File.separator, ignoreCase = true)
+        return sourceDirs.any { sourceDir ->
+            path.equals(sourceDir.path, ignoreCase = true) ||
+                path.startsWith(sourceDir.path + File.separator, ignoreCase = true)
+        }
     }
     fun returnToCurated() {
         addingCurated = false
@@ -118,15 +132,22 @@ fun AlbumStoragePickDialog(
         }
     }
 
-    val finalTarget = remember(currentDir, sourceAlbum.bucketName) {
-        File(currentDir, sourceAlbum.bucketName)
+    val finalTargets = remember(currentDir, effectiveSourceAlbums) {
+        effectiveSourceAlbums.map { album -> File(currentDir, album.bucketName) }
     }
-    val sameParent = sourceDir.parentFile?.let {
-        canonical(it).path.equals(canonical(currentDir).path, ignoreCase = true)
-    } == true
+    val hasDuplicateNames = remember(purpose, effectiveSourceAlbums) {
+        purpose == AlbumStoragePickPurpose.MIGRATE_ALBUM_DIRECTORIES &&
+            effectiveSourceAlbums.groupBy { it.bucketName.lowercase() }.any { it.value.size > 1 }
+    }
+    val sameParent = purpose == AlbumStoragePickPurpose.MIGRATE_ALBUM_DIRECTORIES && sourceDirs.any { sourceDir ->
+        sourceDir.parentFile?.let {
+            canonical(it).path.equals(canonical(currentDir).path, ignoreCase = true)
+        } == true
+    }
     val currentForbidden = isSourceOrChild(currentDir)
-    val targetExists = finalTarget.exists() && !sameParent
-    val canUseCurrent = !sameParent && !currentForbidden && !targetExists && currentDir.canWrite()
+    val targetExists = purpose == AlbumStoragePickPurpose.MIGRATE_ALBUM_DIRECTORIES && finalTargets.any { it.exists() }
+    val canUseCurrent = !hasDuplicateNames && !sameParent && !currentForbidden &&
+        !targetExists && currentDir.canWrite()
     val currentCanonicalPath = canonical(currentDir).path
     val canAddCurrent = currentCanonicalPath != storageRoot.path &&
         !isHiddenPath(currentDir) && currentDir.isDirectory && currentDir.canRead() &&
@@ -144,28 +165,46 @@ fun AlbumStoragePickDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (addingCurated) "添加精选文件夹" else "选择迁移位置", fontWeight = FontWeight.Medium) },
+        title = {
+            Text(
+                when {
+                    addingCurated -> "添加精选文件夹"
+                    purpose == AlbumStoragePickPurpose.MERGE_MEDIA -> "选择合并位置"
+                    else -> "选择迁移位置"
+                },
+                fontWeight = FontWeight.Medium
+            )
+        },
         text = {
             Column(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
                 if (!addingCurated) {
                     Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        StorageFolderMode.entries.forEach { item ->
-                            FilterChip(
-                                selected = mode == item,
-                                onClick = {
-                                    mode = item
-                                    currentDir = storageRoot
-                                    searchQuery = ""
-                                },
-                                label = { Text(item.label) }
-                            )
+                        Row(
+                            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            StorageFolderMode.entries.forEach { item ->
+                                FilterChip(
+                                    selected = mode == item,
+                                    onClick = {
+                                        mode = item
+                                        currentDir = storageRoot
+                                        searchQuery = ""
+                                    },
+                                    label = { Text(item.label) }
+                                )
+                            }
                         }
                         if (mode == StorageFolderMode.CURATED) {
-                            TextButton(onClick = { showManageCurated = true }) { Text("管理精选") }
+                            Spacer(Modifier.width(4.dp))
+                            TextButton(
+                                onClick = { showManageCurated = true },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) { Text("管理精选", maxLines = 1) }
                         }
                     }
                 }
@@ -223,15 +262,20 @@ fun AlbumStoragePickDialog(
                     )
                 } else {
                     val finalHint = when {
+                        hasDuplicateNames -> "选中的相册存在同名文件夹，无法迁移到同一位置"
                         sameParent -> "相册已经位于当前文件夹"
                         currentForbidden -> "不能把相册迁移到自身或其子目录"
                         targetExists -> "当前目录已存在同名文件夹"
                         !currentDir.canWrite() -> "当前目录没有写入权限"
-                        else -> "最终位置：${FormatUtil.formatDisplayPath(finalTarget.path)}"
+                        purpose == AlbumStoragePickPurpose.MERGE_MEDIA ->
+                            "将 ${effectiveSourceAlbums.size} 个相册中的图片、GIF、视频合并到当前文件夹"
+                        effectiveSourceAlbums.size > 1 ->
+                            "将在此目录下迁移 ${effectiveSourceAlbums.size} 个相册，并保留原文件夹名"
+                        else -> "最终位置：${FormatUtil.formatDisplayPath(finalTargets.first().path)}"
                     }
                     PickerActionCard(
                         enabled = canUseCurrent && mode != StorageFolderMode.RECENT,
-                        title = "✓ 使用当前文件夹",
+                        title = if (purpose == AlbumStoragePickPurpose.MERGE_MEDIA) "✓ 合并至当前文件夹" else "✓ 使用当前文件夹",
                         hint = finalHint,
                         onClick = { onSelectRoot(canonical(currentDir)) }
                     )

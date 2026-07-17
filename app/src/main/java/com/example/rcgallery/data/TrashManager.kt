@@ -7,6 +7,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 /**
  * 回收站管理器——逻辑删除的索引存储。
@@ -135,9 +136,65 @@ class TrashManager(private val context: Context) {
         }
     }
 
+    /**
+     * Keep logical-trash entries valid when an entire album directory is migrated.
+     *
+     * The file stays logically deleted, but its path, MediaStore URI and bucket identity must
+     * follow the physical file. This write is strict so a migration can roll back instead of
+     * silently leaving an unusable trash index.
+     */
+    fun updateAfterAlbumMigration(
+        oldDirectoryPath: String,
+        newAlbumId: String,
+        newAlbumName: String,
+        movedItemsByOldPath: Map<String, Pair<String, String>>
+    ): Int {
+        if (movedItemsByOldPath.isEmpty()) return 0
+        synchronized(lock) {
+            val normalizedDirectory = normalizedPath(oldDirectoryPath)
+            var updatedCount = 0
+            val updated = getAll().map { entry ->
+                val oldPath = normalizedPath(entry.filePath)
+                val oldParent = entry.filePath.takeIf { it.isNotBlank() }
+                    ?.let(::File)
+                    ?.parent
+                    ?.let(::normalizedPath)
+                val movedIdentity = if (oldParent == normalizedDirectory) {
+                    movedItemsByOldPath[oldPath]
+                } else {
+                    null
+                }
+                if (movedIdentity == null) {
+                    entry
+                } else {
+                    updatedCount++
+                    entry.copy(
+                        uri = movedIdentity.first,
+                        filePath = movedIdentity.second,
+                        originalAlbumId = newAlbumId,
+                        originalAlbumName = newAlbumName
+                    )
+                }
+            }
+            if (updatedCount > 0) {
+                writeAllStrict(updated)
+                AppLogger.d(TAG, "album migration updated $updatedCount entries")
+            }
+            return updatedCount
+        }
+    }
+
     // ── 原子写入（带 fsync 落盘确认）──
 
     private fun writeAll(entries: List<TrashEntry>) {
+        try {
+            writeAllStrict(entries)
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to write trash index", e)
+        }
+    }
+
+    private fun writeAllStrict(entries: List<TrashEntry>) {
         val temp = File(file.absolutePath + ".tmp")
         try {
             val arr = JSONArray()
@@ -159,13 +216,21 @@ class TrashManager(private val context: Context) {
             }
             // 原子替换：rename(2) 在 Linux/Android 上即使目标存在也是原子的
             // 不需要先 delete()，避免断电窗口
-            temp.renameTo(file)
+            check(temp.renameTo(file)) { "Failed to atomically replace trash index" }
             AppLogger.d(TAG, "writeAll: ${entries.size} entries")
         } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to write trash index", e)
             // 写入失败时清理临时文件
             try { temp.delete() } catch (_: Exception) {}
+            throw e
         }
+    }
+
+    private fun normalizedPath(path: String): String {
+        if (path.isBlank()) return ""
+        return runCatching { File(path).canonicalPath.lowercase(Locale.ROOT) }
+            .getOrElse {
+                path.replace('\\', '/').trimEnd('/').lowercase(Locale.ROOT)
+            }
     }
 
     // ── 自动清理过期条目 ──

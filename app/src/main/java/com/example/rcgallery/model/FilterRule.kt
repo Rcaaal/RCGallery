@@ -16,6 +16,13 @@ enum class FilterMode { HIDE, SHOW_ONLY }
 /** 规则作用域 */
 enum class FilterScope { ALBUM, MEDIA, BOTH }
 
+/** 父级相册在本地相册页中的显示范围。 */
+enum class ParentDisplayFilter {
+    ALL,
+    ONLY_PARENTS,
+    HIDE_PARENTS
+}
+
 /**
  * 一条持久筛选规则。
  *

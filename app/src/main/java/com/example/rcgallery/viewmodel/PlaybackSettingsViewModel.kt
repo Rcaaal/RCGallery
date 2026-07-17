@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * - `muteSystemOnEnter` / `restoreSystemVolume` 用于预览页面的进入静音 & 退出恢复
  * - [VolumeState.level] 只做 UI 显示/滑条位置，不驱动 ExoPlayer
  * - [VolumeState.lastNonZero] 用于 toggleMute 取消静音时的恢复值
- * - `beforePreviewSystemVolume` 保存进入预览前的系统音量，退出时恢复
+ * - `beforePreviewSystemVolumeIndex` 精确保存进入预览前的系统音量档位
  */
 data class VolumeState(
     val level: Float,       // 0f = 静音，用于 UI 显示 & 滑条位置
@@ -33,7 +33,7 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
 
     // ── 页面生命周期恢复（进入预览时记住，退出时恢复）──
     private var enterMuteApplied = false
-    private var beforePreviewSystemVolume = MIN_NON_ZERO
+    private var beforePreviewSystemVolumeIndex = 0
 
     // ══════════════════════════════════════════
     //  系统音量读写
@@ -44,7 +44,7 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
         val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         return (if (max > 0) current.toFloat() / max.toFloat() else 1f)
-            .coerceIn(MIN_NON_ZERO, 1f)
+            .coerceIn(0f, 1f)
     }
 
     /** 将归一化 level 映射为系统音量索引并写入（flags=0，不显示系统音量面板）。 */
@@ -87,7 +87,7 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
         if (clamped > 0f) saveLastNonZero(clamped)
     }
 
-    /** 静音 ↔ 取消静音。控制系统音量，不碰 [beforePreviewSystemVolume]。 */
+    /** 静音 ↔ 取消静音。控制系统音量，不覆盖预览入口保存的系统音量档位。 */
     fun toggleMute() {
         val current = _volumeState.value
         if (current.level > 0f) {
@@ -111,8 +111,14 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
     fun muteSystemOnEnter() {
         if (enterMuteApplied) return
         enterMuteApplied = true
-        beforePreviewSystemVolume = readSystemVolume()
-        _volumeState.value = VolumeState(level = 0f, lastNonZero = beforePreviewSystemVolume)
+        beforePreviewSystemVolumeIndex =
+            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val beforeLevel = if (max > 0) {
+            beforePreviewSystemVolumeIndex.toFloat() / max.toFloat()
+        } else 0f
+        val lastNonZero = if (beforeLevel > 0f) beforeLevel else _volumeState.value.lastNonZero
+        _volumeState.value = VolumeState(level = 0f, lastNonZero = lastNonZero)
         writeSystemVolume(0f)
     }
 
@@ -120,10 +126,13 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
     fun restoreSystemVolume() {
         if (!enterMuteApplied) return
         enterMuteApplied = false
-        val restore = beforePreviewSystemVolume.coerceIn(MIN_NON_ZERO, 1f)
-        _volumeState.value = VolumeState(level = restore, lastNonZero = restore)
-        writeSystemVolume(restore)
-        saveLastNonZero(restore)
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val restoreIndex = beforePreviewSystemVolumeIndex.coerceIn(0, max)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreIndex, 0)
+        val restoreLevel = if (max > 0) restoreIndex.toFloat() / max.toFloat() else 0f
+        val lastNonZero = if (restoreLevel > 0f) restoreLevel else _volumeState.value.lastNonZero
+        _volumeState.value = VolumeState(level = restoreLevel, lastNonZero = lastNonZero)
+        if (restoreLevel > 0f) saveLastNonZero(restoreLevel)
     }
 
     companion object {

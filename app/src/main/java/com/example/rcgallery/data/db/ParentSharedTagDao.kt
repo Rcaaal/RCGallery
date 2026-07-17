@@ -50,6 +50,9 @@ interface ParentSharedTagDao {
     @Query("DELETE FROM parent_shared_tags WHERE tagId = :tagId")
     suspend fun removeByTagId(tagId: Long)
 
+    @Query("DELETE FROM parent_shared_tags WHERE childBucketId = :childBucketId")
+    suspend fun removeByChildBucketId(childBucketId: String)
+
     /** 相册移动到新目录后同步共享 TAG 的来源 bucketId。 */
     @Query("UPDATE parent_shared_tags SET childBucketId = :newBucketId WHERE childBucketId = :oldBucketId")
     suspend fun replaceChildBucketId(oldBucketId: String, newBucketId: String)

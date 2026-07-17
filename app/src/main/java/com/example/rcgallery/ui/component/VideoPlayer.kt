@@ -302,6 +302,11 @@ fun VideoPlayer(
                     pv.post {
                         val sid = ctx.resources.getIdentifier("exo_settings", "id", ctx.packageName)
                         if (sid != 0) pv.findViewById<View>(sid)?.visibility = android.view.View.GONE
+                        val controllerId = ctx.resources.getIdentifier("exo_controller", "id", ctx.packageName)
+                        val visible = controllerId != 0 &&
+                            pv.findViewById<View>(controllerId)?.visibility == android.view.View.VISIBLE
+                        controllerVisible = visible
+                        onControllerVisibilityChanged(visible)
                     }
 
                     // ── 长按倍速 Runnable ──

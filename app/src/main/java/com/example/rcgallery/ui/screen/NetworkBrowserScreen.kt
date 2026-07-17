@@ -1515,7 +1515,7 @@ private fun SmbActionButton(
 /**
  * SMB 中转站浮动 badge。
  * 显示在中转站有内容时，圆形红底白字计数器。
- * 点击弹出菜单：复制到当前文件夹、移动到当前文件夹、清空。
+ * 点击弹出菜单：复制到当前文件夹、移动到当前文件夹、解散中转站。
  */
 @Composable
 private fun SmbClipboardBadge(
@@ -1577,7 +1577,7 @@ private fun SmbClipboardBadge(
             )
             HorizontalDivider()
             DropdownMenuItem(
-                text = { Text("清空中转站", fontSize = 14.sp, color = Color.Gray) },
+                text = { Text("解散中转站", fontSize = 14.sp, color = Color.Gray) },
                 onClick = {
                     expanded = false
                     onClear()
