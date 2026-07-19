@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,6 +29,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.rcgallery.model.Album
 import com.example.rcgallery.model.MediaItem
+import com.example.rcgallery.model.WatchLaterItem
 import com.example.rcgallery.ui.component.GalleryThumbnail
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
@@ -48,10 +51,10 @@ private const val GRID_COLUMNS = 4
 
 /**
  * 最近浏览页面——查看最近查看过的相册/图片/视频及最近移动/复制记录。
- * 顶部 [最近浏览] [最近新增] [最近移动] 切换（最近新增暂不实现）。
+ * 顶部 [稍后再看] [最近浏览] [最近移动] 切换。
  * 三种内容切换参考标签页的 [相册] [图片] [视频] chips。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun RecentScreen(
     viewModel: GalleryViewModel,
@@ -60,11 +63,17 @@ fun RecentScreen(
     val recentAlbums by viewModel.recentAlbums.collectAsStateWithLifecycle()
     val recentImages by viewModel.recentImages.collectAsStateWithLifecycle()
     val recentVideos by viewModel.recentVideos.collectAsStateWithLifecycle()
+    val watchLaterItems by viewModel.watchLaterItems.collectAsStateWithLifecycle()
     val moveRecords by viewModel.moveRecords.collectAsStateWithLifecycle()
     val recordUndoableMap by viewModel.recordUndoableMap.collectAsStateWithLifecycle()
 
-    var activeTab by remember { mutableIntStateOf(0) }  // 0=最近浏览, 1=最近新增, 2=最近移动
+    var activeTab by remember { mutableIntStateOf(0) }  // 0=稍后再看, 1=最近浏览, 2=最近移动
     var activeFilter by remember { mutableStateOf(RecentFilter.ALBUM) }
+    var selectedWatchLaterKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var watchLaterNewestFirst by remember { mutableStateOf(true) }
+    val displayedWatchLaterItems = remember(watchLaterItems, watchLaterNewestFirst) {
+        if (watchLaterNewestFirst) watchLaterItems else watchLaterItems.asReversed()
+    }
 
     // ── Overlay 状态 ──
     var selectedAlbum by remember { mutableStateOf<Album?>(null) }
@@ -73,11 +82,15 @@ fun RecentScreen(
     var confirmUndoRecord by remember { mutableStateOf<MoveRecord?>(null) }
     var undoingIds by remember { mutableStateOf(setOf<String>()) }
     // 拍平列表供 PreviewScreen 快照
-    val flatItems = remember(activeFilter, recentImages, recentVideos) {
-        when (activeFilter) {
-            RecentFilter.IMAGE -> recentImages
-            RecentFilter.VIDEO -> recentVideos
-            else -> emptyList()
+    val flatItems = remember(activeTab, activeFilter, recentImages, recentVideos, displayedWatchLaterItems) {
+        if (activeTab == 0) {
+            displayedWatchLaterItems.map { it.media }
+        } else {
+            when (activeFilter) {
+                RecentFilter.IMAGE -> recentImages
+                RecentFilter.VIDEO -> recentVideos
+                else -> emptyList()
+            }
         }
     }
     val indexMap = remember(flatItems) {
@@ -86,6 +99,7 @@ fun RecentScreen(
 
     if (selectedAlbum != null) BackHandler { selectedAlbum = null; onOverlayChanged(false) }
     if (selectedMediaIndex >= 0) BackHandler { selectedMediaIndex = -1; onOverlayChanged(false) }
+    if (selectedWatchLaterKeys.isNotEmpty()) BackHandler { selectedWatchLaterKeys = emptySet() }
 
     // 通知 MainActivity 隐藏/显示底部导航栏
     LaunchedEffect(selectedAlbum, selectedMediaIndex) {
@@ -100,13 +114,13 @@ fun RecentScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // ═══ ① 顶部 Tab 切换 [最近浏览] [最近新增] ═══
+        // ═══ ① 顶部 Tab 切换 ═══
         Surface(tonalElevation = 2.dp, shadowElevation = 4.dp) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                val tabs = listOf("最近浏览", "最近新增", "最近移动")
+                val tabs = listOf("稍后再看", "最近浏览", "最近移动")
                 tabs.forEachIndexed { idx, label ->
                     val selected = activeTab == idx
                     Surface(
@@ -114,7 +128,10 @@ fun RecentScreen(
                         color = if (selected) MaterialTheme.colorScheme.primaryContainer
                                 else MaterialTheme.colorScheme.surface,
                         tonalElevation = if (selected) 0.dp else 3.dp,
-                        onClick = { activeTab = idx }
+                        onClick = {
+                            activeTab = idx
+                            selectedWatchLaterKeys = emptySet()
+                        }
                     ) {
                         Text(
                             text = label,
@@ -129,7 +146,7 @@ fun RecentScreen(
         }
 
         // ═══ ② 筛选器 chips [相册] [图片] [视频]（仅最近浏览显示）═══
-        if (activeTab != 2) {
+        if (activeTab == 1) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -153,6 +170,23 @@ fun RecentScreen(
                     }
                 }
             }
+        } else if (activeTab == 0) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    tonalElevation = 3.dp,
+                    onClick = { watchLaterNewestFirst = !watchLaterNewestFirst }
+                ) {
+                    Text(
+                        if (watchLaterNewestFirst) "加入时间：从近到早" else "加入时间：从早到近",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
         }
 
         // ═══ ③ 内容区域 ═══
@@ -161,11 +195,29 @@ fun RecentScreen(
         Box(Modifier.fillMaxSize().weight(1f)) {
             if (showContentOverlay) {
                 // 占位，不渲染任何可滚动手势区域
-            } else if (activeTab == 1) {
-                // "最近新增"暂不实现
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("即将推出", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-                }
+            } else if (activeTab == 0) {
+                WatchLaterList(
+                    items = displayedWatchLaterItems,
+                    selectedKeys = selectedWatchLaterKeys,
+                    onItemClick = { item ->
+                        if (selectedWatchLaterKeys.isNotEmpty()) {
+                            selectedWatchLaterKeys = if (item.media.filePath in selectedWatchLaterKeys) {
+                                selectedWatchLaterKeys - item.media.filePath
+                            } else {
+                                selectedWatchLaterKeys + item.media.filePath
+                            }
+                        } else {
+                            selectedMediaIndex = indexMap[item.media] ?: 0
+                        }
+                    },
+                    onItemLongClick = { item ->
+                        selectedWatchLaterKeys = selectedWatchLaterKeys + item.media.filePath
+                    },
+                    onRemoveSelected = {
+                        viewModel.removeFromWatchLaterByKeys(selectedWatchLaterKeys.toList())
+                        selectedWatchLaterKeys = emptySet()
+                    }
+                )
                 return@Box
             } else if (activeTab == 2) {
                 MoveRecordList(
@@ -363,6 +415,139 @@ fun RecentScreen(
 // ═══════════════════════════════════════════════
 // 辅助函数
 // ═══════════════════════════════════════════════
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun WatchLaterList(
+    items: List<WatchLaterItem>,
+    selectedKeys: Set<String>,
+    onItemClick: (WatchLaterItem) -> Unit,
+    onItemLongClick: (WatchLaterItem) -> Unit,
+    onRemoveSelected: () -> Unit
+) {
+    Box(Modifier.fillMaxSize()) {
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "暂无稍后再看内容",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 14.sp
+                )
+            }
+            return@Box
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 72.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(items, key = { it.media.filePath }) { entry ->
+                val item = entry.media
+                val selected = item.filePath in selectedKeys
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    tonalElevation = if (selected) 5.dp else 1.dp,
+                    color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .combinedClickable(
+                            onClick = { onItemClick(entry) },
+                            onLongClick = { onItemLongClick(entry) }
+                        )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                        ) {
+                            GalleryThumbnail(
+                                uri = item.uri,
+                                contentDescription = item.fileName,
+                                targetSize = 160
+                            )
+                            if (selected) {
+                                Box(
+                                    Modifier
+                                        .align(Alignment.Center)
+                                        .size(28.dp)
+                                        .clip(androidx.compose.foundation.shape.CircleShape)
+                                        .background(Color(0xCC33AA55)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("✓", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    item.fileName,
+                                    modifier = Modifier.weight(1f),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (item.isVideo && entry.isWatched) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = Color(0xFF4E6E58)
+                                    ) {
+                                        Text(
+                                            "已看完",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                if (item.isVideo) "视频 · ${formatVideoDuration(item.duration)}" else "图片",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                "加入于 ${formatWatchLaterTime(entry.addedAt)}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (selectedKeys.isNotEmpty()) {
+            Surface(
+                onClick = onRemoveSelected,
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+            ) {
+                Text(
+                    "移出稍后再看 (${selectedKeys.size})",
+                    color = MaterialTheme.colorScheme.onError,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
+                )
+            }
+        }
+    }
+}
+
+private fun formatWatchLaterTime(timestamp: Long): String =
+    SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
 
 /** 格式化视频时长（毫秒 → MM:SS） */
 private fun formatVideoDuration(durationMs: Long): String {

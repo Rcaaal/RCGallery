@@ -6,11 +6,16 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.util.LruCache
 import com.example.rcgallery.util.AppLogger
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Semaphore as CoroutineSemaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -74,6 +79,7 @@ object SmbThumbnailLoader {
 
     /** 缩略图整体并发上限（仅视频需要限制，图片不限制） */
     private const val MAX_CONCURRENT_VIDEO_THUMBS = 1
+    private const val MAX_CONCURRENT_REMOTE_THUMBS = 2
 
     private const val TAG = "SMB-THUMB"
 
@@ -86,6 +92,9 @@ object SmbThumbnailLoader {
 
     // ── 视频缩略图并发控制（MediaMetadataRetriever 可能占用长时间连接）──
     private val videoThumbSemaphore = Semaphore(MAX_CONCURRENT_VIDEO_THUMBS)
+    private val remoteThumbSemaphore = CoroutineSemaphore(MAX_CONCURRENT_REMOTE_THUMBS)
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var initialized = false
 
     // ── 磁盘缓存目录 ──
     private var diskCacheDir: File? = null
@@ -98,6 +107,9 @@ object SmbThumbnailLoader {
      * 同时清理所有 SMB 相关缓存（播放缓存等），防止膨胀。
      */
     fun init(context: Context) {
+        if (initialized) return
+        synchronized(this) {
+            if (initialized) return
         val appCtx = context.applicationContext
         // 初始化缩略图缓存目录
         val dir = File(appCtx.cacheDir, "smb_thumb_cache")
@@ -110,18 +122,18 @@ object SmbThumbnailLoader {
         previewCacheDir = previewDir
 
         // 清理 smb_play_cache（完整视频缓存，没有大小限制，易膨胀）
-        val playCacheDir = File(appCtx.cacheDir, "smb_play_cache")
-        if (playCacheDir.exists()) {
-            playCacheDir.listFiles()?.forEach { it.delete() }
+            initialized = true
+            cleanupScope.launch {
+                val playCacheDir = File(appCtx.cacheDir, "smb_play_cache")
+                playCacheDir.listFiles()?.forEach { it.delete() }
+                appCtx.cacheDir.listFiles { file ->
+                    file.name.startsWith("smb_vid_thumb_") ||
+                        file.name.startsWith("smb_video_") ||
+                        file.name.startsWith("smb_exif_")
+                }?.forEach { it.delete() }
+                AppLogger.d(TAG, "init once: disk cache dir=${dir.absolutePath} cleaned play cache")
+            }
         }
-
-        // 清理旧的缓存临时文件
-        val oldTempFiles = appCtx.cacheDir.listFiles { f ->
-            f.name.startsWith("smb_vid_thumb_") || f.name.startsWith("smb_video_") || f.name.startsWith("smb_exif_")
-        }
-        oldTempFiles?.forEach { it.delete() }
-
-        AppLogger.d(TAG, "init: disk cache dir=${dir.absolutePath} cleaned play cache")
     }
 
     /**
@@ -171,8 +183,11 @@ object SmbThumbnailLoader {
         if (!coroutineContext.isActive) return@withContext null
         var result: Bitmap? = null
         try {
-            withTimeout(TIMEOUT_MS) {
-                result = loadBytes(url, fileSize, maxPx, context)
+            remoteThumbSemaphore.withPermit {
+                if (!coroutineContext.isActive) return@withPermit
+                withTimeout(TIMEOUT_MS) {
+                    result = loadBytes(url, fileSize, maxPx, context)
+                }
             }
         } catch (e: TimeoutCancellationException) {
             AppLogger.d(TAG, "timeout: $url")

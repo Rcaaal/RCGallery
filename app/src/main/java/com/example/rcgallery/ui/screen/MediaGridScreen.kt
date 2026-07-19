@@ -83,6 +83,7 @@ fun MediaGridScreen(
     albumDirectoryPath: String = "",  // 相册目录路径（用于读取相册 TAG）
     onMediaClick: (Int) -> Unit = {},
     onBackClick: () -> Unit = {},
+    handleSystemBack: Boolean = false,
     onGoHome: () -> Unit = {}    // 直接回到 AlbumGrid 主页
 ) {
     val activity = LocalContext.current as ComponentActivity
@@ -150,6 +151,9 @@ fun MediaGridScreen(
     // ── Preview overlay 状态（代替 navigation push，防止 RecyclerView 销毁）──
     var selectedPhotoIndex by remember { mutableIntStateOf(-1) }
     var selectedPhotoItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
+    BackHandler(
+        enabled = handleSystemBack && selectedPhotoIndex < 0 && !isMediaMultiSelect
+    ) { onBackClick() }
     if (selectedPhotoIndex >= 0) {
         BackHandler { selectedPhotoIndex = -1 }
     }
@@ -918,6 +922,11 @@ fun MediaGridScreen(
                 FloatingMultiSelectButtons(
                     selectedCount = selectedMediaUris.size,
                     onBatchTag = { showMediaBatchTagDialog = true },
+                    onAddToWatchLater = {
+                        val items = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
+                        viewModel.addToWatchLater(items)
+                        exitMediaMultiSelect()
+                    },
                     onDeleteToTrash = {
                         val toDelete = tagFilteredItems.filter { it.uri.toString() in selectedMediaUris }
                         viewModel.moveToTrash(toDelete)

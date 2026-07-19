@@ -25,6 +25,7 @@ fun FloatingMultiSelectButtons(
     onBatchTag: (() -> Unit)? = null,
     onDeleteToTrash: (() -> Unit)? = null,
     onAddToClipboard: (() -> Unit)? = null,
+    onAddToWatchLater: (() -> Unit)? = null,
     onPickTargetAlbum: (() -> Unit)? = null,
     onAddToParent: (() -> Unit)? = null,
     onMergeToFolder: (() -> Unit)? = null,
@@ -43,6 +44,13 @@ fun FloatingMultiSelectButtons(
             ActionButton(
                 text = "$batchTagLabel ($selectedCount)",
                 containerColor = Color(0xFF555555),
+                onClick = action
+            )
+        }
+        onAddToWatchLater?.let { action ->
+            ActionButton(
+                text = "稍后再看 ($selectedCount)",
+                containerColor = Color(0xFF1976D2),
                 onClick = action
             )
         }

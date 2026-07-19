@@ -711,6 +711,11 @@ fun TagListScreen(
             FloatingMultiSelectButtons(
                 selectedCount = tagSelectedMediaUris.size,
                 onBatchTag = { showTagBatchTagDialog = true },
+                onAddToWatchLater = {
+                    val items = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
+                    viewModel.addToWatchLater(items)
+                    exitTagMediaMultiSelect()
+                },
                 onDeleteToTrash = {
                     val toDelete = flatFilteredMedia.filter { it.uri.toString() in tagSelectedMediaUris }
                     viewModel.moveToTrash(toDelete)

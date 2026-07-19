@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class, ParentHidRuleEntity::class, SystemAlbumHideSourceEntity::class, ParentMigrationStateEntity::class],
-    version = 6,
+    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class, ParentHidRuleEntity::class, SystemAlbumHideSourceEntity::class, ParentMigrationStateEntity::class, WatchLaterEntity::class],
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -20,6 +20,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun parentSharedTagDao(): ParentSharedTagDao
     abstract fun systemAlbumRuleDao(): SystemAlbumRuleDao
     abstract fun hierarchySystemDao(): HierarchySystemDao
+    abstract fun watchLaterDao(): WatchLaterDao
 
     companion object {
         @Volatile
@@ -134,6 +135,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `watch_later` (
+                        `targetKey` TEXT NOT NULL,
+                        `mediaUri` TEXT NOT NULL,
+                        `mediaType` INTEGER NOT NULL,
+                        `addedAt` INTEGER NOT NULL,
+                        `watchedAt` INTEGER,
+                        PRIMARY KEY(`targetKey`)
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_watch_later_addedAt` ON `watch_later` (`addedAt`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -141,7 +158,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "rcgallery_tags.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .build()
                     .also { INSTANCE = it }
             }

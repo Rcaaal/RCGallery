@@ -73,7 +73,7 @@ class SmbRepository {
         /** 单次 readBytes 最大读取字节数（50MB，防止 OOM） */
         private const val MAX_READ_BYTES = 50L * 1024 * 1024
 
-        /** 单文件并发区块数；只并发同一文件的 READ，不并发多个文件。 */
+        /** 单文件固定四路读取；继续流水线加速，但避免耗尽 SMB 连接和 IO 线程。 */
         private const val TRANSFER_READ_CONCURRENCY = 4
     }
 
@@ -506,20 +506,24 @@ class SmbRepository {
 
             data class TransferChunk(val offset: Long, val buffer: ByteArray, val size: Int)
 
+            val chunkCount = if (totalSize <= 0L) 1 else
+                ((totalSize + bufferSize - 1L) / bufferSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val workerCount = minOf(TRANSFER_READ_CONCURRENCY, chunkCount).coerceAtLeast(1)
+            val bufferCount = workerCount
+
             coroutineScope {
-                val chunkCount = if (totalSize <= 0L) 1 else
-                    ((totalSize + bufferSize - 1L) / bufferSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                val workerCount = minOf(TRANSFER_READ_CONCURRENCY, chunkCount).coerceAtLeast(1)
-                val freeBuffers = Channel<ByteArray>(workerCount)
-                val filledBuffers = Channel<TransferChunk>(workerCount)
-                repeat(workerCount) {
+                val freeBuffers = Channel<ByteArray>(bufferCount)
+                val filledBuffers = Channel<TransferChunk>(bufferCount)
+                repeat(bufferCount) {
                     check(freeBuffers.trySend(ByteArray(bufferSize)).isSuccess)
                 }
                 val nextReadOffset = AtomicLong(0L)
+                val openReaders = ConcurrentHashMap.newKeySet<SmbRandomAccessFile>()
 
                 val readers = List(workerCount) {
                     launch(Dispatchers.IO) {
                         val input = SmbRandomAccessFile(SmbFile(url, ctx), "r")
+                        openReaders += input
                         try {
                             while (true) {
                                 val offset = nextReadOffset.getAndAdd(bufferSize.toLong())
@@ -547,6 +551,7 @@ class SmbRepository {
                                 }
                             }
                         } finally {
+                            openReaders -= input
                             runCatching { input.close() }
                         }
                     }
@@ -578,6 +583,10 @@ class SmbRepository {
                     }
                     output.flush()
                 } finally {
+                    // Coroutine cancellation does not reliably interrupt a blocking jcifs read.
+                    // Closing the handles here releases the transport immediately.
+                    openReaders.forEach { input -> runCatching { input.close() } }
+                    openReaders.clear()
                     readers.forEach { it.cancel() }
                     closeFilledBuffers.cancel()
                     freeBuffers.cancel()
@@ -599,7 +608,7 @@ class SmbRepository {
                     "speed=${"%.1f".format(throughputMbps)}MB/s " +
                     "readMs=${readNanos.get() / 1_000_000} writeMs=${writeNanos / 1_000_000} " +
                     "reads=${readCount.get()} avgRead=${averageReadKb}KB " +
-                    "buffer=${bufferSize / 1024}KB parallelReads=$TRANSFER_READ_CONCURRENCY"
+                    "buffer=${bufferSize / 1024}KB parallelReads=$workerCount queuedBuffers=$bufferCount"
             )
             Result.success(totalCopied)
         } catch (error: CancellationException) {

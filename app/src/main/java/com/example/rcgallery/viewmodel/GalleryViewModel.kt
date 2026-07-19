@@ -10,6 +10,7 @@ import com.example.rcgallery.data.MediaRepository
 import com.example.rcgallery.data.TagRepository
 import com.example.rcgallery.data.TrashManager
 import com.example.rcgallery.data.ViewHistoryRepository
+import com.example.rcgallery.data.WatchLaterRepository
 import com.example.rcgallery.data.db.ViewHistoryEntity
 import com.example.rcgallery.data.db.AppDatabase
 import com.example.rcgallery.data.db.ParentAlbumEntity
@@ -38,12 +39,14 @@ import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.model.TagRule
 import com.example.rcgallery.model.TempFilter
 import com.example.rcgallery.model.TrashEntry
+import com.example.rcgallery.model.WatchLaterItem
 import com.example.rcgallery.model.findFirstConflict
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -79,6 +82,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     private val observer = MediaStoreObserver(application)
     private val trashManager = TrashManager(application)
     private val viewHistoryRepository = ViewHistoryRepository(application)
+    private val watchLaterRepository = WatchLaterRepository(application)
 
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
@@ -99,9 +103,8 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val albumsLoadMutex = Mutex()
     private val allMediaLoadMutex = Mutex()
-    private val albumsLoadGeneration = AtomicInteger(0)
+    private val albumsLoadRequests = Channel<Unit>(Channel.CONFLATED)
     private val allMediaLoadGeneration = AtomicInteger(0)
-    private var albumsLoadJob: Job? = null
     private var allMediaLoadJob: Job? = null
     private val permanentlyDeletedUris = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -156,6 +159,12 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
 
     private val _recentVideos = MutableStateFlow<List<MediaItem>>(emptyList())
     val recentVideos: StateFlow<List<MediaItem>> = _recentVideos.asStateFlow()
+
+    private val _watchLaterItems = MutableStateFlow<List<WatchLaterItem>>(emptyList())
+    val watchLaterItems: StateFlow<List<WatchLaterItem>> = _watchLaterItems.asStateFlow()
+
+    private val _watchLaterKeys = MutableStateFlow<Set<String>>(emptySet())
+    val watchLaterKeys: StateFlow<Set<String>> = _watchLaterKeys.asStateFlow()
 
     /** directoryPath → viewedAt 映射，供 AlbumGridScreen 近期访问排序使用 */
     private val _recentAccessMap = MutableStateFlow<Map<String, Long>>(emptyMap())
@@ -785,6 +794,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         }
 
     init {
+        viewModelScope.launch {
+            for (request in albumsLoadRequests) {
+                performAlbumsLoad()
+            }
+        }
         // 从 SharedPreferences 恢复星标状态
         _starredBucketIds.value = loadStarredIds()
         _starredMediaUris.value = loadMediaStarredIds()
@@ -802,6 +816,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         loadPersistentRules()
         loadIgnoredFolderPaths()
         loadRecentAccessTimestamps()
+        viewModelScope.launch(Dispatchers.IO) {
+            watchLaterRepository.observeAll().collect { entries ->
+                _watchLaterKeys.value = entries.mapTo(linkedSetOf()) { it.targetKey }
+                val mediaByPath = repository.loadMediaItemsByPaths(entries.map { it.targetKey })
+                    .getOrDefault(emptyList())
+                    .associateBy { it.filePath }
+                _watchLaterItems.value = entries.mapNotNull { entry ->
+                    mediaByPath[entry.targetKey]?.let { media ->
+                        WatchLaterItem(media, entry.addedAt, entry.watchedAt)
+                    }
+                }
+            }
+        }
         viewModelScope.launch {
             systemAlbumRuleDao.getAllFlow().collect { rules ->
                 _systemHiddenAlbumPaths.value = rules.mapTo(linkedSetOf()) { it.directoryPath }
@@ -824,13 +851,15 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     // ══════════════════════════════════════
 
     fun loadAlbums() {
-        AppLogger.d("VM", "loadAlbums")
-        val generation = albumsLoadGeneration.incrementAndGet()
-        albumsLoadJob?.cancel()
+        AppLogger.d("VM", "loadAlbums requested")
+        albumsLoadRequests.trySend(Unit)
+    }
+
+    private suspend fun performAlbumsLoad() {
+        AppLogger.d("VM", "loadAlbums start")
         _isLoading.value = true
-        albumsLoadJob = viewModelScope.launch {
-            try {
-                albumsLoadMutex.withLock {
+        try {
+            albumsLoadMutex.withLock {
                     val (result, trashList, hiddenAlbums) = withContext(Dispatchers.IO) {
                         Triple(
                             repository.loadAlbums(),
@@ -839,7 +868,6 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 .getOrDefault(emptyList())
                         )
                     }
-                    if (generation != albumsLoadGeneration.get()) return@withLock
                     result.onSuccess { mediaStoreAlbums ->
                     val mediaStorePaths = mediaStoreAlbums.mapTo(HashSet()) {
                         normalizedPath(it.directoryPath)
@@ -884,12 +912,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         _albums.value = emptyList()
                         AppLogger.e("VM", "loadAlbums FAIL", it)
                     }
-                }
-            } finally {
-                if (generation == albumsLoadGeneration.get()) {
-                    _isLoading.value = false
-                }
             }
+        } finally {
+            _isLoading.value = false
         }
     }
 
@@ -1256,6 +1281,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                                 targetType = if (item.isVideo) ViewHistoryEntity.TYPE_VIDEO
                                              else ViewHistoryEntity.TYPE_IMAGE
                             )
+                            watchLaterRepository.updateTarget(oldPath, item.filePath, item.uri.toString())
                         }
                     }
                 }
@@ -1400,6 +1426,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                     tagRepository.mediaKey(newPath)
                 )
                 viewHistoryRepository.updateTargetKey(item.filePath, newPath)
+                watchLaterRepository.updateTarget(item.filePath, newPath, item.uri.toString())
             }
             viewHistoryRepository.updateTargetKey("album:$oldDirPath", "album:$newDirPath")
 
@@ -1779,6 +1806,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         if (filePath != null) {
             viewModelScope.launch(Dispatchers.IO) {
                 viewHistoryRepository.deleteByKey(filePath)
+                watchLaterRepository.remove(filePath)
             }
         }
         _allMediaItems.value = _allMediaItems.value.filterNot { it.uri.toString() == uri }
@@ -1875,6 +1903,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         if (filePaths.isNotEmpty()) {
             viewModelScope.launch(Dispatchers.IO) {
                 filePaths.forEach { viewHistoryRepository.deleteByKey(it) }
+                watchLaterRepository.remove(filePaths)
             }
         }
         _allMediaItems.value = _allMediaItems.value.filterNot { it.uri.toString() in uriSet }
@@ -1903,6 +1932,7 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         tagRepository.mediaKey(oldPath),
                         tagRepository.mediaKey(newPath)
                     )
+                    watchLaterRepository.updateTarget(oldPath, newPath, uri)
                 }
                 item.copy(fileName = newFileName, filePath = newPath)
             } else {
@@ -1932,6 +1962,9 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             AppLogger.d("VM", "removeFromMediaItems: also removed from trash index")
         }
         _mediaItems.value = _mediaItems.value.filter { it.uri.toString() != uriStr }
+        viewModelScope.launch(Dispatchers.IO) {
+            watchLaterRepository.remove(item.filePath)
+        }
         _albums.value = _albums.value.mapNotNull { album ->
             if (album.bucketId == item.albumId) {
                 val newCount = (album.count - 1).coerceAtLeast(0)
@@ -4006,6 +4039,41 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
         loadRecentVideos()
     }
 
+    fun addToWatchLater(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            watchLaterRepository.add(items)
+        }
+    }
+
+    fun removeFromWatchLater(items: List<MediaItem>) {
+        removeFromWatchLaterByKeys(items.map { it.filePath })
+    }
+
+    fun removeFromWatchLaterByKeys(targetKeys: List<String>) {
+        if (targetKeys.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            watchLaterRepository.remove(targetKeys)
+        }
+    }
+
+    fun toggleWatchLater(item: MediaItem) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (item.filePath in _watchLaterKeys.value) {
+                watchLaterRepository.remove(item.filePath)
+            } else {
+                watchLaterRepository.add(listOf(item))
+            }
+        }
+    }
+
+    fun markWatchLaterWatched(item: MediaItem) {
+        if (!item.isVideo || item.filePath !in _watchLaterKeys.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            watchLaterRepository.markWatched(item.filePath)
+        }
+    }
+
     // ══════════════════════════════════════
     //  中转站（复制/移动）
     // ══════════════════════════════════════
@@ -4353,6 +4421,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         inheritedTagIds.forEach { tagId ->
                             tagRepository.removeTagFromTarget(tagId, newMediaKey)
                         }
+                        watchLaterRepository.updateTarget(
+                            item.filePath,
+                            targetFile.absolutePath,
+                            resultMediaUri ?: item.uri.toString()
+                        )
                     } catch (_: Exception) { }
                 } catch (e: Exception) {
                     failures.add(MoveFailure(item.fileName, MoveFailureReason.UNKNOWN_ERROR, "未预期异常: ${e.message}"))
@@ -4762,6 +4835,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             inheritedTagIds.forEach { tagId ->
                                 tagRepository.removeTagFromTarget(tagId, newMediaKey)
                             }
+                            watchLaterRepository.updateTarget(
+                                item.filePath,
+                                targetFile.absolutePath,
+                                resultMediaUri ?: item.uri.toString()
+                            )
                         } else {
                             // COPY: 只复制用户手动添加的 TAG（非继承）
                             val allTagIds = tagRepository.getTagIdsForTarget(oldMediaKey)
@@ -4946,6 +5024,11 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             tagRepository.updateTargetKey(
                                 tagRepository.mediaKey(targetFile.absolutePath),
                                 tagRepository.mediaKey(sourceFile.absolutePath)
+                            )
+                            watchLaterRepository.updateTarget(
+                                targetFile.absolutePath,
+                                sourceFile.absolutePath,
+                                entry.mediaUri
                             )
                         } catch (_: Exception) { }
                     } else {

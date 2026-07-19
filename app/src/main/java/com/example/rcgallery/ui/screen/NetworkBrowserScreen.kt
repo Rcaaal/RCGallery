@@ -8,6 +8,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -70,6 +71,9 @@ fun NetworkBrowserScreen(
     val scope = rememberCoroutineScope()
 
     var showConnectDialog by remember { mutableStateOf(false) }
+    var showDouyinImport by remember { mutableStateOf(false) }
+    var douyinAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
+    var douyinAlbumRequest by remember { mutableIntStateOf(0) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
@@ -99,6 +103,47 @@ fun NetworkBrowserScreen(
     // ── SMB 操作历史 ──
     val smbOperationHistory by viewModel.smbOperationHistory.collectAsState()
     var showHistoryPage by remember { mutableStateOf(false) }
+
+    LaunchedEffect(douyinAlbumRequest) {
+        if (douyinAlbumRequest == 0) return@LaunchedEffect
+        val target = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            "RCGallery/Douyin"
+        ).absolutePath
+        viewModel.loadAlbums()
+        repeat(20) {
+            val album = viewModel.albums.value.firstOrNull {
+                File(it.directoryPath).absolutePath.equals(target, ignoreCase = true)
+            }
+            if (album != null) {
+                douyinAlbum = album
+                return@LaunchedEffect
+            }
+            delay(100)
+        }
+        Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showDouyinImport) {
+        Box(Modifier.fillMaxSize()) {
+            DouyinImportScreen(
+                onDismiss = { showDouyinImport = false },
+                onMediaSaved = { viewModel.loadAlbums() },
+                onOpenAlbum = { douyinAlbumRequest++ },
+            )
+            douyinAlbum?.let { album ->
+                MediaGridScreen(
+                    albumId = album.bucketId,
+                    albumName = album.bucketName,
+                    albumDirectoryPath = album.directoryPath,
+                    onBackClick = { douyinAlbum = null },
+                    onGoHome = { douyinAlbum = null },
+                    handleSystemBack = true,
+                )
+            }
+        }
+        return
+    }
 
     // 初始化 SMB 缩略图磁盘缓存
     LaunchedEffect(Unit) { SmbThumbnailLoader.init(context) }
@@ -171,6 +216,7 @@ fun NetworkBrowserScreen(
                     is SmbBrowseState.DeviceList -> {
                         DeviceListContent(
                             devices = smbDevices,
+                            onDouyinClick = { showDouyinImport = true },
                             onAddDevice = { showConnectDialog = true },
                             onDeviceClick = { viewModel.smbConnect(it.host) },
                             onRemoveDevice = { deviceId -> viewModel.smbRemoveDevice(deviceId) }
@@ -548,11 +594,32 @@ private fun formatTransferRate(bytesPerSecond: Long): String =
 @Composable
 private fun DeviceListContent(
     devices: List<SmbDevice>,
+    onDouyinClick: () -> Unit,
     onAddDevice: () -> Unit,
     onDeviceClick: (SmbDevice) -> Unit,
     onRemoveDevice: (String) -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Card(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onDouyinClick),
+            elevation = CardDefaults.cardElevation(2.dp),
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("抖", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("抖音链接解析", fontWeight = FontWeight.Bold)
+                    Text(
+                        "本地解析 · 保存公开视频到相册",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text("进入 ›", color = MaterialTheme.colorScheme.primary)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
         if (devices.isEmpty()) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Column(
@@ -913,6 +980,15 @@ private class FolderMixedAdapter(
             is MediaListVH -> holder.bind(mediaFiles[position - folderCount], position - folderCount, isMultiSelect, selectedPaths)
         }
     }
+
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        when (holder) {
+            is FolderVH -> holder.recycle()
+            is MediaVH -> holder.recycle()
+            is MediaListVH -> holder.recycle()
+        }
+        super.onViewRecycled(holder)
+    }
 }
 
 // ── 网格模式：文件夹卡片 ──
@@ -1041,6 +1117,14 @@ private class FolderVH private constructor(
                 }
             }
         }
+    }
+
+    fun recycle() {
+        coverLoadJob?.cancel()
+        coverLoadJob = null
+        currentCoverPath = null
+        coverIv.tag = null
+        coverIv.setImageDrawable(null)
     }
 }
 
@@ -1200,6 +1284,15 @@ private class MediaVH private constructor(
                 currentPath = null
             }
         }
+    }
+
+    fun recycle() {
+        loadJob?.cancel()
+        loadJob = null
+        currentPath = null
+        currentItem = null
+        iv.tag = null
+        iv.setImageDrawable(null)
     }
 }
 
@@ -1466,6 +1559,15 @@ private class MediaListVH private constructor(
                 currentPath = null
             }
         }
+    }
+
+    fun recycle() {
+        loadJob?.cancel()
+        loadJob = null
+        currentPath = null
+        currentItem = null
+        iv.tag = null
+        iv.setImageDrawable(null)
     }
 
     private fun formatFileSize(bytes: Long): String = when {

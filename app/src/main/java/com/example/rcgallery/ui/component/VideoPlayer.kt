@@ -117,7 +117,7 @@ fun VideoPlayer(
                     setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
                 }
             )
-            .build().apply {
+            .build().apply player@ {
             val factory = dataSourceFactory ?: DefaultDataSource.Factory(context)
             val mediaSource = ProgressiveMediaSource.Factory(factory)
                 .createMediaSource(MediaItem.fromUri(uri))
@@ -153,6 +153,18 @@ fun VideoPlayer(
                 }
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
+                        currentOnPlaybackEndedState.value()
+                    }
+                }
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int
+                ) {
+                    if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION &&
+                        this@player.repeatMode == Player.REPEAT_MODE_ONE &&
+                        oldPosition.positionMs > 0L
+                    ) {
                         currentOnPlaybackEndedState.value()
                     }
                 }

@@ -1114,6 +1114,7 @@ fun AlbumGridScreen(
                         viewModel.moveToTrash(toDelete)
                     },
                     onAddDateMediaToClipboard = { items -> viewModel.addToClipboard(items) },
+                    onAddDateMediaToWatchLater = { items -> viewModel.addToWatchLater(items) },
                     onPickDateMediaTarget = { items ->
                         directAlbumPickItems = items
                         showAlbumPickDialog = true
@@ -1538,6 +1539,7 @@ private fun AlbumGridContent(
     onBatchAddTagsToMedia: (String, String) -> Unit = { _, _ -> },
     onDeleteDateMedia: (List<String>) -> Unit = {},
     onAddDateMediaToClipboard: (List<MediaItem>) -> Unit = {},
+    onAddDateMediaToWatchLater: (List<MediaItem>) -> Unit = {},
     onPickDateMediaTarget: (List<MediaItem>) -> Unit = {},
     // ── 搜索参数 ──
     isSearchActive: Boolean = false,
@@ -1662,6 +1664,7 @@ private fun AlbumGridContent(
     var addToParentId by remember { mutableStateOf<Long?>(null) }
     var showAddChildDialog by remember { mutableStateOf(false) }
     var addAlbumToParentTarget by remember { mutableStateOf<Album?>(null) }
+    var createParentForAlbumTarget by remember { mutableStateOf<Album?>(null) }
     var showCreateParentDialog by remember { mutableStateOf(false) }
     // ── 解散/移出确认状态 ──
     var showDeleteParentConfirm by remember { mutableStateOf(false) }
@@ -1878,7 +1881,80 @@ private fun AlbumGridContent(
                 ) { Text("添加") }
             },
             dismissButton = {
-                TextButton(onClick = { addAlbumToParentTarget = null }) { Text("取消") }
+                Row {
+                    TextButton(onClick = {
+                        createParentForAlbumTarget = targetAlbum
+                        addAlbumToParentTarget = null
+                    }) { Text("＋ 新建父级") }
+                    TextButton(onClick = { addAlbumToParentTarget = null }) { Text("取消") }
+                }
+            }
+        )
+    }
+
+    // ── 普通相册三点菜单：新建父级并立即加入 ──
+    createParentForAlbumTarget?.let { targetAlbum ->
+        var parentName by remember(targetAlbum.bucketId) { mutableStateOf("") }
+        var createError by remember(targetAlbum.bucketId) { mutableStateOf<String?>(null) }
+        var isCreating by remember(targetAlbum.bucketId) { mutableStateOf(false) }
+
+        fun returnToParentPicker() {
+            if (isCreating) return
+            createParentForAlbumTarget = null
+            addAlbumToParentTarget = targetAlbum
+        }
+
+        AlertDialog(
+            onDismissRequest = ::returnToParentPicker,
+            title = { Text("新建父级并添加") },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        "创建后将自动加入“${targetAlbum.bucketName}”相册",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = parentName,
+                        onValueChange = {
+                            parentName = it
+                            createError = null
+                        },
+                        enabled = !isCreating,
+                        singleLine = true,
+                        label = { Text("父级名称") },
+                        supportingText = createError?.let { message ->
+                            { Text(message, color = MaterialTheme.colorScheme.error) }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = parentName.isNotBlank() && !isCreating,
+                    onClick = {
+                        val name = parentName.trim()
+                        if (name.isEmpty()) return@Button
+                        isCreating = true
+                        createError = null
+                        onCreateParent(name) { result ->
+                            result.onSuccess { parent ->
+                                onAddChildren(parent.id, listOf(targetAlbum.bucketId))
+                                createParentForAlbumTarget = null
+                            }.onFailure {
+                                isCreating = false
+                                createError = "名称已存在或创建失败"
+                            }
+                        }
+                    }
+                ) { Text(if (isCreating) "创建中…" else "创建并添加") }
+            },
+            dismissButton = {
+                TextButton(enabled = !isCreating, onClick = ::returnToParentPicker) {
+                    Text("返回")
+                }
             }
         )
     }
@@ -2502,6 +2578,10 @@ private fun AlbumGridContent(
                 FloatingMultiSelectButtons(
                     selectedCount = selectedDateMediaUris.size,
                     onBatchTag = { showDateBatchTagDialog = true },
+                    onAddToWatchLater = {
+                        onAddDateMediaToWatchLater(selectedDateMediaItems)
+                        exitDateMultiSelect()
+                    },
                     onDeleteToTrash = {
                         onDeleteDateMedia(selectedDateMediaItems.map { it.filePath })
                         exitDateMultiSelect()

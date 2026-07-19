@@ -1,0 +1,330 @@
+package com.example.rcgallery.data.douyin
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import kotlin.coroutines.coroutineContext
+
+class DouyinParser {
+    private data class ParsedImage(val index: Int, val urls: List<String>)
+
+    suspend fun parse(sharedText: String): DouyinWorkInfo = withContext(Dispatchers.IO) {
+        val inputUrl = extractUrl(sharedText)
+        val userAgent = MOBILE_USER_AGENT
+        val finalUrl = resolveRedirects(inputUrl, userAgent)
+        val workId = extractWorkId(finalUrl)
+        val html = fetchText("https://www.iesdouyin.com/share/video/$workId", userAgent)
+        val item = findItem(JSONObject(extractRouterData(html)))
+        val author = item.optJSONObject("author")?.optString("nickname")?.takeIf { it.isNotBlank() }
+        val title = sanitizeTitle(item.optString("desc").ifBlank { "douyin_$workId" })
+
+        val images = extractImages(item)
+        val video = item.optJSONObject("video")
+        val topVideoUrls = videoUrls(video)
+        val nestedVideos = extractNestedVideos(item)
+        val media = buildList {
+            images.forEach { add(DouyinMediaResource.Image(it.index, it.urls)) }
+            if (topVideoUrls.isNotEmpty()) add(DouyinMediaResource.Video(size + 1, topVideoUrls))
+            nestedVideos.forEach { urls -> add(DouyinMediaResource.Video(size + 1, urls)) }
+        }
+        if (media.isEmpty()) throw DouyinParseException("作品中没有可用的图片或视频")
+        DouyinWorkInfo(
+            workId = workId,
+            title = title,
+            author = author,
+            coverUrl = images.firstOrNull()?.urls?.firstOrNull()
+                ?: firstUrl(video?.optJSONObject("cover")?.optJSONArray("url_list")),
+            userAgent = userAgent,
+            media = media,
+        )
+    }
+
+    private fun extractImages(item: JSONObject): List<ParsedImage> {
+        val qualityImages = highestQualityImages(item)
+        val candidates = buildList {
+            item.optJSONArray("images")?.let(::add)
+            item.optJSONObject("image_post_info")?.let { post ->
+                post.optJSONArray("images")?.let(::add)
+                post.optJSONArray("image_list")?.let(::add)
+            }
+        }
+        val seen = linkedSetOf<String>()
+        val result = mutableListOf<ParsedImage>()
+        candidates.forEach { array ->
+            for (index in 0 until array.length()) {
+                val image = array.optJSONObject(index) ?: continue
+                val qualityImage = image.optString("uri").takeIf { it.isNotBlank() }?.let(qualityImages::get)
+                val urls = imageUrls(image, qualityImage).filter { seen.add(it) }
+                if (urls.isNotEmpty()) {
+                    result += ParsedImage(index = result.size + 1, urls = urls)
+                }
+            }
+        }
+        return result
+    }
+
+    private fun highestQualityImages(item: JSONObject): Map<String, JSONObject> {
+        val bitRates = item.optJSONArray("img_bitrate") ?: return emptyMap()
+        var bestArea = -1L
+        var bestImages: JSONArray? = null
+        for (index in 0 until bitRates.length()) {
+            val images = bitRates.optJSONObject(index)?.optJSONArray("images") ?: continue
+            var area = 0L
+            for (imageIndex in 0 until images.length()) {
+                val image = images.optJSONObject(imageIndex) ?: continue
+                area = maxOf(area, image.optLong("width") * image.optLong("height"))
+            }
+            if (area > bestArea) {
+                bestArea = area
+                bestImages = images
+            }
+        }
+        return buildMap {
+            val images = bestImages ?: return@buildMap
+            for (index in 0 until images.length()) {
+                val image = images.optJSONObject(index) ?: continue
+                image.optString("uri").takeIf { it.isNotBlank() }?.let { put(it, image) }
+            }
+        }
+    }
+
+    private fun extractNestedVideos(item: JSONObject): List<List<String>> {
+        val result = mutableListOf<List<String>>()
+        val images = item.optJSONArray("images") ?: return result
+        for (index in 0 until images.length()) {
+            val image = images.optJSONObject(index) ?: continue
+            listOf("video", "live_photo", "clip_video").forEach { key ->
+                videoUrls(image.optJSONObject(key)).takeIf { it.isNotEmpty() }?.let(result::add)
+            }
+        }
+        return result.distinctBy { it.firstOrNull() }
+    }
+
+    private fun videoUrls(video: JSONObject?): List<String> {
+        if (video == null) return emptyList()
+        val bitRates = video.optJSONArray("bit_rate")
+        var bestBitRate = Long.MIN_VALUE
+        var bestUrls = emptyList<String>()
+        if (bitRates != null) {
+            for (index in 0 until bitRates.length()) {
+                val entry = bitRates.optJSONObject(index) ?: continue
+                val urls = allUrls(entry.optJSONObject("play_addr")?.optJSONArray("url_list"))
+                val bitRate = entry.optLong("bit_rate", -1L)
+                if (urls.isNotEmpty() && bitRate > bestBitRate) {
+                    bestBitRate = bitRate
+                    bestUrls = urls
+                }
+            }
+        }
+        val fallbackUrls = sequenceOf(
+            video.optJSONObject("play_addr")?.optJSONArray("url_list"),
+            video.optJSONObject("play_addr_h264")?.optJSONArray("url_list"),
+            video.optJSONArray("url_list"),
+        ).map(::allUrls).firstOrNull { it.isNotEmpty() }.orEmpty()
+        return (bestUrls.ifEmpty { fallbackUrls })
+            .map { it.replace("playwm", "play") }
+            .filterNot(::isAudioUrl)
+            .distinct()
+    }
+
+    private fun isAudioUrl(url: String): Boolean {
+        val lower = runCatching { java.net.URLDecoder.decode(url, Charsets.UTF_8.name()) }
+            .getOrDefault(url)
+            .lowercase()
+        return AUDIO_EXTENSIONS.any { lower.contains(it) }
+    }
+
+    private fun imageUrls(image: JSONObject, qualityImage: JSONObject?): List<String> {
+        val original = sequenceOf(
+            image.optJSONObject("origin_image")?.optJSONArray("url_list"),
+            image.optJSONObject("original_image")?.optJSONArray("url_list"),
+        ).flatMap { allUrls(it).asSequence() }.distinct().toList()
+        if (original.isNotEmpty()) return bestImageMirrors(original)
+
+        val fullSizeCandidates = sequenceOf(
+            image.optJSONArray("url_list"),
+            qualityImage?.optJSONArray("url_list"),
+        ).flatMap { allUrls(it).asSequence() }.distinct().toList()
+        if (fullSizeCandidates.isNotEmpty()) return bestImageMirrors(fullSizeCandidates)
+
+        val fallback = sequenceOf(
+            image.optJSONArray("download_url_list"),
+            image.optJSONObject("display_image")?.optJSONArray("url_list"),
+        ).flatMap { allUrls(it).asSequence() }.distinct().toList()
+        return bestImageMirrors(fallback)
+    }
+
+    private fun bestImageMirrors(urls: List<String>): List<String> {
+        if (urls.isEmpty()) return emptyList()
+        val bestScore = urls.maxOf(::imageQualityScore)
+        return urls.filter { imageQualityScore(it) == bestScore }
+    }
+
+    private fun imageQualityScore(url: String): Int {
+        val lower = runCatching { java.net.URLDecoder.decode(url, Charsets.UTF_8.name()) }
+            .getOrDefault(url)
+            .lowercase()
+        var score = 100
+        if ("origin" in lower || "original" in lower) score += 1000
+        if ("water" in lower) score -= 800
+        if ("tplv-dy-shrink" in lower) score -= 500
+        if ("tplv-dy-lqen" in lower) score -= 400
+        if (Regex(":\\d{2,5}:\\d{2,5}").containsMatchIn(lower)) score -= 300
+        if ("~q80." in lower && "tplv-" !in lower) score += 200
+        return score
+    }
+
+    private fun allUrls(array: JSONArray?): List<String> = buildList {
+        if (array == null) return@buildList
+        for (index in 0 until array.length()) {
+            array.optString(index).takeIf { it.startsWith("https://") || it.startsWith("http://") }?.let(::add)
+        }
+    }
+
+    private fun extractUrl(text: String): String {
+        val value = URL_PATTERN.find(text)?.value
+            ?.trimEnd('，', '。', '！', '？', ',', '.', ';', '；', ')', '）', ']', '】')
+            ?: throw DouyinParseException("没有找到抖音链接")
+        validateDouyinHost(value)
+        return value
+    }
+
+    private fun resolveRedirects(input: String, userAgent: String): String {
+        var current = input
+        repeat(MAX_REDIRECTS) {
+            validateDouyinHost(current)
+            val connection = openConnection(current, userAgent, followRedirects = false)
+            try {
+                val code = connection.responseCode
+                if (code !in 300..399) {
+                    if (code !in 200..299) throw DouyinParseException("抖音链接访问失败（HTTP $code）")
+                    return current
+                }
+                val location = connection.getHeaderField("Location")
+                    ?: throw DouyinParseException("抖音短链接缺少跳转地址")
+                current = URI(current).resolve(location).toString()
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw DouyinParseException("抖音短链接跳转次数过多")
+    }
+
+    private fun extractWorkId(url: String): String {
+        val uri = URI(url)
+        WORK_ID_PATTERN.find(uri.path.orEmpty())?.groupValues?.get(1)?.let { return it }
+        val modalId = uri.rawQuery.orEmpty().split('&')
+            .mapNotNull { it.split('=', limit = 2).takeIf { pair -> pair.size == 2 } }
+            .firstOrNull { it[0] == "modal_id" }?.get(1)
+        return modalId?.takeIf { it.all(Char::isDigit) }
+            ?: throw DouyinParseException("无法从链接中识别作品 ID")
+    }
+
+    private suspend fun fetchText(url: String, userAgent: String): String {
+        val connection = openConnection(url, userAgent, followRedirects = true)
+        return try {
+            val code = connection.responseCode
+            if (code !in 200..299) throw DouyinParseException("作品页面访问失败（HTTP $code）")
+            BufferedInputStream(connection.inputStream).bufferedReader(Charsets.UTF_8).use { reader ->
+                val output = StringBuilder()
+                val buffer = CharArray(16 * 1024)
+                var total = 0
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val read = reader.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    if (total > MAX_HTML_BYTES) throw DouyinParseException("作品页面数据异常")
+                    output.append(buffer, 0, read)
+                }
+                output.toString()
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun extractRouterData(html: String): String {
+        val markerIndex = html.indexOf(ROUTER_MARKER)
+        if (markerIndex < 0) throw DouyinParseException("作品页面结构已变化，未找到作品数据")
+        val start = html.indexOf('{', markerIndex + ROUTER_MARKER.length)
+        if (start < 0) throw DouyinParseException("作品页面数据不完整")
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in start until html.length) {
+            val char = html[index]
+            if (inString) {
+                if (escaped) escaped = false else if (char == '\\') escaped = true else if (char == '"') inString = false
+                continue
+            }
+            when (char) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> if (--depth == 0) return html.substring(start, index + 1)
+            }
+        }
+        throw DouyinParseException("作品页面数据不完整")
+    }
+
+    private fun findItem(routerData: JSONObject): JSONObject {
+        val loaderData = routerData.optJSONObject("loaderData")
+            ?: throw DouyinParseException("作品页面缺少 loaderData")
+        val keys = loaderData.keys()
+        while (keys.hasNext()) {
+            val page = loaderData.optJSONObject(keys.next()) ?: continue
+            val itemList = page.optJSONObject("videoInfoRes")?.optJSONArray("item_list") ?: continue
+            if (itemList.length() > 0) return itemList.getJSONObject(0)
+        }
+        throw DouyinParseException("没有找到公开作品信息，作品可能已删除或不可见")
+    }
+
+    private fun firstUrl(array: JSONArray?): String? = array?.let(::allUrls)?.firstOrNull()
+
+    private fun validateDouyinHost(value: String) {
+        val host = runCatching { URI(value).host?.lowercase() }.getOrNull()
+            ?: throw DouyinParseException("链接格式无效")
+        val allowed = host == "douyin.com" || host.endsWith(".douyin.com") ||
+            host == "iesdouyin.com" || host.endsWith(".iesdouyin.com")
+        if (!allowed) throw DouyinParseException("只支持抖音链接")
+        if (!value.startsWith("https://")) throw DouyinParseException("只支持 HTTPS 抖音链接")
+    }
+
+    private fun openConnection(url: String, userAgent: String, followRedirects: Boolean) =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = followRedirects
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            requestMethod = "GET"
+            setRequestProperty("User-Agent", userAgent)
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
+            setRequestProperty("Referer", "https://www.douyin.com/")
+        }
+
+    private fun sanitizeTitle(value: String): String = value
+        .replace(Regex("""[\\/:*?\"<>|#\n\r]"""), "_")
+        .replace(Regex("""\.{2,}"""), ".")
+        .trim(' ', '.')
+        .take(80)
+        .ifBlank { "douyin_work" }
+
+    companion object {
+        private const val MAX_REDIRECTS = 5
+        private const val MAX_HTML_BYTES = 5 * 1024 * 1024
+        private const val ROUTER_MARKER = "window._ROUTER_DATA"
+        private val URL_PATTERN = Regex("https?://[^\\s]+")
+        private val WORK_ID_PATTERN = Regex("/(?:video|note)/(\\d+)")
+        private val AUDIO_EXTENSIONS = listOf(".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac")
+        private const val MOBILE_USER_AGENT =
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+    }
+}
+
+class DouyinParseException(message: String, cause: Throwable? = null) : Exception(message, cause)

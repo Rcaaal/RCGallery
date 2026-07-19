@@ -90,6 +90,7 @@ fun PreviewScreen(
     val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val volumeState by playbackSettingsVM.volumeState.collectAsStateWithLifecycle()
     val starredUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
+    val watchLaterKeys by viewModel.watchLaterKeys.collectAsStateWithLifecycle()
 
     // ── VideoPlayer 控制栏显隐状态（控制右侧音量滑条显隐）──
     var controllerVisible by remember { mutableStateOf(false) }
@@ -637,6 +638,7 @@ fun PreviewScreen(
                                             onFirstFrameRendered = { showVideoCover = false },
                                             repeatMode = if (playMode == PlayMode.LoopCurrent) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF,
                                             onPlaybackEnded = {
+                                                viewModel.markWatchLaterWatched(item)
                                                 if (playMode == PlayMode.NextVideo) {
                                                     val current = pagerState.currentPage
                                                     for (i in (current + 1) until mediaItems.size) {
@@ -747,6 +749,10 @@ fun PreviewScreen(
                             isStarred = currentItem?.uri?.toString() in starredUris,
                             onToggleStar = {
                                 currentItem?.let { viewModel.toggleMediaStar(it.uri.toString()) }
+                            },
+                            isWatchLater = currentItem?.filePath in watchLaterKeys,
+                            onToggleWatchLater = {
+                                currentItem?.let(viewModel::toggleWatchLater)
                             }
                         )
                         }
@@ -780,6 +786,10 @@ fun PreviewScreen(
                             isStarred = currentItem?.uri?.toString() in starredUris,
                             onToggleStar = {
                                 currentItem?.let { viewModel.toggleMediaStar(it.uri.toString()) }
+                            },
+                            isWatchLater = currentItem?.filePath in watchLaterKeys,
+                            onToggleWatchLater = {
+                                currentItem?.let(viewModel::toggleWatchLater)
                             }
                         )
                         }
@@ -1214,7 +1224,9 @@ private fun InfoCard(
     mediaTags: List<TagEntity> = emptyList(),
     onManageTags: () -> Unit = {},
     isStarred: Boolean = false,
-    onToggleStar: () -> Unit = {}
+    onToggleStar: () -> Unit = {},
+    isWatchLater: Boolean = false,
+    onToggleWatchLater: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -1340,6 +1352,17 @@ private fun InfoCard(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        IconButton(
+                            onClick = onToggleWatchLater,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(com.example.rcgallery.R.drawable.ic_watch_later),
+                                contentDescription = if (isWatchLater) "移出稍后再看" else "添加到稍后再看",
+                                tint = if (isWatchLater) Color(0xFF42A5F5) else Color(0xFFBBBBBB),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                         // 星标按钮
                         IconButton(
                             onClick = onToggleStar,
