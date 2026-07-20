@@ -138,9 +138,6 @@ fun SmbPreviewScreen(
 
     val activeFile = mutableItems.getOrNull(pagerState.currentPage)
     val lifecycleOwner = LocalLifecycleOwner.current
-    var previewForeground by remember {
-        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-    }
     val lifecycleVideoActive by rememberUpdatedState(activeFile?.isVideo == true)
     val lifecyclePipProtected by rememberUpdatedState(
         PipState.isInPip || pipOverlayHidden || pipTriggered
@@ -150,13 +147,11 @@ fun SmbPreviewScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
-                    previewForeground = true
                     if (lifecycleVideoActive && !lifecyclePipProtected) {
                         playbackSettingsVM.muteSystemOnEnter()
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    previewForeground = false
                     if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
                 }
                 Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
@@ -170,23 +165,13 @@ fun SmbPreviewScreen(
         }
     }
 
-    LaunchedEffect(
-        activeFile?.isVideo,
-        previewForeground,
-        pipOverlayHidden,
-        pipTriggered,
-        PipState.isInPip
-    ) {
-        if (!previewForeground) {
-            if (!PipState.isInPip && !pipOverlayHidden && !pipTriggered) {
-                playbackSettingsVM.restoreSystemVolume()
-            }
-            return@LaunchedEffect
-        }
-        if (activeFile?.isVideo != true) {
-            playbackSettingsVM.restoreSystemVolume()
-        } else if (!pipOverlayHidden && !pipTriggered && !PipState.isInPip) {
+    // ── 翻页音量同步：视频→静音，图片→恢复
+    LaunchedEffect(pagerState.currentPage) {
+        val item = mutableItems.getOrNull(pagerState.currentPage)
+        if (item?.isVideo == true) {
             playbackSettingsVM.muteSystemOnEnter()
+        } else {
+            playbackSettingsVM.restoreSystemVolume()
         }
     }
 

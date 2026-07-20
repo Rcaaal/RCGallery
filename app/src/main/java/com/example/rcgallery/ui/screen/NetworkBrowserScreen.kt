@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +75,9 @@ fun NetworkBrowserScreen(
     var showDouyinImport by remember { mutableStateOf(false) }
     var douyinAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
     var douyinAlbumRequest by remember { mutableIntStateOf(0) }
+    var showBiliImport by remember { mutableStateOf(false) }
+    var biliAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
+    var biliAlbumRequest by remember { mutableIntStateOf(0) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
@@ -122,6 +126,47 @@ fun NetworkBrowserScreen(
             delay(100)
         }
         Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
+    }
+
+    LaunchedEffect(biliAlbumRequest) {
+        if (biliAlbumRequest == 0) return@LaunchedEffect
+        val target = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            "RCGallery/Bilibili"
+        ).absolutePath
+        viewModel.loadAlbums()
+        repeat(20) {
+            val album = viewModel.albums.value.firstOrNull {
+                File(it.directoryPath).absolutePath.equals(target, ignoreCase = true)
+            }
+            if (album != null) {
+                biliAlbum = album
+                return@LaunchedEffect
+            }
+            delay(100)
+        }
+        Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showBiliImport) {
+        Box(Modifier.fillMaxSize()) {
+            BiliImportScreen(
+                onDismiss = { showBiliImport = false },
+                onMediaSaved = { viewModel.loadAlbums() },
+                onOpenAlbum = { biliAlbumRequest++ },
+            )
+            biliAlbum?.let { album ->
+                MediaGridScreen(
+                    albumId = album.bucketId,
+                    albumName = album.bucketName,
+                    albumDirectoryPath = album.directoryPath,
+                    onBackClick = { biliAlbum = null },
+                    onGoHome = { biliAlbum = null },
+                    handleSystemBack = true,
+                )
+            }
+        }
+        return
     }
 
     if (showDouyinImport) {
@@ -217,6 +262,7 @@ fun NetworkBrowserScreen(
                         DeviceListContent(
                             devices = smbDevices,
                             onDouyinClick = { showDouyinImport = true },
+                            onBiliClick = { showBiliImport = true },
                             onAddDevice = { showConnectDialog = true },
                             onDeviceClick = { viewModel.smbConnect(it.host) },
                             onRemoveDevice = { deviceId -> viewModel.smbRemoveDevice(deviceId) }
@@ -595,31 +641,28 @@ private fun formatTransferRate(bytesPerSecond: Long): String =
 private fun DeviceListContent(
     devices: List<SmbDevice>,
     onDouyinClick: () -> Unit,
+    onBiliClick: () -> Unit,
     onAddDevice: () -> Unit,
     onDeviceClick: (SmbDevice) -> Unit,
     onRemoveDevice: (String) -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Card(
-            modifier = Modifier.fillMaxWidth().clickable(onClick = onDouyinClick),
-            elevation = CardDefaults.cardElevation(2.dp),
-            shape = RoundedCornerShape(12.dp),
-        ) {
-            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("抖", fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("抖音链接解析", fontWeight = FontWeight.Bold)
-                    Text(
-                        "本地解析 · 保存公开视频到相册",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text("进入 ›", color = MaterialTheme.colorScheme.primary)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
+        ImportServiceCard(
+            iconRes = com.example.rcgallery.R.drawable.ic_bilibili_brand,
+            iconBackground = Color(0xFF00AEEC),
+            title = "哔哩哔哩导入",
+            subtitle = "分P · 清晰度 · 批量下载",
+            onClick = onBiliClick,
+        )
+        Spacer(Modifier.height(8.dp))
+        ImportServiceCard(
+            iconRes = com.example.rcgallery.R.drawable.ic_douyin_brand,
+            iconBackground = Color(0xFF101010),
+            title = "抖音作品导入",
+            subtitle = "视频 · 图文 · 批量保存",
+            onClick = onDouyinClick,
+        )
+        Spacer(Modifier.height(12.dp))
         if (devices.isEmpty()) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Column(
@@ -988,6 +1031,70 @@ private class FolderMixedAdapter(
             is MediaListVH -> holder.recycle()
         }
         super.onViewRecycled(holder)
+    }
+}
+
+@Composable
+private fun ImportServiceCard(
+    iconRes: Int,
+    iconBackground: Color,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().height(76.dp).clickable(onClick = onClick),
+        elevation = CardDefaults.cardElevation(0.dp),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        ),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(iconBackground),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painter = painterResource(iconRes),
+                    contentDescription = null,
+                    modifier = Modifier.size(26.dp),
+                    tint = Color.Unspecified,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                painter = painterResource(com.example.rcgallery.R.drawable.ic_chevron_right),
+                contentDescription = "进入",
+                modifier = Modifier.size(24.dp),
+                tint = Color.Unspecified,
+            )
+        }
     }
 }
 

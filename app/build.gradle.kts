@@ -118,4 +118,7 @@ dependencies {
 
     // jcifs-ng — SMB 网络共享访问
     implementation(libs.jcifs.ng)
+
+    // ZXing core - 本地生成 B 站扫码登录二维码，不启用扫码 Activity
+    implementation("com.google.zxing:core:3.5.4")
 }

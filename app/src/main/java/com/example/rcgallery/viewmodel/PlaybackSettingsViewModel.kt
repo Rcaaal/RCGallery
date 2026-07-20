@@ -11,11 +11,20 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * 系统媒体音量控制器（STREAM_MUSIC）。
  *
- * - `setVolume` / `toggleMute` 直接操作系统音量，同时更新 UI state
- * - `muteSystemOnEnter` / `restoreSystemVolume` 用于预览页面的进入静音 & 退出恢复
+ * ## 架构设计
+ *
+ * ### 深度计数（[muteCount]）
+ * 进入预览 / 翻到视频页 → 增加 muteCount；退出预览 / 翻到图片页 → 减少 muteCount。
+ * 只有 muteCount 从 0→1 时才保存系统音量快照，从 1→0 时才恢复。
+ * 这消除了 LaunchedEffect 和 Lifecycle 回调之间的竞态条件——双方独立调用，深度计数保证配对正确。
+ *
+ * ### lastNonZero
+ * 用户"上次手动设置的非零音量"，供 [toggleMute] 取消静音时恢复。
+ * 退出预览时保留当前值不变——不受原始系统音量影响，
+ * 确保下次进入预览时静音按钮能恢复到用户习惯的音量。
+ *
  * - [VolumeState.level] 只做 UI 显示/滑条位置，不驱动 ExoPlayer
- * - [VolumeState.lastNonZero] 用于 toggleMute 取消静音时的恢复值
- * - `beforePreviewSystemVolumeIndex` 精确保存进入预览前的系统音量档位
+ * - [systemVolumeSnapshot] 精确保存进入预览前的系统音量档位
  */
 data class VolumeState(
     val level: Float,       // 0f = 静音，用于 UI 显示 & 滑条位置
@@ -31,9 +40,9 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
     private val _volumeState = MutableStateFlow(loadInitialVolumeState())
     val volumeState: StateFlow<VolumeState> = _volumeState.asStateFlow()
 
-    // ── 页面生命周期恢复（进入预览时记住，退出时恢复）──
-    private var enterMuteApplied = false
-    private var beforePreviewSystemVolumeIndex = 0
+    // ── 深度计数 + 系统音量快照（支持多次 mute/restore 配对）──
+    private var muteCount = 0
+    private var systemVolumeSnapshot = -1  // -1 = 未保存
 
     // ══════════════════════════════════════════
     //  系统音量读写
@@ -105,34 +114,53 @@ class PlaybackSettingsViewModel(application: Application) : AndroidViewModel(app
     }
 
     /**
-     * 进入预览页时调用：记住当前系统音量并静音。
-     * 只生效一次（[enterMuteApplied] 保护），退出时需调 [restoreSystemVolume] 重置。
+     * 进入预览/翻到视频页时调用：保存音量快照并静音。
+     *
+     * 深度计数 [muteCount] 始终只在 0↔1 之间切换：
+     * - 第一次调用（0→1）：保存系统音量快照，设置静音。
+     * - 后续调用（已为 1）：只确保系统音量 = 0，不重复计数。
+     * 这消除了 DisposableEffect ON_START 和 LaunchedEffect(page) 同时调用
+     * 导致 muteCount 虚高的竞态（修复频繁快速操作 UI/音量不匹配 Bug）。
      */
     fun muteSystemOnEnter() {
-        if (enterMuteApplied) return
-        enterMuteApplied = true
-        beforePreviewSystemVolumeIndex =
-            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val beforeLevel = if (max > 0) {
-            beforePreviewSystemVolumeIndex.toFloat() / max.toFloat()
-        } else 0f
-        val lastNonZero = if (beforeLevel > 0f) beforeLevel else _volumeState.value.lastNonZero
-        _volumeState.value = VolumeState(level = 0f, lastNonZero = lastNonZero)
+        val firstEntry = muteCount == 0
+        if (firstEntry) {
+            systemVolumeSnapshot =
+                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val beforeLevel = if (max > 0) {
+                systemVolumeSnapshot.toFloat() / max.toFloat()
+            } else 0f
+            val lastNonZero = if (beforeLevel > 0f) beforeLevel else _volumeState.value.lastNonZero
+            _volumeState.value = VolumeState(level = 0f, lastNonZero = lastNonZero)
+            muteCount = 1
+        }
         writeSystemVolume(0f)
     }
 
-    /** 退出预览页时调用：恢复进入前的系统音量。幂等，多次调用安全。 */
+    /**
+     * 退出预览/翻到图片页时调用：减少深度计数，归零时恢复系统音量。
+     *
+     * 幂等：[muteCount <= 0] 时直接返回，无副作用。
+     * 恢复后保留当前的 [lastNonZero]（用户习惯音量），不因原始音量为 0 而覆盖，
+     * 确保下次进入时 toggleMute 能恢复到用户上次设定的非零音量。
+     */
     fun restoreSystemVolume() {
-        if (!enterMuteApplied) return
-        enterMuteApplied = false
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val restoreIndex = beforePreviewSystemVolumeIndex.coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreIndex, 0)
-        val restoreLevel = if (max > 0) restoreIndex.toFloat() / max.toFloat() else 0f
-        val lastNonZero = if (restoreLevel > 0f) restoreLevel else _volumeState.value.lastNonZero
-        _volumeState.value = VolumeState(level = restoreLevel, lastNonZero = lastNonZero)
-        if (restoreLevel > 0f) saveLastNonZero(restoreLevel)
+        if (muteCount <= 0) return
+        muteCount = 0
+        if (systemVolumeSnapshot >= 0) {
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val restoreIndex = systemVolumeSnapshot.coerceIn(0, max)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, restoreIndex, 0)
+            systemVolumeSnapshot = -1
+            val restoreLevel = if (max > 0) restoreIndex.toFloat() / max.toFloat() else 0f
+            val currentLastNonZero = _volumeState.value.lastNonZero
+            _volumeState.value = VolumeState(
+                level = restoreLevel,
+                lastNonZero = if (restoreLevel > 0f) restoreLevel else currentLastNonZero
+            )
+            if (restoreLevel > 0f) saveLastNonZero(restoreLevel)
+        }
     }
 
     companion object {

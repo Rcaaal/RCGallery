@@ -117,7 +117,7 @@ fun PreviewScreen(
     val savedPositions = remember { mutableMapOf<Uri, Long>() }
 
     // ── 视频全屏 seek 状态（由 PreviewScreen 全屏层处理，不再通过 VideoPlayer overlay）──
-    val SEEK_ZONE_DP = 150   // 底部 seek 区域高度(dp)
+    val SEEK_ZONE_DP = 130   // 顶部低于静音按钮下缘 5dp，避免抢占按钮触摸
     val SEEK_THROTTLE_MS = 40L
     val screenWidth = remember { context.resources.displayMetrics.widthPixels }
     var isDraggingSeek by remember { mutableStateOf(false) }
@@ -252,6 +252,7 @@ fun PreviewScreen(
     }
 
     // PiP 退出 → 恢复 UI 覆盖层
+    // 注意：不动音量。PiP 中用户可能已在听音频，退出不重新静音。
     LaunchedEffect(PipState.isInPip) {
         if (PipState.isInPip) {
             showInfo = false
@@ -268,9 +269,6 @@ fun PreviewScreen(
     // Images never change system volume. Videos mute only while this preview is
     // foreground; ordinary backgrounding restores volume, while PiP keeps it.
     val lifecycleOwner = LocalLifecycleOwner.current
-    var previewForeground by remember {
-        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-    }
     val lifecycleVideoActive by rememberUpdatedState(currentItem?.isVideo == true)
     val lifecyclePipProtected by rememberUpdatedState(
         PipState.isInPip || pipOverlayHidden || pipTriggered
@@ -280,13 +278,11 @@ fun PreviewScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
-                    previewForeground = true
                     if (lifecycleVideoActive && !lifecyclePipProtected) {
                         playbackSettingsVM.muteSystemOnEnter()
                     }
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    previewForeground = false
                     if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
                 }
                 Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
@@ -301,23 +297,14 @@ fun PreviewScreen(
         }
     }
 
-    LaunchedEffect(
-        currentItem?.isVideo,
-        previewForeground,
-        pipOverlayHidden,
-        pipTriggered,
-        PipState.isInPip
-    ) {
-        if (!previewForeground) {
-            if (!PipState.isInPip && !pipOverlayHidden && !pipTriggered) {
-                playbackSettingsVM.restoreSystemVolume()
-            }
-            return@LaunchedEffect
-        }
-        if (currentItem?.isVideo != true) {
-            playbackSettingsVM.restoreSystemVolume()
-        } else if (!pipOverlayHidden && !pipTriggered && !PipState.isInPip) {
+    // ── 翻页音量同步：视频→静音，图片→恢复
+    // 以 pagerState.currentPage 为 key，每次翻页重新评估音量策略
+    LaunchedEffect(pagerState.currentPage) {
+        val item = mediaItems.getOrNull(pagerState.currentPage)
+        if (item?.isVideo == true) {
             playbackSettingsVM.muteSystemOnEnter()
+        } else {
+            playbackSettingsVM.restoreSystemVolume()
         }
     }
 
