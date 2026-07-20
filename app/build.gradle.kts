@@ -44,10 +44,6 @@ android {
         compose = true
     }
 
-    packaging {
-        jniLibs.useLegacyPackaging = true
-    }
-
     // 自定义 APK 输出命名：RCGallery_年月日_时分.apk
     applicationVariants.all {
         outputs.all {
@@ -125,7 +121,4 @@ dependencies {
 
     // ZXing core - 本地生成 B 站扫码登录二维码，不启用扫码 Activity
     implementation("com.google.zxing:core:3.5.4")
-
-    // yt-dlp Android runtime; downloads and muxing remain native in this app.
-    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
 }
