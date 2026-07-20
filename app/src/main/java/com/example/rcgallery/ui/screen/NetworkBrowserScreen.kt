@@ -78,6 +78,9 @@ fun NetworkBrowserScreen(
     var showBiliImport by remember { mutableStateOf(false) }
     var biliAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
     var biliAlbumRequest by remember { mutableIntStateOf(0) }
+    var showYouTubeImport by remember { mutableStateOf(false) }
+    var youtubeAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
+    var youtubeAlbumRequest by remember { mutableIntStateOf(0) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
 
@@ -146,6 +149,47 @@ fun NetworkBrowserScreen(
             delay(100)
         }
         Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
+    }
+
+    LaunchedEffect(youtubeAlbumRequest) {
+        if (youtubeAlbumRequest == 0) return@LaunchedEffect
+        val target = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            "RCGallery/YouTube"
+        ).absolutePath
+        viewModel.loadAlbums()
+        repeat(20) {
+            val album = viewModel.albums.value.firstOrNull {
+                File(it.directoryPath).absolutePath.equals(target, ignoreCase = true)
+            }
+            if (album != null) {
+                youtubeAlbum = album
+                return@LaunchedEffect
+            }
+            delay(100)
+        }
+        Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showYouTubeImport) {
+        Box(Modifier.fillMaxSize()) {
+            YouTubeImportScreen(
+                onDismiss = { showYouTubeImport = false },
+                onMediaSaved = { viewModel.loadAlbums() },
+                onOpenAlbum = { youtubeAlbumRequest++ },
+            )
+            youtubeAlbum?.let { album ->
+                MediaGridScreen(
+                    albumId = album.bucketId,
+                    albumName = album.bucketName,
+                    albumDirectoryPath = album.directoryPath,
+                    onBackClick = { youtubeAlbum = null },
+                    onGoHome = { youtubeAlbum = null },
+                    handleSystemBack = true,
+                )
+            }
+        }
+        return
     }
 
     if (showBiliImport) {
@@ -263,6 +307,7 @@ fun NetworkBrowserScreen(
                             devices = smbDevices,
                             onDouyinClick = { showDouyinImport = true },
                             onBiliClick = { showBiliImport = true },
+                            onYouTubeClick = { showYouTubeImport = true },
                             onAddDevice = { showConnectDialog = true },
                             onDeviceClick = { viewModel.smbConnect(it.host) },
                             onRemoveDevice = { deviceId -> viewModel.smbRemoveDevice(deviceId) }
@@ -642,6 +687,7 @@ private fun DeviceListContent(
     devices: List<SmbDevice>,
     onDouyinClick: () -> Unit,
     onBiliClick: () -> Unit,
+    onYouTubeClick: () -> Unit,
     onAddDevice: () -> Unit,
     onDeviceClick: (SmbDevice) -> Unit,
     onRemoveDevice: (String) -> Unit
@@ -661,6 +707,14 @@ private fun DeviceListContent(
             title = "抖音作品导入",
             subtitle = "视频 · 图文 · 批量保存",
             onClick = onDouyinClick,
+        )
+        Spacer(Modifier.height(8.dp))
+        ImportServiceCard(
+            iconRes = com.example.rcgallery.R.drawable.ic_youtube_brand,
+            iconBackground = Color(0xFFFF0000),
+            title = "YouTube 导入",
+            subtitle = "公开视频 · Shorts · 清晰度选择",
+            onClick = onYouTubeClick,
         )
         Spacer(Modifier.height(12.dp))
         if (devices.isEmpty()) {
