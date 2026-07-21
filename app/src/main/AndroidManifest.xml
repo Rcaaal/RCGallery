@@ -40,6 +40,10 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.screen.YouTubeCookieActivity"
+            android:exported="false" />
+
         <service
             android:name=".data.smb.SmbProxyService"
             android:exported="false"
