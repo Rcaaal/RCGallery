@@ -36,7 +36,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,7 +71,7 @@ fun YouTubeImportScreen(
     var selectedHeight by remember { mutableIntStateOf(0) }
     var codecMode by remember { mutableStateOf(YouTubeCodecMode.AUTO) }
 
-    val cookieLoginLauncher = rememberLauncherForActivityResult(
+    val cookieLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
@@ -82,21 +81,21 @@ fun YouTubeImportScreen(
         }
     }
 
-    val work = when (val current = state) {
-        is YouTubeImportState.Ready -> current.work
-        is YouTubeImportState.Downloading -> current.work
+    val work = when (val s = state) {
+        is YouTubeImportState.Ready -> s.work
+        is YouTubeImportState.Downloading -> s.work
+        is YouTubeImportState.Merging -> s.work
         else -> null
     }
-    LaunchedEffect(work?.id) {
+
+    // auto-select first quality when work changes
+    androidx.compose.runtime.LaunchedEffect(work?.id) {
         selectedHeight = work?.qualities?.firstOrNull()?.height ?: 0
     }
 
-    fun close() {
-        viewModel.reset()
-        onDismiss()
-    }
-
+    fun close() { viewModel.reset(); onDismiss() }
     BackHandler { close() }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -104,7 +103,9 @@ fun YouTubeImportScreen(
                 navigationIcon = { TextButton(onClick = ::close) { Text("← 返回") } },
                 actions = { TextButton(onClick = onOpenAlbum) { Text("相册") } },
                 windowInsets = WindowInsets(0, 0, 0, 0),
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
             )
         },
     ) { padding ->
@@ -121,13 +122,15 @@ fun YouTubeImportScreen(
                 minLines = 2,
                 maxLines = 4,
                 enabled = state !is YouTubeImportState.Initializing &&
-                    state !is YouTubeImportState.Parsing && state !is YouTubeImportState.Downloading,
+                    state !is YouTubeImportState.Parsing &&
+                    state !is YouTubeImportState.Downloading,
             )
+
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        input = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                        val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        input = cb.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
                     },
                     modifier = Modifier.weight(1f),
                     enabled = state !is YouTubeImportState.Downloading,
@@ -136,11 +139,12 @@ fun YouTubeImportScreen(
                     onClick = { viewModel.parse(input) },
                     modifier = Modifier.weight(1f),
                     enabled = state !is YouTubeImportState.Initializing &&
-                        state !is YouTubeImportState.Parsing && state !is YouTubeImportState.Downloading,
+                        state !is YouTubeImportState.Parsing &&
+                        state !is YouTubeImportState.Downloading,
                 ) { Text("开始解析") }
             }
 
-            // Cookie 登录状态卡
+            // ── cookie card ──
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -163,7 +167,7 @@ fun YouTubeImportScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f))
                         TextButton(onClick = {
-                            cookieLoginLauncher.launch(Intent(context, YouTubeCookieActivity::class.java))
+                            cookieLauncher.launch(Intent(context, YouTubeCookieActivity::class.java))
                         }) {
                             Text("登录", style = MaterialTheme.typography.labelSmall)
                         }
@@ -171,23 +175,26 @@ fun YouTubeImportScreen(
                 }
             }
 
-            when (val current = state) {
+            // ── state body ──
+            when (val s = state) {
                 YouTubeImportState.Idle -> Text(
                     "仅用于保存你有权下载的公开内容。第一版不支持登录、播放列表、直播和 DRM 内容。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+
                 YouTubeImportState.Initializing -> LoadingRow("首次使用正在初始化本地解析引擎…")
                 YouTubeImportState.Parsing -> LoadingRow("正在读取视频与可用清晰度…")
+
                 is YouTubeImportState.Ready -> {
-                    YouTubeResultCard(current.work)
+                    WorkCard(s.work)
                     Text("清晰度", style = MaterialTheme.typography.titleSmall)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(current.work.qualities, key = { it.height }) { quality ->
+                        items(s.work.qualities, key = { it.height }) { q ->
                             FilterChip(
-                                selected = selectedHeight == quality.height,
-                                onClick = { selectedHeight = quality.height },
-                                label = { Text(quality.label) },
+                                selected = selectedHeight == q.height,
+                                onClick = { selectedHeight = q.height },
+                                label = { Text(q.label) },
                             )
                         }
                     }
@@ -207,33 +214,44 @@ fun YouTubeImportScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Button(
-                        onClick = { viewModel.download(current.work, selectedHeight, codecMode, onMediaSaved) },
+                        onClick = { viewModel.download(s.work, selectedHeight, codecMode, onMediaSaved) },
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         enabled = selectedHeight > 0,
                     ) { Text("保存视频") }
                 }
+
                 is YouTubeImportState.Downloading -> {
-                    YouTubeResultCard(current.work)
-                    val progress = if (current.totalBytes > 0L) {
-                        (current.downloadedBytes.toFloat() / current.totalBytes).coerceIn(0f, 1f)
-                    } else null
-                    if (progress == null) LinearProgressIndicator(Modifier.fillMaxWidth())
-                    else LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    WorkCard(s.work)
+                    LinearProgressIndicator(
+                        progress = { s.progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Text(
-                        "${current.stage}\n${formatYouTubeBytes(current.downloadedBytes)}" +
-                            (if (current.totalBytes > 0L) " / ${formatYouTubeBytes(current.totalBytes)}" else "") +
-                            " · ${formatYouTubeBytes(current.bytesPerSecond)}/s",
+                        "下载中 ${(s.progress * 100).toInt()}%" +
+                            if (s.speed.isNotBlank()) " · ${s.speed}" else "",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    OutlinedButton(onClick = viewModel::cancel, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = { viewModel.cancel() }, modifier = Modifier.fillMaxWidth()) {
                         Text("取消")
                     }
                 }
+
+                is YouTubeImportState.Merging -> {
+                    WorkCard(s.work)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text("正在合并音视频…", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = { viewModel.cancel() }, modifier = Modifier.fillMaxWidth()) {
+                        Text("取消")
+                    }
+                }
+
                 is YouTubeImportState.Success -> {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )) {
                         Column(Modifier.fillMaxWidth().padding(16.dp)) {
                             Text("保存完成", fontWeight = FontWeight.Bold)
-                            Text(current.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text("位置：DCIM/RCGallery/YouTube", style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -242,10 +260,13 @@ fun YouTubeImportScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("继续解析") }
                 }
+
                 is YouTubeImportState.Error -> {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )) {
                         Text(
-                            current.message,
+                            s.message,
                             modifier = Modifier.fillMaxWidth().padding(16.dp),
                             color = MaterialTheme.colorScheme.onErrorContainer,
                         )
@@ -259,6 +280,8 @@ fun YouTubeImportScreen(
     }
 }
 
+// ── shared composables ──────────────────────────────────────────────────
+
 @Composable
 private fun LoadingRow(message: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -269,7 +292,7 @@ private fun LoadingRow(message: String) {
 }
 
 @Composable
-private fun YouTubeResultCard(work: YouTubeWorkInfo) {
+private fun WorkCard(work: YouTubeWorkInfo) {
     Card {
         Column(Modifier.fillMaxWidth()) {
             work.thumbnailUrl?.let {
@@ -295,15 +318,3 @@ private fun YouTubeResultCard(work: YouTubeWorkInfo) {
 
 private fun formatDuration(seconds: Int): String =
     "%d:%02d".format((seconds.coerceAtLeast(0) / 60), seconds.coerceAtLeast(0) % 60)
-
-private fun formatYouTubeBytes(bytes: Long): String {
-    if (bytes < 1024L) return "$bytes B"
-    val units = arrayOf("KB", "MB", "GB")
-    var value = bytes.toDouble()
-    var index = -1
-    while (value >= 1024.0 && index < units.lastIndex) {
-        value /= 1024.0
-        index++
-    }
-    return "%.1f %s".format(value, units[index])
-}

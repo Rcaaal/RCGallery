@@ -1,48 +1,48 @@
 package com.example.rcgallery.viewmodel
 
 import android.app.Application
-import android.content.Context
 import android.content.ContentValues
-import android.media.MediaCodecList
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.rcgallery.data.bilibili.BiliMuxer
-import com.example.rcgallery.data.youtube.YouTubeAudioTrack
 import com.example.rcgallery.data.youtube.YouTubeCodecMode
 import com.example.rcgallery.data.youtube.YouTubeImportState
 import com.example.rcgallery.data.youtube.YouTubeParseException
 import com.example.rcgallery.data.youtube.YouTubeParser
-import com.example.rcgallery.data.youtube.YouTubeVideoTrack
 import com.example.rcgallery.data.youtube.YouTubeWorkInfo
 import com.example.rcgallery.util.AppLogger
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.coroutines.coroutineContext
+import java.util.Locale
+import kotlin.math.roundToLong
 
 class YouTubeImportViewModel(application: Application) : AndroidViewModel(application) {
-    private val prefs = application.getSharedPreferences("youtube_prefs", Context.MODE_PRIVATE)
+    private val prefs = application.getSharedPreferences("youtube_prefs", 0)
     private var parser = YouTubeParser(application, loadCookiePath())
     private val _state = MutableStateFlow<YouTubeImportState>(YouTubeImportState.Idle)
     val state: StateFlow<YouTubeImportState> = _state.asStateFlow()
+
     private val _hasCookie = MutableStateFlow(loadCookiePath() != null)
     val hasCookie: StateFlow<Boolean> = _hasCookie.asStateFlow()
-    private var operationJob: Job? = null
+
+    private var parseJob: Job? = null
+    private var downloadJob: Job? = null
+    private var currentProcessId: String? = null
+
+    // ── cookie ───────────────────────────────────────────────────────────
 
     fun setCookieFile(path: String) {
         prefs.edit().putString(KEY_COOKIE_PATH, path).apply()
@@ -51,7 +51,7 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun clearCookie() {
-        loadCookiePath()?.let { java.io.File(it).delete() }
+        loadCookiePath()?.let { File(it).delete() }
         prefs.edit().remove(KEY_COOKIE_PATH).apply()
         parser = YouTubeParser(getApplication(), null)
         _hasCookie.value = false
@@ -59,8 +59,12 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
 
     private fun loadCookiePath(): String? {
         val path = prefs.getString(KEY_COOKIE_PATH, null) ?: return null
-        return if (java.io.File(path).exists()) path else { prefs.edit().remove(KEY_COOKIE_PATH).apply(); null }
+        return if (File(path).exists()) path else {
+            prefs.edit().remove(KEY_COOKIE_PATH).apply(); null
+        }
     }
+
+    // ── parse ────────────────────────────────────────────────────────────
 
     fun parse(input: String) {
         if (input.isBlank()) {
@@ -68,57 +72,71 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
             return
         }
         cancel()
-        operationJob = viewModelScope.launch {
+        parseJob = viewModelScope.launch {
             _state.value = YouTubeImportState.Initializing
             try {
                 _state.value = YouTubeImportState.Parsing
                 _state.value = YouTubeImportState.Ready(
-                    withTimeout(PARSE_TIMEOUT_MS) { parser.parse(input) }
+                    withContext(Dispatchers.IO) { parser.parse(input) }
                 )
-            } catch (_: TimeoutCancellationException) {
-                _state.value = YouTubeImportState.Error("解析超时，请检查网络后重试")
             } catch (_: CancellationException) {
                 return@launch
-            } catch (error: YouTubeParseException) {
-                _state.value = YouTubeImportState.Error(error.message ?: "YouTube 解析失败")
-            } catch (error: Exception) {
-                AppLogger.e("YouTubeImport", "parse failed", error)
-                _state.value = YouTubeImportState.Error(error.message ?: "YouTube 解析失败")
+            } catch (e: YouTubeParseException) {
+                _state.value = YouTubeImportState.Error(e.message ?: "YouTube 解析失败")
+            } catch (e: Exception) {
+                AppLogger.e("YouTubeImport", "parse failed", e)
+                _state.value = YouTubeImportState.Error(
+                    e.message?.takeIf { it.isNotBlank() } ?: "YouTube 解析失败"
+                )
             }
         }
     }
 
+    // ── download ──────────────────────────────────────────────────────────
+
     fun download(
         work: YouTubeWorkInfo,
-        qualityHeight: Int,
+        height: Int,
         codecMode: YouTubeCodecMode,
         onSaved: () -> Unit,
     ) {
         cancel()
-        operationJob = viewModelScope.launch {
+        downloadJob = viewModelScope.launch {
+            _state.value = YouTubeImportState.Downloading(work, 0f, "")
             try {
-                val displayName = downloadWork(work, qualityHeight, codecMode)
+                val displayName = withContext(Dispatchers.IO) {
+                    downloadVideo(work, height, codecMode)
+                }
                 _state.value = YouTubeImportState.Success(displayName)
                 onSaved()
             } catch (_: CancellationException) {
                 return@launch
-            } catch (error: Exception) {
-                AppLogger.e("YouTubeImport", "download failed id=${work.id}", error)
+            } catch (e: Exception) {
+                AppLogger.e("YouTubeImport", "download failed id=${work.id}", e)
                 _state.value = YouTubeImportState.Error(
-                    error.message?.takeIf { it.isNotBlank() } ?: "YouTube 下载失败"
+                    e.message?.takeIf { it.isNotBlank() } ?: "下载失败"
                 )
             }
         }
     }
 
+    // ── cancel / reset ──────────────────────────────────────────────────
+
     fun cancel() {
-        val current = _state.value
-        operationJob?.cancel()
-        operationJob = null
-        _state.value = when (current) {
-            is YouTubeImportState.Downloading -> YouTubeImportState.Ready(current.work)
+        parseJob?.cancel()
+        parseJob = null
+        downloadJob?.cancel()
+        downloadJob = null
+        currentProcessId?.let {
+            kotlin.runCatching { YoutubeDL.getInstance().destroyProcessById(it) }
+            currentProcessId = null
+        }
+        val s = _state.value
+        _state.value = when (s) {
+            is YouTubeImportState.Downloading -> YouTubeImportState.Ready(s.work)
+            is YouTubeImportState.Merging -> YouTubeImportState.Ready(s.work)
             YouTubeImportState.Initializing, YouTubeImportState.Parsing -> YouTubeImportState.Idle
-            else -> current
+            else -> s
         }
     }
 
@@ -127,179 +145,157 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
         _state.value = YouTubeImportState.Idle
     }
 
-    private suspend fun downloadWork(
+    // ── download implementation ──────────────────────────────────────────
+
+    private suspend fun downloadVideo(
         work: YouTubeWorkInfo,
-        qualityHeight: Int,
+        height: Int,
         codecMode: YouTubeCodecMode,
-    ): String = withContext(Dispatchers.IO) {
-        val video = chooseVideo(work.videos, qualityHeight, codecMode)
-        val audio = work.audios.maxWithOrNull(
-            compareBy<YouTubeAudioTrack> { it.bitrateKbps }.thenBy { it.estimatedBytes }
-        ) ?: throw IllegalStateException("没有可用的音频轨道")
-        val tempDir = File(getApplication<Application>().cacheDir, "youtube_import/${work.id}")
+    ): String {
+        val tempDir = File(
+            getApplication<Application>().cacheDir,
+            "youtube_import/${work.id}_${System.nanoTime()}"
+        )
         tempDir.mkdirs()
-        val videoPart = File(tempDir, "video.mp4")
-        val audioPart = File(tempDir, "audio.m4a")
-        var pendingUri: Uri? = null
-        try {
-            AppLogger.d(
-                "YouTubeImport",
-                "selected video=${video.formatId}/${video.codec}/${video.height} audio=${audio.formatId}/${audio.codec}",
-            )
-            downloadTrack(work, video.url, video.headers, videoPart, "正在下载视频")
-            downloadTrack(work, audio.url, audio.headers, audioPart, "正在下载音频")
-            coroutineContext.ensureActive()
-            _state.value = YouTubeImportState.Downloading(work, "正在合并音视频", 0L, 0L, 0L)
+        return try {
+            val formatSpec = buildFormatString(height, codecMode)
+            val sortSpec = buildSortString(codecMode)
 
-            val resolver = getApplication<Application>().contentResolver
-            val displayName = uniqueDisplayName(
-                sanitizeFileName("${work.title} [${qualityLabel(video.height)}].mp4")
-            )
-            pendingUri = resolver.insert(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, YOUTUBE_RELATIVE_PATH)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                },
-            ) ?: throw IllegalStateException("无法创建本地媒体文件")
-            val uri = pendingUri
-            resolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
-                BiliMuxer.mux(videoPart, audioPart, descriptor.fileDescriptor)
-                if (descriptor.statSize <= 0L) throw IllegalStateException("音视频合并结果为空")
-            } ?: throw IllegalStateException("无法写入本地媒体文件")
-            resolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-                null,
-                null,
-            )
-            pendingUri = null
-            displayName
-        } finally {
-            pendingUri?.let { getApplication<Application>().contentResolver.delete(it, null, null) }
-            videoPart.delete()
-            audioPart.delete()
-            tempDir.delete()
-        }
-    }
+            val request = YoutubeDLRequest(work.webpageUrl).apply {
+                addOption("-f", formatSpec)
+                if (sortSpec.isNotBlank()) addOption("-S", sortSpec)
+                addOption("--merge-output-format", "mp4")
+                addOption("--no-playlist")
+                addOption("--no-part")
+                addOption("--no-mtime")
+                addOption("--quiet")
+                addOption("--no-warnings")
+                addOption("--no-check-certificates")
+                addOption("--no-check-formats")
+                addOption("--ignore-errors")
+                addOption("--retries", 3)
+                addOption("--socket-timeout", 30)
+                addOption("-P", tempDir.absolutePath)
+                addOption("-o", "%(title).100s.%(ext)s")
+            }
 
-    private suspend fun downloadTrack(
-        work: YouTubeWorkInfo,
-        url: String,
-        headers: Map<String, String>,
-        target: File,
-        stage: String,
-    ) {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            instanceFollowRedirects = true
-            connectTimeout = 20_000
-            readTimeout = 60_000
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("Connection", "keep-alive")
-            headers.forEach { (name, value) ->
-                if (!name.equals("Accept-Encoding", true) && value.isNotBlank()) {
-                    setRequestProperty(name, value)
+            val pid = "ytdl_${work.id}_${System.nanoTime()}"
+            currentProcessId = pid
+
+            val progressRegex = Regex("""([\d.]+)%""")
+            runInterruptible {
+                YoutubeDL.getInstance().execute(request, pid, false) { progress, _, line ->
+                    val speed = parseSpeed(line)
+                    _state.value = YouTubeImportState.Downloading(
+                        work, progress.coerceIn(0f, 1f), speed
+                    )
                 }
             }
-        }
-        try {
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("YouTube CDN 下载失败（HTTP $code）")
-            }
-            val total = connection.contentLengthLong
-            BufferedInputStream(connection.inputStream, BUFFER_SIZE).use { input ->
-                BufferedOutputStream(target.outputStream(), BUFFER_SIZE).use { output ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var downloaded = 0L
-                    var windowBytes = 0L
-                    var windowStart = System.nanoTime()
-                    var lastUpdate = windowStart
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                        downloaded += read
-                        windowBytes += read
-                        val now = System.nanoTime()
-                        if (now - lastUpdate >= PROGRESS_INTERVAL_NS) {
-                            val seconds = (now - windowStart) / 1_000_000_000.0
-                            val speed = if (seconds > 0.0) (windowBytes / seconds).toLong() else 0L
-                            _state.value = YouTubeImportState.Downloading(
-                                work, stage, downloaded, total, speed
-                            )
-                            windowStart = now
-                            windowBytes = 0L
-                            lastUpdate = now
+
+            // ── find output file ──
+            val files = tempDir.listFiles()
+                ?.filter { it.isFile && it.name != "." && it.name != ".." }
+                ?.sortedByDescending { it.lastModified() }
+            val output = files?.firstOrNull()
+                ?: throw YouTubeParseException("找不到下载的视频文件")
+
+            // ── MediaStore ──
+            val app = getApplication<Application>()
+            val resolver = app.contentResolver
+            val displayName = uniqueDisplayName(sanitizeFileName("${work.title}.mp4"))
+            val relativePath = "${Environment.DIRECTORY_DCIM}/RCGallery/YouTube"
+
+            var pendingUri: Uri? = null
+            val result = try {
+                pendingUri = resolver.insert(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                        put(MediaStore.MediaColumns.IS_PENDING, if (Build.VERSION.SDK_INT >= 29) 1 else 0)
+                        put(MediaStore.MediaColumns.SIZE, output.length())
+                    }
+                ) ?: throw IllegalStateException("无法创建本地媒体文件")
+
+                resolver.openFileDescriptor(pendingUri, "rw")?.use { pfd ->
+                    output.inputStream().use { inp ->
+                        java.io.FileOutputStream(pfd.fileDescriptor).use { out ->
+                            inp.copyTo(out, 256 * 1024)
                         }
                     }
-                    output.flush()
-                    if (downloaded <= 0L) throw IllegalStateException("下载结果为空")
-                    if (total > 0L && downloaded != total) {
-                        throw IllegalStateException("下载不完整（$downloaded/$total）")
-                    }
+                } ?: throw IllegalStateException("无法写入本地媒体文件")
+
+                if (Build.VERSION.SDK_INT >= 29) {
+                    resolver.update(
+                        pendingUri,
+                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                        null, null,
+                    )
                 }
+                pendingUri = null
+                displayName
+            } finally {
+                pendingUri?.let { resolver.delete(it, null, null) }
             }
+            result
         } finally {
-            connection.disconnect()
+            tempDir.deleteRecursively()
+            currentProcessId = null
         }
     }
 
-    private fun chooseVideo(
-        videos: List<YouTubeVideoTrack>,
-        height: Int,
-        mode: YouTubeCodecMode,
-    ): YouTubeVideoTrack {
-        val tracks = videos.filter { it.height == height }.ifEmpty {
-            val nearest = videos.minByOrNull { kotlin.math.abs(it.height - height) }?.height
-            videos.filter { it.height == nearest }
+    // ── format string (mirror of ytdlnis format selection) ────────────────
+
+    private fun buildFormatString(height: Int, mode: YouTubeCodecMode): String {
+        val baseVideo = "bv[height<=$height][ext=mp4]"
+        val baseAudio = "ba[ext=m4a]"
+
+        return when (mode) {
+            YouTubeCodecMode.COMPATIBLE ->
+                "$baseVideo[vcodec^=avc1]+$baseAudio/" +
+                "$baseVideo+$baseAudio/" +
+                "bv*+ba/b"
+            YouTubeCodecMode.SPACE_SAVING ->
+                "$baseVideo+$baseAudio/" +
+                "bv*+ba/b"
+            YouTubeCodecMode.AUTO ->
+                "$baseVideo+$baseAudio/" +
+                "bv*+ba/b"
         }
-        val order = when (mode) {
-            YouTubeCodecMode.SPACE_SAVING -> listOf(Codec.AV1, Codec.HEVC, Codec.AVC)
-            YouTubeCodecMode.COMPATIBLE -> listOf(Codec.AVC, Codec.HEVC, Codec.AV1)
-            YouTubeCodecMode.AUTO -> when {
-                hasHardwareDecoder("video/av01") -> listOf(Codec.AV1, Codec.HEVC, Codec.AVC)
-                hasHardwareDecoder("video/hevc") -> listOf(Codec.HEVC, Codec.AVC, Codec.AV1)
-                else -> listOf(Codec.AVC, Codec.HEVC, Codec.AV1)
-            }
-        }
-        return tracks.sortedWith(
-            compareBy<YouTubeVideoTrack> { order.indexOf(codecOf(it.codec)).let { rank -> if (rank < 0) Int.MAX_VALUE else rank } }
-                .thenByDescending { it.bitrateKbps }
-        ).firstOrNull() ?: throw IllegalStateException("所选清晰度没有可用视频轨道")
     }
 
-    private fun codecOf(codec: String): Codec = when {
-        codec.startsWith("av01", true) -> Codec.AV1
-        codec.startsWith("hev", true) || codec.startsWith("hvc", true) -> Codec.HEVC
-        else -> Codec.AVC
+    private fun buildSortString(mode: YouTubeCodecMode): String = when (mode) {
+        YouTubeCodecMode.SPACE_SAVING ->
+            "-vcodec:av01,+vcodec:hev1,+vcodec:hvc1,+vcodec:vp9"
+        YouTubeCodecMode.COMPATIBLE ->
+            "vcodec:avc1"
+        YouTubeCodecMode.AUTO -> ""
     }
 
-    private fun hasHardwareDecoder(mimeType: String): Boolean = runCatching {
-        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
-            !info.isEncoder && info.isHardwareAccelerated &&
-                info.supportedTypes.any { it.equals(mimeType, true) }
-        }
-    }.getOrDefault(false)
+    // ── misc ──────────────────────────────────────────────────────────────
+
+    private fun parseSpeed(line: String): String {
+        val regex = Regex("""at\s+([\d.]+[KMG]?i?B/s])""")
+        return regex.find(line)?.groupValues?.getOrNull(1)?.trim() ?: ""
+    }
 
     private fun uniqueDisplayName(baseName: String): String {
         val resolver = getApplication<Application>().contentResolver
         var candidate = baseName
         val stem = baseName.substringBeforeLast('.', baseName)
+        val ext = baseName.substringAfterLast('.', "mp4")
         var suffix = 1
         while (true) {
             val exists = resolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 arrayOf(MediaStore.Video.Media._ID),
-                "${MediaStore.Video.Media.DISPLAY_NAME}=? AND ${MediaStore.Video.Media.RELATIVE_PATH}=?",
-                arrayOf(candidate, YOUTUBE_RELATIVE_PATH),
+                "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf(candidate, "${Environment.DIRECTORY_DCIM}/RCGallery/YouTube"),
                 null,
             )?.use { it.moveToFirst() } == true
             if (!exists) return candidate
-            candidate = "$stem ($suffix).mp4"
+            candidate = "$stem ($suffix).$ext"
             suffix++
         }
     }
@@ -307,21 +303,11 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
     private fun sanitizeFileName(value: String): String = value
         .replace(Regex("[\\\\/:*?\"<>|]"), "_")
         .replace(Regex("\\s+"), " ")
-        .trim().take(180).ifBlank { "youtube_video.mp4" }
-
-    private fun qualityLabel(height: Int): String = when {
-        height >= 2160 -> "4K"
-        height >= 1440 -> "1440P"
-        else -> "${height}P"
-    }
-
-    private enum class Codec { AVC, HEVC, AV1 }
+        .trim()
+        .take(180)
+        .ifBlank { "youtube_video.mp4" }
 
     companion object {
-        private const val BUFFER_SIZE = 256 * 1024
-        private const val PROGRESS_INTERVAL_NS = 250_000_000L
-        private const val PARSE_TIMEOUT_MS = 45_000L
         private const val KEY_COOKIE_PATH = "cookie_path"
-        const val YOUTUBE_RELATIVE_PATH = "DCIM/RCGallery/YouTube/"
     }
 }

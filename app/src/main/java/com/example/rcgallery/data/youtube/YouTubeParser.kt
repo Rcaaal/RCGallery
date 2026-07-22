@@ -22,20 +22,28 @@ class YouTubeParser(
         val url = extractUrl(input)
         try {
             YoutubeDL.getInstance().init(appContext)
+            // 更新 yt-dlp 到最新版
+            kotlin.runCatching {
+                YoutubeDL.getInstance().updateYoutubeDL(appContext, YoutubeDL.UpdateChannel.STABLE)
+            }
+
             val info = try {
-                loadInfo(url)
+                loadInfo(url, null)
             } catch (error: Exception) {
                 if (!isLoginChallenge(error)) throw error
                 AppLogger.d("YouTubeImport", "default client challenged; retry android_vr")
                 loadInfo(url, "android_vr,web_embedded")
             }
+
             val videos = info.formats.orEmpty().mapNotNull(::toVideoTrack)
             val audios = info.formats.orEmpty().mapNotNull(::toAudioTrack)
             if (videos.isEmpty()) throw YouTubeParseException("没有找到可下载的 MP4 视频轨道")
             if (audios.isEmpty()) throw YouTubeParseException("没有找到可下载的 M4A 音频轨道")
+
             val qualities = videos.groupBy { it.height }.keys
                 .filter { it > 0 }.sortedDescending()
                 .map { YouTubeQuality(it, qualityLabel(it)) }
+
             YouTubeWorkInfo(
                 id = info.id.orEmpty().ifBlank { "youtube" },
                 title = info.title.orEmpty().ifBlank { info.fulltitle.orEmpty().ifBlank { "YouTube 视频" } },
@@ -64,11 +72,20 @@ class YouTubeParser(
         }
     }
 
-    private suspend fun loadInfo(url: String, playerClients: String? = null): VideoInfo {
+    /**
+     * 完全照搬库的 getInfo() 用法——库内部加 --dump-json 并调用 execute()。
+     * 加上 --ignore-errors 后，库的 ignoreErrors() 会检查：
+     *   hasOption("--dump-json") && !out.isEmpty() && hasOption("--ignore-errors")
+     * 三个条件全满足 → 即使 exit code > 0 也不抛异常。
+     */
+    private suspend fun loadInfo(url: String, playerClients: String?): VideoInfo {
         val request = YoutubeDLRequest(url).apply {
             addOption("--no-playlist")
             addOption("--skip-download")
             addOption("--no-warnings")
+            addOption("--ignore-errors")
+            addOption("--no-check-certificates")
+            addOption("--compat-options", "manifest-filesize-approx")
             addOption("--socket-timeout", 15)
             addOption("--retries", 1)
             addOption("--extractor-retries", 1)
@@ -102,7 +119,6 @@ class YouTubeParser(
             width = format.width, height = format.height, fps = format.fps,
             bitrateKbps = format.tbr,
             estimatedBytes = format.fileSize.takeIf { it > 0L } ?: format.fileSizeApproximate,
-            url = url, headers = format.httpHeaders.toStringMap(),
         )
     }
 
@@ -118,14 +134,8 @@ class YouTubeParser(
             formatId = format.formatId.orEmpty(), codec = audioCodec,
             bitrateKbps = format.abr.takeIf { it > 0 } ?: format.tbr,
             estimatedBytes = format.fileSize.takeIf { it > 0L } ?: format.fileSizeApproximate,
-            url = url, headers = format.httpHeaders.toStringMap(),
         )
     }
-
-    private fun Map<*, *>?.toStringMap(): Map<String, String> = this.orEmpty().mapNotNull { (key, value) ->
-        val name = key?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-        name to value?.toString().orEmpty()
-    }.toMap()
 
     private fun extractUrl(input: String): String {
         val match = URL_REGEX.find(input)?.value

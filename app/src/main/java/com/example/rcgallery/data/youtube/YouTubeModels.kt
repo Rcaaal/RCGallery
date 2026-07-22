@@ -16,8 +16,6 @@ data class YouTubeVideoTrack(
     val fps: Int,
     val bitrateKbps: Int,
     val estimatedBytes: Long,
-    val url: String,
-    val headers: Map<String, String>,
 )
 
 data class YouTubeAudioTrack(
@@ -25,8 +23,6 @@ data class YouTubeAudioTrack(
     val codec: String,
     val bitrateKbps: Int,
     val estimatedBytes: Long,
-    val url: String,
-    val headers: Map<String, String>,
 )
 
 data class YouTubeWorkInfo(
@@ -49,11 +45,10 @@ sealed interface YouTubeImportState {
     data class Ready(val work: YouTubeWorkInfo) : YouTubeImportState
     data class Downloading(
         val work: YouTubeWorkInfo,
-        val stage: String,
-        val downloadedBytes: Long,
-        val totalBytes: Long,
-        val bytesPerSecond: Long,
+        val progress: Float,
+        val speed: String,
     ) : YouTubeImportState
+    data class Merging(val work: YouTubeWorkInfo) : YouTubeImportState
     data class Success(val displayName: String) : YouTubeImportState
     data class Error(val message: String) : YouTubeImportState
 }
