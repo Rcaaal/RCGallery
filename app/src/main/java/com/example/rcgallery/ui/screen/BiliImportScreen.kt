@@ -69,16 +69,21 @@ fun BiliImportScreen(
     onDismiss: () -> Unit,
     onMediaSaved: () -> Unit,
     onOpenAlbum: () -> Unit,
+    initialInput: String? = null,
     viewModel: BiliImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val authState by viewModel.authState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var input by remember { mutableStateOf("") }
+    var input by remember(initialInput) { mutableStateOf(initialInput.orEmpty()) }
     var selectedPages by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var selectedQuality by remember { mutableIntStateOf(0) }
     var selectedCodecMode by remember { mutableStateOf(BiliCodecMode.AUTO) }
     var showAccountDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(initialInput) {
+        initialInput?.trim()?.takeIf { it.isNotEmpty() }?.let(viewModel::parse)
+    }
 
     fun close() {
         viewModel.reset()

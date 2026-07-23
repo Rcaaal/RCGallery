@@ -72,6 +72,8 @@ fun NetworkBrowserScreen(
     val scope = rememberCoroutineScope()
 
     var showConnectDialog by remember { mutableStateOf(false) }
+    var showMediaImport by remember { mutableStateOf(false) }
+    var pendingMediaImportRoute by remember { mutableStateOf<MediaImportRoute?>(null) }
     var showDouyinImport by remember { mutableStateOf(false) }
     var douyinAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
     var douyinAlbumRequest by remember { mutableIntStateOf(0) }
@@ -171,16 +173,38 @@ fun NetworkBrowserScreen(
         Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
     }
 
+    if (showMediaImport) {
+        MediaImportScreen(
+            onDismiss = { showMediaImport = false },
+            onRouteDetected = { route ->
+                pendingMediaImportRoute = route
+                showMediaImport = false
+                when (route.platform) {
+                    MediaImportPlatform.DOUYIN -> showDouyinImport = true
+                    MediaImportPlatform.BILIBILI -> showBiliImport = true
+                    MediaImportPlatform.YOUTUBE -> showYouTubeImport = true
+                }
+            },
+        )
+        return
+    }
+
     if (showYouTubeImport) {
         Box(Modifier.fillMaxSize()) {
             YouTubeImportScreen(
-                onDismiss = { showYouTubeImport = false },
+                onDismiss = {
+                    showYouTubeImport = false
+                    pendingMediaImportRoute = null
+                },
                 onMediaSaved = {
                     viewModel.loadAlbums()
                     // Refresh an already open dedicated album without opening it automatically.
                     youtubeAlbum?.bucketId?.let { viewModel.loadMedia(it) }
                 },
                 onOpenAlbum = { youtubeAlbumRequest++ },
+                initialInput = pendingMediaImportRoute
+                    ?.takeIf { it.platform == MediaImportPlatform.YOUTUBE }
+                    ?.input,
             )
             youtubeAlbum?.let { album ->
                 MediaGridScreen(
@@ -199,9 +223,15 @@ fun NetworkBrowserScreen(
     if (showBiliImport) {
         Box(Modifier.fillMaxSize()) {
             BiliImportScreen(
-                onDismiss = { showBiliImport = false },
+                onDismiss = {
+                    showBiliImport = false
+                    pendingMediaImportRoute = null
+                },
                 onMediaSaved = { viewModel.loadAlbums() },
                 onOpenAlbum = { biliAlbumRequest++ },
+                initialInput = pendingMediaImportRoute
+                    ?.takeIf { it.platform == MediaImportPlatform.BILIBILI }
+                    ?.input,
             )
             biliAlbum?.let { album ->
                 MediaGridScreen(
@@ -220,9 +250,15 @@ fun NetworkBrowserScreen(
     if (showDouyinImport) {
         Box(Modifier.fillMaxSize()) {
             DouyinImportScreen(
-                onDismiss = { showDouyinImport = false },
+                onDismiss = {
+                    showDouyinImport = false
+                    pendingMediaImportRoute = null
+                },
                 onMediaSaved = { viewModel.loadAlbums() },
                 onOpenAlbum = { douyinAlbumRequest++ },
+                initialInput = pendingMediaImportRoute
+                    ?.takeIf { it.platform == MediaImportPlatform.DOUYIN }
+                    ?.input,
             )
             douyinAlbum?.let { album ->
                 MediaGridScreen(
@@ -309,9 +345,7 @@ fun NetworkBrowserScreen(
                     is SmbBrowseState.DeviceList -> {
                         DeviceListContent(
                             devices = smbDevices,
-                            onDouyinClick = { showDouyinImport = true },
-                            onBiliClick = { showBiliImport = true },
-                            onYouTubeClick = { showYouTubeImport = true },
+                            onMediaImportClick = { showMediaImport = true },
                             onAddDevice = { showConnectDialog = true },
                             onDeviceClick = { viewModel.smbConnect(it.host) },
                             onRemoveDevice = { deviceId -> viewModel.smbRemoveDevice(deviceId) }
@@ -689,36 +723,18 @@ private fun formatTransferRate(bytesPerSecond: Long): String =
 @Composable
 private fun DeviceListContent(
     devices: List<SmbDevice>,
-    onDouyinClick: () -> Unit,
-    onBiliClick: () -> Unit,
-    onYouTubeClick: () -> Unit,
+    onMediaImportClick: () -> Unit,
     onAddDevice: () -> Unit,
     onDeviceClick: (SmbDevice) -> Unit,
     onRemoveDevice: (String) -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         ImportServiceCard(
-            iconRes = com.example.rcgallery.R.drawable.ic_bilibili_brand,
-            iconBackground = Color(0xFF00AEEC),
-            title = "哔哩哔哩导入",
-            subtitle = "分P · 清晰度 · 批量下载",
-            onClick = onBiliClick,
-        )
-        Spacer(Modifier.height(8.dp))
-        ImportServiceCard(
-            iconRes = com.example.rcgallery.R.drawable.ic_youtube_brand,
-            iconBackground = Color(0xFFFF0000),
-            title = "YouTube 导入",
-            subtitle = "公开视频 · Shorts · 清晰度选择",
-            onClick = onYouTubeClick,
-        )
-        Spacer(Modifier.height(8.dp))
-        ImportServiceCard(
-            iconRes = com.example.rcgallery.R.drawable.ic_douyin_brand,
-            iconBackground = Color(0xFF101010),
-            title = "抖音作品导入",
-            subtitle = "视频 · 图文 · 批量保存",
-            onClick = onDouyinClick,
+            iconRes = com.example.rcgallery.R.drawable.ic_media_import,
+            iconBackground = Color(0xFF356A9A),
+            title = "媒体导入",
+            subtitle = "抖音 · 哔哩哔哩 · YouTube 自动识别",
+            onClick = onMediaImportClick,
         )
         Spacer(Modifier.height(12.dp))
         if (devices.isEmpty()) {

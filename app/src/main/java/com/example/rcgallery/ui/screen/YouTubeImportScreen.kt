@@ -63,16 +63,21 @@ fun YouTubeImportScreen(
     onDismiss: () -> Unit,
     onMediaSaved: () -> Unit,
     onOpenAlbum: () -> Unit,
+    initialInput: String? = null,
     viewModel: YouTubeImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val hasCookie by viewModel.hasCookie.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var input by remember { mutableStateOf("") }
+    var input by remember(initialInput) { mutableStateOf(initialInput.orEmpty()) }
     var selectedHeight by remember { mutableIntStateOf(0) }
     var codecMode by remember { mutableStateOf(YouTubeCodecMode.AUTO) }
     var showHistory by remember { mutableStateOf(false) }
+
+    androidx.compose.runtime.LaunchedEffect(initialInput) {
+        initialInput?.trim()?.takeIf { it.isNotEmpty() }?.let(viewModel::parse)
+    }
 
     val cookieLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()

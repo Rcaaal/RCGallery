@@ -32,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,11 +58,16 @@ fun DouyinImportScreen(
     onDismiss: () -> Unit,
     onMediaSaved: () -> Unit,
     onOpenAlbum: () -> Unit,
+    initialInput: String? = null,
     viewModel: DouyinImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var input by remember { mutableStateOf("") }
+    var input by remember(initialInput) { mutableStateOf(initialInput.orEmpty()) }
+
+    LaunchedEffect(initialInput) {
+        initialInput?.trim()?.takeIf { it.isNotEmpty() }?.let(viewModel::parse)
+    }
 
     fun close() {
         viewModel.reset()
