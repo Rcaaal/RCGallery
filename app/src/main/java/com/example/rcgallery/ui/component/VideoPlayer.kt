@@ -126,7 +126,7 @@ fun VideoPlayer(
             //    防止 codec 在无 surface 时初始化导致死机
             playWhenReady = false
             // repeatMode 由 LaunchedEffect(repeatMode) 动态同步，不在 remember 中固定
-            volume = 1f  // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定满音量
+            volume = 0f
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     AppLogger.e("VideoPlayer", "playback error uri=${uri.lastPathSegment} error=$error")
@@ -234,6 +234,12 @@ fun VideoPlayer(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // The preview owns volume. New players receive the latest value immediately,
+    // while inactive pager pages remain silent.
+    LaunchedEffect(isActive, volumeLevel) {
+        exoPlayer.volume = if (isActive) volumeLevel.coerceIn(0f, 1f) else 0f
+    }
+
     LaunchedEffect(isActive) {
         if (isActive) {
             hasError = false; exoPlayer.prepare(); exoPlayer.playWhenReady = true
@@ -255,7 +261,6 @@ fun VideoPlayer(
         AppLogger.d("VideoPlayer", "repeatMode=$repeatMode")
     }
 
-    // 音量完全由系统 STREAM_MUSIC 控制，ExoPlayer 固定 volume=1f，无需 LaunchedEffect(volumeLevel)
 
     // PiP 进入前强制隐藏 PlayerView 控制器（防止控制栏闪烁 + SurfaceView 布局计算干扰 PiP 画面）
     LaunchedEffect(hideUiOverlays) {

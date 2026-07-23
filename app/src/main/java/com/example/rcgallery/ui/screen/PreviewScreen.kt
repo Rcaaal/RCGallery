@@ -51,9 +51,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.Player
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.db.TagEntity
@@ -82,7 +79,8 @@ fun PreviewScreen(
     onBackClick: () -> Unit = {},
     onGoHome: () -> Unit = {},     // 直接回到 AlbumGrid 主页
     items: List<com.example.rcgallery.model.MediaItem> = emptyList(),  // 由 MediaGridScreen 传入快照，不从 ViewModel 收集（防异步 loadMedia 替换导致 index 错位）
-    albumId: String = ""  // 来源相册 ID，MOVE 后用于刷新源相册媒体列表
+    albumId: String = "",  // 来源相册 ID，MOVE 后用于刷新源相册媒体列表
+    startMuted: Boolean = true
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
@@ -266,47 +264,10 @@ fun PreviewScreen(
 
     val currentItem = mediaItems.getOrNull(pagerState.currentPage)
 
-    // Images never change system volume. Videos mute only while this preview is
-    // foreground; ordinary backgrounding restores volume, while PiP keeps it.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val lifecycleVideoActive by rememberUpdatedState(currentItem?.isVideo == true)
-    val lifecyclePipProtected by rememberUpdatedState(
-        PipState.isInPip || pipOverlayHidden || pipTriggered
-    )
-
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> {
-                    if (lifecycleVideoActive && !lifecyclePipProtected) {
-                        playbackSettingsVM.muteSystemOnEnter()
-                    }
-                }
-                Lifecycle.Event.ON_STOP -> {
-                    if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
-                }
-                Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            // PiP may rebuild composition while playback remains active.
-            if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
-        }
+    LaunchedEffect(startMuted) {
+        if (startMuted) playbackSettingsVM.startMutedPreview()
     }
 
-    // ── 翻页音量同步：视频→静音，图片→恢复
-    // 以 pagerState.currentPage 为 key，每次翻页重新评估音量策略
-    LaunchedEffect(pagerState.currentPage) {
-        val item = mediaItems.getOrNull(pagerState.currentPage)
-        if (item?.isVideo == true) {
-            playbackSettingsVM.muteSystemOnEnter()
-        } else {
-            playbackSettingsVM.restoreSystemVolume()
-        }
-    }
 
     // ── TAG 相关 ──
     val allTags by viewModel.allTags.collectAsStateWithLifecycle()
@@ -553,7 +514,6 @@ fun PreviewScreen(
                         title = {},
                         navigationIcon = {
                             TextButton(onClick = {
-                                playbackSettingsVM.restoreSystemVolume()
                                 onBackClick()
                             }) { Text("← 返回", color = Color.White) }
                         },

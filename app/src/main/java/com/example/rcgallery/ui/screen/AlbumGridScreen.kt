@@ -366,7 +366,7 @@ fun AlbumGridScreen(
     LaunchedEffect(isDateView) {
         viewModel.setAllMediaViewActive(isDateView)
         if (isDateView) {
-            viewModel.loadAllMedia()
+            viewModel.loadAllMediaForDateView()
         } else if (selectedDatePhotoIndex >= 0) {
             // 退出日期视图时若有 Preview 开着，恢复底部导航栏
             selectedDatePhotoIndex = -1

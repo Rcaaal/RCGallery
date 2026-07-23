@@ -949,6 +949,56 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                         accumulated.values.sortedByDescending { it.dateAdded }
                     }
 
+                    // A MediaStore refresh normally queries the newest page first. Merge that
+                    // page into an existing sorted snapshot so newly added media is visible
+                    // before the slower full query finishes. The final query below remains the
+                    // source of truth for removals, trash state and hidden-directory changes.
+                    fun mergeNewestPageIntoCurrent(
+                        current: List<MediaItem>,
+                        newestPage: List<MediaItem>,
+                    ): List<MediaItem>? {
+                        if (newestPage.isEmpty()) return null
+
+                        val currentByPath = HashMap<String, MediaItem>(current.size)
+                        current.forEach { currentByPath[normalizedPath(it.filePath)] = it }
+                        val newestByPath = HashMap<String, MediaItem>(newestPage.size)
+                        newestPage.forEach { newestByPath[normalizedPath(it.filePath)] = it }
+
+                        val hasChange = newestByPath.any { (path, item) ->
+                            currentByPath[path] != item
+                        }
+                        if (!hasChange) return null
+
+                        val merged = ArrayList<MediaItem>(current.size + newestPage.size)
+                        var newestIndex = 0
+                        var currentIndex = 0
+                        while (newestIndex < newestPage.size || currentIndex < current.size) {
+                            while (currentIndex < current.size &&
+                                normalizedPath(current[currentIndex].filePath) in newestByPath
+                            ) {
+                                currentIndex++
+                            }
+
+                            val newest = newestPage.getOrNull(newestIndex)
+                            val existing = current.getOrNull(currentIndex)
+                            when {
+                                newest == null -> {
+                                    merged += existing!!
+                                    currentIndex++
+                                }
+                                existing == null || newest.dateAdded >= existing.dateAdded -> {
+                                    merged += newest
+                                    newestIndex++
+                                }
+                                else -> {
+                                    merged += existing
+                                    currentIndex++
+                                }
+                            }
+                        }
+                        return merged
+                    }
+
                     val firstPage = withContext(Dispatchers.IO) {
                         repository.loadAllMediaPage(pageSize = 500, offset = 0)
                             .getOrDefault(emptyList())
@@ -968,7 +1018,20 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
                             "oldest=${oldest?.fileName}@${oldest?.dateAdded} " +
                             "mergeMs=${(System.nanoTime() - firstMergeStartedAt) / 1_000_000}"
                     )
-                    if (publishProgressively) _allMediaItems.value = firstSnapshot
+                    if (publishProgressively) {
+                        _allMediaItems.value = firstSnapshot
+                    } else {
+                        val incrementalSnapshot = withContext(Dispatchers.Default) {
+                            mergeNewestPageIntoCurrent(_allMediaItems.value, firstSnapshot)
+                        }
+                        if (incrementalSnapshot != null && generation == allMediaLoadGeneration.get()) {
+                            _allMediaItems.value = incrementalSnapshot
+                            AppLogger.d(
+                                "DateLoad",
+                                "incremental publish newest=${firstSnapshot.size} total=${incrementalSnapshot.size}"
+                            )
+                        }
+                    }
                     _isAllMediaInitialLoading.value = false
                     _isAllMediaLoadingMore.value = true
 
@@ -1043,6 +1106,37 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
             _isAllMediaInitialLoading.value = false
             _isAllMediaLoadingMore.value = false
         }
+    }
+
+    /**
+     * Called after an importer writes new local media. Album metadata is always refreshed,
+     * while the expensive date-view query only runs when that view is currently visible.
+     */
+    fun refreshLibraryAfterMediaImport(targetDirectory: String? = null) {
+        if (targetDirectory.isNullOrBlank() || !isSystemHiddenAlbum(targetDirectory)) {
+            loadAlbums()
+            refreshAllMediaIfActive()
+            return
+        }
+
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val directory = File(targetDirectory).canonicalFile
+                if (directory.isDirectory) {
+                    // Importers write through MediaStore directly. Re-scan the HID marker so
+                    // external galleries re-apply .nomedia after the new row is published.
+                    requestDirectoryRescan(directory, includeMarker = true)
+                    AppLogger.d("SystemTag", "re-scanned HID import directory=${directory.path}")
+                }
+            }
+            loadAlbums()
+            refreshAllMediaIfActive()
+        }
+    }
+
+    /** Starts the existing progressive date query when the date view becomes visible. */
+    fun loadAllMediaForDateView() {
+        loadAllMedia()
     }
 
     private fun refreshAllMediaIfActive() {

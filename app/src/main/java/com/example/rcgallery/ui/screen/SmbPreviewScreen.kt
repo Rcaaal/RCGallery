@@ -50,9 +50,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.rcgallery.PipState
 import com.example.rcgallery.data.smb.SmbDataSource
 import com.example.rcgallery.data.smb.SmbFileInfo
@@ -93,6 +90,7 @@ fun SmbPreviewScreen(
     initialIndex: Int = 0,
     items: List<SmbFileInfo> = emptyList(),
     onDismiss: () -> Unit = {},
+    startMuted: Boolean = true,
     /** 文件改名后通知父级同步刷新数据（oldPath, newPath, newName）。 */
     onFileRenamed: (oldPath: String, newPath: String, newName: String) -> Unit = { _, _, _ -> }
 ) {
@@ -136,45 +134,11 @@ fun SmbPreviewScreen(
     LaunchedEffect(Unit) { PipState.isSmbPreviewActive = true }
     DisposableEffect(Unit) { onDispose { PipState.isSmbPreviewActive = false } }
 
-    val activeFile = mutableItems.getOrNull(pagerState.currentPage)
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val lifecycleVideoActive by rememberUpdatedState(activeFile?.isVideo == true)
-    val lifecyclePipProtected by rememberUpdatedState(
-        PipState.isInPip || pipOverlayHidden || pipTriggered
-    )
-
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> {
-                    if (lifecycleVideoActive && !lifecyclePipProtected) {
-                        playbackSettingsVM.muteSystemOnEnter()
-                    }
-                }
-                Lifecycle.Event.ON_STOP -> {
-                    if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
-                }
-                Lifecycle.Event.ON_DESTROY -> playbackSettingsVM.restoreSystemVolume()
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            if (!lifecyclePipProtected) playbackSettingsVM.restoreSystemVolume()
-        }
+    LaunchedEffect(startMuted) {
+        if (startMuted) playbackSettingsVM.startMutedPreview()
     }
 
     // ── 翻页音量同步：视频→静音，图片→恢复
-    LaunchedEffect(pagerState.currentPage) {
-        val item = mutableItems.getOrNull(pagerState.currentPage)
-        if (item?.isVideo == true) {
-            playbackSettingsVM.muteSystemOnEnter()
-        } else {
-            playbackSettingsVM.restoreSystemVolume()
-        }
-    }
-
     if (pipTriggered) {
         LaunchedEffect(Unit) {
             pipOverlayHidden = true
@@ -257,7 +221,6 @@ fun SmbPreviewScreen(
         if (!pipOverlayHidden) {
             TextButton(
                 onClick = {
-                    playbackSettingsVM.restoreSystemVolume()
                     onDismiss()
                 },
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp)

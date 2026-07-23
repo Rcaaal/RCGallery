@@ -64,6 +64,7 @@ import com.example.rcgallery.ui.component.TagManageDialog
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.util.AppLogger
 import com.example.rcgallery.viewmodel.GalleryViewModel
+import com.example.rcgallery.viewmodel.PlaybackSettingsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -88,6 +89,7 @@ fun MediaGridScreen(
 ) {
     val activity = LocalContext.current as ComponentActivity
     val viewModel: GalleryViewModel = viewModel(activity)
+    val playbackSettingsVM: PlaybackSettingsViewModel = viewModel(activity)
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
     val starredMediaUris by viewModel.starredMediaUris.collectAsStateWithLifecycle()
     val mediaTags by viewModel.mediaTags.collectAsStateWithLifecycle()
@@ -151,6 +153,8 @@ fun MediaGridScreen(
     // ── Preview overlay 状态（代替 navigation push，防止 RecyclerView 销毁）──
     var selectedPhotoIndex by remember { mutableIntStateOf(-1) }
     var selectedPhotoItem by remember { mutableStateOf<com.example.rcgallery.model.MediaItem?>(null) }
+    var previewVolumeInitialized by remember(albumId) { mutableStateOf(false) }
+    var selectedPreviewStartsMuted by remember { mutableStateOf(false) }
     BackHandler(
         enabled = handleSystemBack && selectedPhotoIndex < 0 && !isMediaMultiSelect
     ) { onBackClick() }
@@ -648,6 +652,9 @@ fun MediaGridScreen(
                                         }
                                         AppLogger.d("MediaGrid", "click uri=${item.uri.lastPathSegment} index=$index items=${items.size}")
                                         if (index >= 0) {
+                                            val shouldMutePreview = !previewVolumeInitialized
+                                            previewVolumeInitialized = true
+                                            selectedPreviewStartsMuted = shouldMutePreview
                                             selectedPhotoIndex = index
                                         }
                                     },
@@ -984,7 +991,8 @@ fun MediaGridScreen(
                     },
                     onGoHome = { selectedPhotoIndex = -1; onGoHome() },
                     items = tagFilteredItems,
-                    albumId = albumId
+                    albumId = albumId,
+                    startMuted = selectedPreviewStartsMuted
                 )
             }
 

@@ -85,6 +85,8 @@ fun NetworkBrowserScreen(
     var youtubeAlbumRequest by remember { mutableIntStateOf(0) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
+    var lastPreviewFolderPath by remember { mutableStateOf<String?>(null) }
+    var previewStartsMuted by remember { mutableStateOf(false) }
 
     // ── SMB 多选状态（与本地 MediaGridScreen 模式一致）──
     var isSmbMultiSelect by remember { mutableStateOf(false) }
@@ -197,7 +199,12 @@ fun NetworkBrowserScreen(
                     pendingMediaImportRoute = null
                 },
                 onMediaSaved = {
-                    viewModel.loadAlbums()
+                    viewModel.refreshLibraryAfterMediaImport(
+                        File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                            "RCGallery/YouTube",
+                        ).absolutePath,
+                    )
                     // Refresh an already open dedicated album without opening it automatically.
                     youtubeAlbum?.bucketId?.let { viewModel.loadMedia(it) }
                 },
@@ -227,7 +234,14 @@ fun NetworkBrowserScreen(
                     showBiliImport = false
                     pendingMediaImportRoute = null
                 },
-                onMediaSaved = { viewModel.loadAlbums() },
+                onMediaSaved = {
+                    viewModel.refreshLibraryAfterMediaImport(
+                        File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                            "RCGallery/Bilibili",
+                        ).absolutePath,
+                    )
+                },
                 onOpenAlbum = { biliAlbumRequest++ },
                 initialInput = pendingMediaImportRoute
                     ?.takeIf { it.platform == MediaImportPlatform.BILIBILI }
@@ -254,7 +268,14 @@ fun NetworkBrowserScreen(
                     showDouyinImport = false
                     pendingMediaImportRoute = null
                 },
-                onMediaSaved = { viewModel.loadAlbums() },
+                onMediaSaved = {
+                    viewModel.refreshLibraryAfterMediaImport(
+                        File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                            "RCGallery/Douyin",
+                        ).absolutePath,
+                    )
+                },
                 onOpenAlbum = { douyinAlbumRequest++ },
                 initialInput = pendingMediaImportRoute
                     ?.takeIf { it.platform == MediaImportPlatform.DOUYIN }
@@ -401,6 +422,8 @@ fun NetworkBrowserScreen(
                                         toggleSmbSelection(file)
                                     } else if (file != null) {
                                         AppLogger.d("SMB", "preview file [$idx]: ${file.name}")
+                                        previewStartsMuted = lastPreviewFolderPath != s.currentPath
+                                        lastPreviewFolderPath = s.currentPath
                                         previewState = idx to files
                                     }
                                 },
@@ -490,6 +513,7 @@ fun NetworkBrowserScreen(
                 SmbPreviewScreen(
                     initialIndex = idx,
                     items = files,
+                    startMuted = previewStartsMuted,
                     onDismiss = { previewState = null },
                     onFileRenamed = { oldPath, newPath, newName ->
                         viewModel.smbApplyFileRename(oldPath, newPath, newName)
