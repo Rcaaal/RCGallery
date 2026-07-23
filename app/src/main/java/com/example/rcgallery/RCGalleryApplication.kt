@@ -6,8 +6,14 @@ import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.decode.VideoFrameDecoder
+import com.example.rcgallery.data.douyin.DouyinCookieStore
 
 class RCGalleryApplication : Application(), ImageLoaderFactory {
+
+    override fun onCreate() {
+        super.onCreate()
+        DouyinCookieStore.initialize(this)
+    }
 
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)

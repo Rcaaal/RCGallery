@@ -224,7 +224,7 @@ fun DouyinImportScreen(
 private fun DouyinResultCard(work: DouyinWorkInfo) {
     Card(shape = MaterialTheme.shapes.large) {
         Column(Modifier.fillMaxWidth()) {
-            val images = work.media.filterIsInstance<DouyinMediaResource.Image>()
+            val images = work.media.filter { it is DouyinMediaResource.Image || it is DouyinMediaResource.AnimatedImage }
             if (images.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier.fillMaxWidth().height(210.dp),
@@ -250,12 +250,14 @@ private fun DouyinResultCard(work: DouyinWorkInfo) {
             Column(Modifier.padding(16.dp)) {
                 Text(work.title, fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 val imageCount = work.media.count { it is DouyinMediaResource.Image }
+                val animatedCount = work.media.count { it is DouyinMediaResource.AnimatedImage }
                 val videoCount = work.media.count { it is DouyinMediaResource.Video }
-                if (work.media.size > 1 || imageCount > 0) {
+                if (work.media.size > 1 || imageCount > 0 || animatedCount > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         buildList {
                             if (imageCount > 0) add("$imageCount 张图片")
+                            if (animatedCount > 0) add("$animatedCount 张动图")
                             if (videoCount > 0) add("$videoCount 个视频")
                         }.joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall

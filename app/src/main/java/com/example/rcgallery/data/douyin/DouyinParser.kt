@@ -9,43 +9,175 @@ import java.io.BufferedInputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.security.SecureRandom
+import java.util.Base64
 import kotlin.coroutines.coroutineContext
 
 class DouyinParser {
-    private data class ParsedImage(val index: Int, val urls: List<String>)
 
-    suspend fun parse(sharedText: String): DouyinWorkInfo = withContext(Dispatchers.IO) {
+    suspend fun parse(sharedText: String, cookies: String? = null): DouyinWorkInfo = withContext(Dispatchers.IO) {
         val inputUrl = extractUrl(sharedText)
         val userAgent = MOBILE_USER_AGENT
         val finalUrl = resolveRedirects(inputUrl, userAgent)
         val workId = extractWorkId(finalUrl)
-        val html = fetchText("https://www.iesdouyin.com/share/video/$workId", userAgent)
+        val pathType = extractPathType(finalUrl)
+        val fetchPath = if (pathType == "slides") "note" else pathType
+        val html = fetchText("https://www.iesdouyin.com/share/$fetchPath/$workId", userAgent)
         val item = findItem(JSONObject(extractRouterData(html)))
         val author = item.optJSONObject("author")?.optString("nickname")?.takeIf { it.isNotBlank() }
         val title = sanitizeTitle(item.optString("desc").ifBlank { "douyin_$workId" })
 
-        val images = extractImages(item)
-        val video = item.optJSONObject("video")
-        val topVideoUrls = videoUrls(video)
-        val nestedVideos = extractNestedVideos(item)
-        val media = buildList {
-            images.forEach { add(DouyinMediaResource.Image(it.index, it.urls)) }
-            if (topVideoUrls.isNotEmpty()) add(DouyinMediaResource.Video(size + 1, topVideoUrls))
-            nestedVideos.forEach { urls -> add(DouyinMediaResource.Video(size + 1, urls)) }
+        val imageResources = extractImageResources(item)
+        val topVideoUrls = videoUrls(item.optJSONObject("video"))
+        val media = mutableListOf<DouyinMediaResource>()
+        media.addAll(imageResources)
+        if (imageResources.isEmpty() && topVideoUrls.isNotEmpty()) {
+            media.add(DouyinMediaResource.Video(media.size + 1, topVideoUrls))
         }
+
+        // Try to enhance with animated image data from the authenticated API
+        if (cookies != null && imageResources.isNotEmpty()) {
+            try {
+                val animatedMap = enhanceWithApi(workId, userAgent, cookies)
+                if (animatedMap != null) {
+                    // Merge animated URLs into the existing media resources
+                    for ((imageIndex, animatedUrls) in animatedMap) {
+                        // Find the corresponding resource by its index (1-based)
+                        val resourceIdx = media.indexOfFirst {
+                            it is DouyinMediaResource.Image && it.index == imageIndex + 1
+                        }
+                        if (resourceIdx >= 0 && resourceIdx < media.size) {
+                            val old = media[resourceIdx] as? DouyinMediaResource.Image ?: continue
+                            media[resourceIdx] = DouyinMediaResource.AnimatedImage(
+                                index = old.index,
+                                urls = old.urls,
+                                animatedUrls = animatedUrls
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // API enhancement is best-effort; SSR data is sufficient
+            }
+        }
+
         if (media.isEmpty()) throw DouyinParseException("作品中没有可用的图片或视频")
         DouyinWorkInfo(
             workId = workId,
             title = title,
             author = author,
-            coverUrl = images.firstOrNull()?.urls?.firstOrNull()
-                ?: firstUrl(video?.optJSONObject("cover")?.optJSONArray("url_list")),
+            coverUrl = imageResources.firstOrNull()?.urls?.firstOrNull()
+                ?: firstUrl(item.optJSONObject("video")?.optJSONObject("cover")?.optJSONArray("url_list")),
             userAgent = userAgent,
             media = media,
         )
     }
 
-    private fun extractImages(item: JSONObject): List<ParsedImage> {
+    /**
+     * Call the authenticated Douyin API to get rich data including per-image animated video URLs.
+     * Requires valid cookies (especially s_v_web_id) and X-Bogus signature.
+     *
+     * @return Map of image index (0-based) -> animated video URLs, or null if API fails or no animated data.
+     */
+    internal suspend fun enhanceWithApi(
+        workId: String,
+        userAgent: String,
+        cookies: String,
+    ): Map<Int, List<String>>? {
+        val params = buildApiParams(workId)
+        val xbogus = XBogus(userAgent)
+        val (signedParams, _, _) = xbogus.getXBogus(params)
+
+        val apiUrl = "$POST_DETAIL?$signedParams"
+        val json = fetchApiJson(apiUrl, userAgent, cookies) ?: return null
+
+        val detail = json.optJSONObject("aweme_detail") ?: return null
+        val images = detail.optJSONArray("images") ?: return null
+
+        val result = mutableMapOf<Int, List<String>>()
+        for (i in 0 until images.length()) {
+            val image = images.optJSONObject(i) ?: continue
+            val animatedUrls = listOf("video", "live_photo", "clip_video")
+                .flatMap { key -> videoUrls(image.optJSONObject(key)) }
+                .distinct()
+            if (animatedUrls.isNotEmpty()) {
+                result[i] = animatedUrls
+            }
+        }
+        return result.ifEmpty { null }
+    }
+
+    /**
+     * Build API parameters similar to f2's PostDetail model defaults.
+     */
+    private fun buildApiParams(awemeId: String): String {
+        val msToken = generateMsToken()
+        return buildString {
+            append("device_platform=webapp")
+            append("&aid=6383")
+            append("&channel=channel_pc_web")
+            append("&pc_client_type=1")
+            append("&publish_video_strategy_type=2")
+            append("&pc_libra_divert=Windows")
+            append("&version_code=290100")
+            append("&version_name=29.1.0")
+            append("&cookie_enabled=true")
+            append("&screen_width=1920")
+            append("&screen_height=1080")
+            append("&browser_language=zh-CN")
+            append("&browser_platform=Win32")
+            append("&browser_name=Edge")
+            append("&browser_version=130.0.0.0")
+            append("&browser_online=true")
+            append("&engine_name=Blink")
+            append("&engine_version=130.0.0.0")
+            append("&os_name=Windows")
+            append("&os_version=10")
+            append("&cpu_core_num=12")
+            append("&device_memory=8")
+            append("&platform=PC")
+            append("&downlink=10")
+            append("&effective_type=4g")
+            append("&round_trip_time=100")
+            append("&msToken=$msToken")
+            append("&aweme_id=$awemeId")
+        }
+    }
+
+    /** Generate a fake msToken (base64-encoded random string). */
+    private fun generateMsToken(): String {
+        val random = SecureRandom()
+        val bytes = ByteArray(60)
+        random.nextBytes(bytes)
+        return Base64.getEncoder().withoutPadding().encodeToString(bytes).replace('+', '-').replace('/', '_')
+    }
+
+    /**
+     * Fetch JSON from the authenticated API endpoint.
+     * Returns null on any failure (server returns empty body, HTTP error, etc.)
+     */
+    private suspend fun fetchApiJson(url: String, userAgent: String, cookies: String): JSONObject? {
+        return try {
+            val connection = openConnection(url, userAgent, followRedirects = true).apply {
+                setRequestProperty("Cookie", cookies)
+                setRequestProperty("Accept", "application/json, text/plain, */*")
+                readTimeout = 15_000
+            }
+            try {
+                val code = connection.responseCode
+                if (code !in 200..299) return null
+                val body = BufferedInputStream(connection.inputStream).bufferedReader(Charsets.UTF_8).readText()
+                if (body.isBlank()) return null
+                JSONObject(body)
+            } finally {
+                connection.disconnect()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractImageResources(item: JSONObject): List<DouyinMediaResource> {
         val qualityImages = highestQualityImages(item)
         val candidates = buildList {
             item.optJSONArray("images")?.let(::add)
@@ -55,14 +187,20 @@ class DouyinParser {
             }
         }
         val seen = linkedSetOf<String>()
-        val result = mutableListOf<ParsedImage>()
+        val result = mutableListOf<DouyinMediaResource>()
         candidates.forEach { array ->
             for (index in 0 until array.length()) {
                 val image = array.optJSONObject(index) ?: continue
                 val qualityImage = image.optString("uri").takeIf { it.isNotBlank() }?.let(qualityImages::get)
                 val urls = imageUrls(image, qualityImage).filter { seen.add(it) }
-                if (urls.isNotEmpty()) {
-                    result += ParsedImage(index = result.size + 1, urls = urls)
+                if (urls.isEmpty()) continue
+                val animatedUrls = listOf("video", "live_photo", "clip_video")
+                    .flatMap { key -> videoUrls(image.optJSONObject(key)) }
+                    .distinct()
+                if (animatedUrls.isNotEmpty()) {
+                    result += DouyinMediaResource.AnimatedImage(result.size + 1, urls, animatedUrls)
+                } else {
+                    result += DouyinMediaResource.Image(result.size + 1, urls)
                 }
             }
         }
@@ -92,18 +230,6 @@ class DouyinParser {
                 image.optString("uri").takeIf { it.isNotBlank() }?.let { put(it, image) }
             }
         }
-    }
-
-    private fun extractNestedVideos(item: JSONObject): List<List<String>> {
-        val result = mutableListOf<List<String>>()
-        val images = item.optJSONArray("images") ?: return result
-        for (index in 0 until images.length()) {
-            val image = images.optJSONObject(index) ?: continue
-            listOf("video", "live_photo", "clip_video").forEach { key ->
-                videoUrls(image.optJSONObject(key)).takeIf { it.isNotEmpty() }?.let(result::add)
-            }
-        }
-        return result.distinctBy { it.firstOrNull() }
     }
 
     private fun videoUrls(video: JSONObject?): List<String> {
@@ -226,6 +352,15 @@ class DouyinParser {
             ?: throw DouyinParseException("无法从链接中识别作品 ID")
     }
 
+    /**
+     * Extract the path type (video/note/slides) from the resolved URL.
+     * Used to construct the correct fetch URL for the SSR page.
+     */
+    private fun extractPathType(url: String): String {
+        val path = URI(url).path.orEmpty()
+        return PATH_TYPE_PATTERN.find(path)?.groupValues?.get(1)?.lowercase() ?: "video"
+    }
+
     private suspend fun fetchText(url: String, userAgent: String): String {
         val connection = openConnection(url, userAgent, followRedirects = true)
         return try {
@@ -318,8 +453,10 @@ class DouyinParser {
         private const val MAX_REDIRECTS = 5
         private const val MAX_HTML_BYTES = 5 * 1024 * 1024
         private const val ROUTER_MARKER = "window._ROUTER_DATA"
+        private const val POST_DETAIL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
         private val URL_PATTERN = Regex("https?://[^\\s]+")
-        private val WORK_ID_PATTERN = Regex("/(?:video|note)/(\\d+)")
+        private val WORK_ID_PATTERN = Regex("/(?:video|note|slides)/(\\d+)")
+        private val PATH_TYPE_PATTERN = Regex("/(?:share/)?(video|note|slides)/")
         private val AUDIO_EXTENSIONS = listOf(".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac")
         private const val MOBILE_USER_AGENT =
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) " +

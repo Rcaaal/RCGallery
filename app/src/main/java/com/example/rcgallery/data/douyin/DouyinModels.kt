@@ -18,6 +18,12 @@ sealed interface DouyinMediaResource {
         override val urls: List<String>,
     ) : DouyinMediaResource
 
+    data class AnimatedImage(
+        override val index: Int,
+        override val urls: List<String>,
+        val animatedUrls: List<String>,
+    ) : DouyinMediaResource
+
     data class Video(
         override val index: Int,
         override val urls: List<String>,

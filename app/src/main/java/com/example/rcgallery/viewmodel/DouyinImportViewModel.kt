@@ -7,6 +7,7 @@ import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.douyin.DouyinImportState
+import com.example.rcgallery.data.douyin.DouyinMediaResource
 import com.example.rcgallery.data.douyin.DouyinParseException
 import com.example.rcgallery.data.douyin.DouyinParser
 import com.example.rcgallery.data.douyin.DouyinWorkInfo
@@ -24,9 +25,11 @@ import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.coroutineContext
+import com.example.rcgallery.data.douyin.DouyinCookieStore
 
 class DouyinImportViewModel(application: Application) : AndroidViewModel(application) {
     private val parser = DouyinParser()
+    private val cookieStore = DouyinCookieStore()
     private val _state = MutableStateFlow<DouyinImportState>(DouyinImportState.Idle)
     val state: StateFlow<DouyinImportState> = _state.asStateFlow()
     private var operationJob: Job? = null
@@ -40,7 +43,13 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         operationJob = viewModelScope.launch {
             _state.value = DouyinImportState.Parsing
             try {
-                _state.value = DouyinImportState.Ready(parser.parse(text))
+                val work = withContext(Dispatchers.IO) { parser.parse(text) }
+                _state.value = DouyinImportState.Ready(work)
+
+                // If the work has images, try API enhancement for animated image data
+                if (work.media.any { it is DouyinMediaResource.Image }) {
+                    tryEnhanceWithApi(work)
+                }
             } catch (_: CancellationException) {
                 return@launch
             } catch (error: DouyinParseException) {
@@ -50,6 +59,42 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                     error.message?.takeIf { it.isNotBlank() } ?: "网络请求失败"
                 )
             }
+        }
+    }
+
+    /**
+     * Attempt to enhance a parsed work with animated image data from the API.
+     * Starts with cached cookies; if none, tries WebView extraction.
+     */
+    private suspend fun tryEnhanceWithApi(work: DouyinWorkInfo) {
+        val cookies = cookieStore.getCachedCookies()
+            ?: runCatching {
+                withContext(Dispatchers.Main) { cookieStore.extractCookiesSuspend() }
+            }.getOrNull()
+
+        if (cookies == null) return
+
+        try {
+            val animatedMap = withContext(Dispatchers.IO) {
+                parser.enhanceWithApi(work.workId, work.userAgent, cookies)
+            } ?: return
+
+            val currentState = _state.value
+            if (currentState !is DouyinImportState.Ready || currentState.work.workId != work.workId) return
+
+            val enhancedMedia = currentState.work.media.map { media ->
+                if (media is DouyinMediaResource.Image) {
+                    val matches = animatedMap[media.index - 1]
+                    if (matches != null) {
+                        DouyinMediaResource.AnimatedImage(media.index, media.urls, matches)
+                    } else media
+                } else media
+            }
+            _state.value = DouyinImportState.Ready(
+                currentState.work.copy(media = enhancedMedia)
+            )
+        } catch (_: Exception) {
+            // API enhancement is best-effort; SSR data is sufficient
         }
     }
 
@@ -110,18 +155,24 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     )
 
     private fun resourcesFor(work: DouyinWorkInfo): List<DownloadResource> =
-        work.media.mapIndexed { position, media ->
+        work.media.flatMapIndexed { position, media ->
+            val baseName = if (work.media.size == 1) work.title
+                else "${work.title}_${(position + 1).toString().padStart(2, '0')}"
             when (media) {
-                is com.example.rcgallery.data.douyin.DouyinMediaResource.Image -> DownloadResource(
-                    urls = media.urls,
-                    baseName = "${work.title}_${(position + 1).toString().padStart(2, '0')}",
-                    isVideo = false,
+                is com.example.rcgallery.data.douyin.DouyinMediaResource.Image -> listOf(
+                    DownloadResource(urls = media.urls, baseName = baseName, isVideo = false)
                 )
-                is com.example.rcgallery.data.douyin.DouyinMediaResource.Video -> DownloadResource(
-                    urls = media.urls,
-                    baseName = if (work.media.size == 1) work.title
-                    else "${work.title}_video_${(position + 1).toString().padStart(2, '0')}",
-                    isVideo = true,
+                is com.example.rcgallery.data.douyin.DouyinMediaResource.AnimatedImage -> listOf(
+                    DownloadResource(urls = media.urls, baseName = baseName, isVideo = false),
+                    DownloadResource(urls = media.animatedUrls, baseName = "${baseName}_anim", isVideo = true),
+                )
+                is com.example.rcgallery.data.douyin.DouyinMediaResource.Video -> listOf(
+                    DownloadResource(
+                        urls = media.urls,
+                        baseName = if (work.media.size == 1) work.title
+                        else "${work.title}_video_${(position + 1).toString().padStart(2, '0')}",
+                        isVideo = true,
+                    )
                 )
             }
         }
