@@ -36,6 +36,16 @@ data class YouTubeWorkInfo(
     val qualities: List<YouTubeQuality>,
     val videos: List<YouTubeVideoTrack>,
     val audios: List<YouTubeAudioTrack>,
+    /** Private app cache produced during parsing and consumed by the downloader. */
+    val infoJsonPath: String? = null,
+)
+
+data class YouTubeDownloadHistory(
+    val id: Long,
+    val title: String,
+    val webpageUrl: String,
+    val displayName: String,
+    val cachedAt: Long,
 )
 
 sealed interface YouTubeImportState {

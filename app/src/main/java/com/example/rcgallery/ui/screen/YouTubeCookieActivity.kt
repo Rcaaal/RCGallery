@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -24,6 +25,7 @@ class YouTubeCookieActivity : Activity() {
 
     companion object {
         const val EXTRA_COOKIE_PATH = "cookie_path"
+        const val EXTRA_VISITOR_DATA = "visitor_data"
     }
 
     private lateinit var webView: WebView
@@ -95,6 +97,8 @@ class YouTubeCookieActivity : Activity() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
@@ -110,14 +114,23 @@ class YouTubeCookieActivity : Activity() {
     }
 
     private fun onExtract() {
-        val target = File(cacheDir, "youtube_cookies.txt")
+        // Keep the exported file outside cacheDir so it survives cache cleanup.
+        val target = File(filesDir, "youtube_cookies.txt")
         val ok = YouTubeCookieExtractor.extractAndSave(this, target) ||
             YouTubeCookieExtractor.saveFallbackCookies(target)
 
         if (ok && target.exists() && target.length() > 0L) {
             Toast.makeText(this, "Cookie 已提取", Toast.LENGTH_SHORT).show()
-            setResult(RESULT_OK, Intent().apply { putExtra(EXTRA_COOKIE_PATH, target.absolutePath) })
-            finish()
+            webView.evaluateJavascript("ytcfg.get('VISITOR_DATA')") { raw ->
+                val visitor = runCatching {
+                    org.json.JSONTokener(raw ?: "").nextValue() as? String ?: ""
+                }.getOrDefault("")
+                setResult(RESULT_OK, Intent().apply {
+                    putExtra(EXTRA_COOKIE_PATH, target.absolutePath)
+                    putExtra(EXTRA_VISITOR_DATA, visitor)
+                })
+                finish()
+            }
         } else {
             Toast.makeText(this, "未检测到登录 Cookie，请先在 YouTube 登录", Toast.LENGTH_LONG).show()
         }

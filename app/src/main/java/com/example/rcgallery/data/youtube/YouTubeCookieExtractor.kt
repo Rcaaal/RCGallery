@@ -36,20 +36,20 @@ object YouTubeCookieExtractor {
     private fun readWebViewCookies(context: Context): List<CookieEntry>? {
         runCatching { CookieManager.getInstance().flush() }
 
-        val dbPaths = listOf(
-            "/data/data/${context.packageName}/app_webview/Default/Cookies",
-            "/data/data/${context.packageName}/app_webview/Cookies",
-        )
-        val dbPath = dbPaths.firstOrNull { File(it).exists() } ?: return null
+        // WebView changes this location between Android/WebView versions.
+        // Follow ytdlnis and locate the active Chromium cookie database.
+        val dbPath = File(context.applicationInfo.dataDir)
+            .walkTopDown()
+            .firstOrNull { it.isFile && it.name == "Cookies" }
+            ?: return null
 
         val entries = mutableListOf<CookieEntry>()
         var db: SQLiteDatabase? = null
         try {
-            db = SQLiteDatabase.openDatabase(dbPath, null, OPEN_READONLY)
+            db = SQLiteDatabase.openDatabase(dbPath.absolutePath, null, OPEN_READONLY)
             db.query("cookies", projection, null, null, null, null, null).use { cursor ->
                 while (cursor.moveToNext()) {
                     val hostKey = cursor.getString(cursor.getColumnIndexOrThrow(COL_HOST))
-                    if (!hostKey.contains("youtube", true) && !hostKey.contains("ytimg", true)) continue
                     entries.add(CookieEntry(
                         domain = if (hostKey[0] != '.') ".$hostKey" else hostKey,
                         expiry = cursor.getLong(cursor.getColumnIndexOrThrow(COL_EXPIRY)),

@@ -1,6 +1,7 @@
 package com.example.rcgallery.data.youtube
 
 import android.content.Context
+import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.mapper.VideoFormat
@@ -15,28 +16,61 @@ import java.io.File
 class YouTubeParser(
     context: Context,
     private val cookieFile: String? = null,
+    private val authManager: YouTubeAuthManager = YouTubeAuthManager(context),
 ) {
     private val appContext = context.applicationContext
 
     suspend fun parse(input: String): YouTubeWorkInfo = withContext(Dispatchers.IO) {
         val url = extractUrl(input)
+        val videoId = extractVideoId(url)
+        val infoJsonFile = File(
+            appContext.filesDir,
+            "youtube_info/${videoId}_${System.nanoTime()}.info.json",
+        ).apply { parentFile?.mkdirs() }
+        AppLogger.d("YouTubeParse", "start id=$videoId hasVisitorData=${authManager.hasVisitorData()} hasCookie=${cookieFile?.let { File(it).exists() } == true}")
         try {
+            AppLogger.d("YouTubeParse", "init yt-dlp")
             YoutubeDL.getInstance().init(appContext)
+            FFmpeg.getInstance().init(appContext)
             // 更新 yt-dlp 到最新版
             kotlin.runCatching {
                 YoutubeDL.getInstance().updateYoutubeDL(appContext, YoutubeDL.UpdateChannel.STABLE)
-            }
+            }.onFailure { AppLogger.e("YouTubeParse", "yt-dlp update failed", it) }
 
+            val authArgs = if (authManager.hasVisitorData()) {
+                authManager.extractorArgs(videoId)
+            } else null
+            AppLogger.d(
+                "YouTubeParse",
+                "auth args ready=${authArgs != null} clients=${authArgs?.substringAfter("player_client=")?.substringBefore(';') ?: "anonymous"}"
+            )
             val info = try {
-                loadInfo(url, null)
+                AppLogger.d("YouTubeParse", "getInfo request id=$videoId")
+                loadInfo(url, authArgs, infoJsonFile)
             } catch (error: Exception) {
-                if (!isLoginChallenge(error)) throw error
-                AppLogger.d("YouTubeImport", "default client challenged; retry android_vr")
-                loadInfo(url, "android_vr,web_embedded")
+                AppLogger.e("YouTubeParse", "getInfo failed id=$videoId message=${error.message}", error)
+                if (authArgs != null && isFormatUnavailable(error)) {
+                    // A PO-token/client combination can expose a restricted format
+                    // set for one video. Retry metadata with yt-dlp's normal client
+                    // negotiation; cookies remain attached to the request.
+                    AppLogger.d("YouTubeParse", "retry getInfo without forced player client id=$videoId")
+                    loadInfo(url, null, infoJsonFile)
+                } else if (authArgs != null && isLoginChallenge(error) && hasCookieFile()) {
+                    // A stale or client-incompatible PO token can trigger the bot
+                    // challenge even when the WebView cookies are still usable.
+                    // Let yt-dlp authenticate with the exported cookies alone.
+                    AppLogger.d("YouTubeParse", "retry getInfo with cookies only id=$videoId")
+                    loadInfo(url, null, infoJsonFile)
+                } else {
+                    if (!isLoginChallenge(error) || authArgs != null) throw error
+                    AppLogger.d("YouTubeImport", "anonymous client challenged; no ytdlnis auth context available")
+                    throw error
+                }
             }
 
             val videos = info.formats.orEmpty().mapNotNull(::toVideoTrack)
             val audios = info.formats.orEmpty().mapNotNull(::toAudioTrack)
+            AppLogger.d("YouTubeParse", "getInfo success formats=${info.formats?.size ?: 0} videos=${videos.size} audios=${audios.size}")
             if (videos.isEmpty()) throw YouTubeParseException("没有找到可下载的 MP4 视频轨道")
             if (audios.isEmpty()) throw YouTubeParseException("没有找到可下载的 M4A 音频轨道")
 
@@ -55,12 +89,14 @@ class YouTubeParser(
                 qualities = qualities,
                 videos = videos,
                 audios = audios,
+                infoJsonPath = infoJsonFile.takeIf { it.isFile && it.length() > 128L }?.absolutePath,
             )
         } catch (error: CancellationException) {
             throw error
         } catch (error: YouTubeParseException) {
             throw error
         } catch (error: Exception) {
+            AppLogger.e("YouTubeParse", "parse failed id=$videoId type=${error::class.java.simpleName}", error)
             val detail = error.message.orEmpty()
             val friendly = when {
                 isLoginChallenge(error) -> "当前网络/IP触发了 YouTube 机器人验证，请在 App 内登录 YouTube 后重试"
@@ -78,7 +114,7 @@ class YouTubeParser(
      *   hasOption("--dump-json") && !out.isEmpty() && hasOption("--ignore-errors")
      * 三个条件全满足 → 即使 exit code > 0 也不抛异常。
      */
-    private suspend fun loadInfo(url: String, playerClients: String?): VideoInfo {
+    private suspend fun loadInfo(url: String, extractorArgs: String?, infoJsonFile: File): VideoInfo {
         val request = YoutubeDLRequest(url).apply {
             addOption("--no-playlist")
             addOption("--skip-download")
@@ -90,13 +126,20 @@ class YouTubeParser(
             addOption("--retries", 1)
             addOption("--extractor-retries", 1)
             addOption("--force-ipv4")
-            playerClients?.let {
-                addOption("--extractor-args", "youtube:player_client=$it")
+            extractorArgs?.let {
+                addOption("--extractor-args", "youtube:$it")
             }
             cookieFile?.let { path ->
                 if (File(path).exists()) addOption("--cookies", path)
             }
+            // Keep the exact JSON used for this successful metadata request.
+            // The download can then use --load-info-json without contacting YouTube again.
+            addCommands(listOf("--print-to-file", "video:%()j", infoJsonFile.absolutePath))
         }
+        AppLogger.d(
+            "YouTubeParse",
+            "request options auth=${extractorArgs != null} cookies=${cookieFile?.let { File(it).exists() } == true}"
+        )
         return runInterruptible { YoutubeDL.getInstance().getInfo(request) }
     }
 
@@ -106,6 +149,12 @@ class YouTubeParser(
             detail.contains("confirm you.re not a bot", true) ||
             detail.contains("confirm you're not a bot", true)
     }
+
+    private fun isFormatUnavailable(error: Throwable): Boolean =
+        error.message.orEmpty().contains("Requested format is not available", true)
+
+    private fun hasCookieFile(): Boolean =
+        cookieFile?.let { path -> File(path).isFile && File(path).length() > 128L } == true
 
     private fun toVideoTrack(format: VideoFormat): YouTubeVideoTrack? {
         val codec = format.vcodec.orEmpty()
@@ -144,6 +193,11 @@ class YouTubeParser(
             throw YouTubeParseException("当前仅支持 YouTube 链接")
         }
         return match
+    }
+
+    private fun extractVideoId(url: String): String = when {
+        url.contains("youtu.be/", true) -> url.substringAfter("youtu.be/").substringBefore('?').substringBefore('/')
+        else -> Regex("[?&]v=([^&]+)").find(url)?.groupValues?.get(1).orEmpty()
     }
 
     companion object {

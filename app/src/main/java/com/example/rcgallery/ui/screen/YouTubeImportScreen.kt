@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.rcgallery.data.youtube.YouTubeCodecMode
+import com.example.rcgallery.data.youtube.YouTubeDownloadHistory
 import com.example.rcgallery.data.youtube.YouTubeImportState
 import com.example.rcgallery.data.youtube.YouTubeWorkInfo
 import com.example.rcgallery.viewmodel.YouTubeImportViewModel
@@ -66,10 +67,12 @@ fun YouTubeImportScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val hasCookie by viewModel.hasCookie.collectAsStateWithLifecycle()
+    val history by viewModel.history.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var input by remember { mutableStateOf("") }
     var selectedHeight by remember { mutableIntStateOf(0) }
     var codecMode by remember { mutableStateOf(YouTubeCodecMode.AUTO) }
+    var showHistory by remember { mutableStateOf(false) }
 
     val cookieLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -78,6 +81,9 @@ fun YouTubeImportScreen(
             result.data?.getStringExtra(YouTubeCookieActivity.EXTRA_COOKIE_PATH)?.let { path ->
                 viewModel.setCookieFile(path)
             }
+            result.data?.getStringExtra(YouTubeCookieActivity.EXTRA_VISITOR_DATA)
+                ?.takeIf { it.isNotBlank() }
+                ?.let(viewModel::setVisitorData)
         }
     }
 
@@ -101,7 +107,10 @@ fun YouTubeImportScreen(
             TopAppBar(
                 title = { Text("YouTube 导入") },
                 navigationIcon = { TextButton(onClick = ::close) { Text("← 返回") } },
-                actions = { TextButton(onClick = onOpenAlbum) { Text("相册") } },
+                actions = {
+                    TextButton(onClick = { showHistory = !showHistory }) { Text("历史") }
+                    TextButton(onClick = onOpenAlbum) { Text("相册") }
+                },
                 windowInsets = WindowInsets(0, 0, 0, 0),
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
@@ -173,6 +182,10 @@ fun YouTubeImportScreen(
                         }
                     }
                 }
+            }
+
+            if (showHistory && history.isNotEmpty()) {
+                YouTubeHistorySection(history)
             }
 
             // ── state body ──
@@ -281,6 +294,32 @@ fun YouTubeImportScreen(
 }
 
 // ── shared composables ──────────────────────────────────────────────────
+
+@Composable
+private fun YouTubeHistorySection(entries: List<YouTubeDownloadHistory>) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("下载历史", style = MaterialTheme.typography.titleMedium)
+        entries.forEach { entry ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                    Text(
+                        entry.title,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(entry.displayName, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        entry.webpageUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun LoadingRow(message: String) {

@@ -175,7 +175,11 @@ fun NetworkBrowserScreen(
         Box(Modifier.fillMaxSize()) {
             YouTubeImportScreen(
                 onDismiss = { showYouTubeImport = false },
-                onMediaSaved = { viewModel.loadAlbums() },
+                onMediaSaved = {
+                    viewModel.loadAlbums()
+                    // Refresh an already open dedicated album without opening it automatically.
+                    youtubeAlbum?.bucketId?.let { viewModel.loadMedia(it) }
+                },
                 onOpenAlbum = { youtubeAlbumRequest++ },
             )
             youtubeAlbum?.let { album ->
