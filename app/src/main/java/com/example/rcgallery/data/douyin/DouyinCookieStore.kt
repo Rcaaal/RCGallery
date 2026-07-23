@@ -22,20 +22,29 @@ import kotlin.coroutines.resume
 class DouyinCookieStore {
 
     /** Minimum cookies we consider the session valid. */
-    private val requiredCookies = setOf("s_v_web_id", "ttwid")
+    private val baseCookies = setOf("s_v_web_id", "ttwid")
+    private val sessionCookies = setOf("sid_tt", "sessionid", "sessionid_ss", "sid_guard")
 
     /**
      * Try to extract Douyin cookies from CookieManager.
      * These may be from a previous WebView session (persistent across app runs).
      */
-    fun getCachedCookies(): String? {
-        val raw = CookieManager.getInstance().getCookie(DOUYIN_DOMAIN) ?: return null
-        val cookies = raw.split(';').map { it.trim() }.filter { it.isNotBlank() }
-        val hasRequired = requiredCookies.all { required ->
-            cookies.any { it.startsWith("$required=") }
+    fun getAuthenticatedCookies(): String? {
+        val cookies = currentCookies()
+        val hasBase = baseCookies.all { required -> cookies.any { it.startsWith("$required=") } }
+        val hasSession = sessionCookies.any { required -> cookies.any { it.startsWith("$required=") } }
+        return cookies.takeIf { hasBase && hasSession }?.joinToString("; ")
+    }
+
+    fun isLoggedIn(): Boolean = getAuthenticatedCookies() != null
+
+    fun clearLogin() {
+        val manager = CookieManager.getInstance()
+        currentCookies().map { it.substringBefore('=').trim() }.forEach { name ->
+            manager.setCookie(DOUYIN_URL, "$name=; Max-Age=0; Path=/")
+            manager.setCookie(IES_DOUYIN_URL, "$name=; Max-Age=0; Path=/")
         }
-        if (!hasRequired) return null
-        return cookies.joinToString("; ")
+        manager.flush()
     }
 
     /**
@@ -64,9 +73,7 @@ class DouyinCookieStore {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         if (url == null || !url.startsWith("https://www.douyin.com")) return
-                        val raw = CookieManager.getInstance().getCookie(DOUYIN_DOMAIN) ?: ""
-                        val cookies = raw.split(';').map { it.trim() }.filter { it.isNotBlank() }
-                        val result = cookies.joinToString("; ")
+                        val result = currentCookies().joinToString("; ")
                         // Keep WebView alive in case we need it again; just detach
                         webView.destroy()
                         onResult(result.ifBlank { null })
@@ -79,10 +86,8 @@ class DouyinCookieStore {
                         failingUrl: String?,
                     ) {
                         // Try to use whatever cookies we have even on error
-                        val raw = CookieManager.getInstance().getCookie(DOUYIN_DOMAIN) ?: ""
-                        val cookies = raw.split(';').map { it.trim() }.filter { it.isNotBlank() }
                         webView?.destroy()
-                        onResult(cookies.joinToString("; ").ifBlank { null })
+                        onResult(currentCookies().joinToString("; ").ifBlank { null })
                     }
                 }
                 CookieManager.getInstance().setAcceptCookie(true)
@@ -106,12 +111,19 @@ class DouyinCookieStore {
         }
     }
 
+    private fun currentCookies(): List<String> = listOf(DOUYIN_URL, IES_DOUYIN_URL)
+        .flatMap { CookieManager.getInstance().getCookie(it).orEmpty().split(';') }
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .distinctBy { it.substringBefore('=') }
+
     companion object {
-        private const val DOUYIN_DOMAIN = ".douyin.com"
         private const val DOUYIN_URL = "https://www.douyin.com/"
-        private const val WEBVIEW_USER_AGENT =
+        private const val IES_DOUYIN_URL = "https://www.iesdouyin.com/"
+        const val REQUEST_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+            "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+        private const val WEBVIEW_USER_AGENT = REQUEST_USER_AGENT
 
         /**
          * Application context set once (e.g. from Application.onCreate).

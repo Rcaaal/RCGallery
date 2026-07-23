@@ -7,6 +7,7 @@ import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.douyin.DouyinImportState
+import com.example.rcgallery.data.douyin.DouyinDynamicMediaStatus
 import com.example.rcgallery.data.douyin.DouyinMediaResource
 import com.example.rcgallery.data.douyin.DouyinParseException
 import com.example.rcgallery.data.douyin.DouyinParser
@@ -32,6 +33,9 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     private val cookieStore = DouyinCookieStore()
     private val _state = MutableStateFlow<DouyinImportState>(DouyinImportState.Idle)
     val state: StateFlow<DouyinImportState> = _state.asStateFlow()
+    private var sessionCookies: String? = cookieStore.getAuthenticatedCookies()
+    private val _isLoggedIn = MutableStateFlow(sessionCookies != null)
+    val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
     private var operationJob: Job? = null
 
     fun parse(text: String) {
@@ -62,39 +66,67 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    /**
-     * Attempt to enhance a parsed work with animated image data from the API.
-     * Starts with cached cookies; if none, tries WebView extraction.
-     */
-    private suspend fun tryEnhanceWithApi(work: DouyinWorkInfo) {
-        val cookies = cookieStore.getCachedCookies()
-            ?: runCatching {
-                withContext(Dispatchers.Main) { cookieStore.extractCookiesSuspend() }
-            }.getOrNull()
+    fun refreshLoginState() {
+        sessionCookies = cookieStore.getAuthenticatedCookies()
+        _isLoggedIn.value = sessionCookies != null
+        val ready = _state.value as? DouyinImportState.Ready ?: return
+        if (_isLoggedIn.value && ready.work.media.any { it is DouyinMediaResource.Image }) {
+            operationJob?.cancel()
+            operationJob = viewModelScope.launch { tryEnhanceWithApi(ready.work) }
+        }
+    }
 
-        if (cookies == null) return
+    fun clearLogin() {
+        cookieStore.clearLogin()
+        sessionCookies = null
+        _isLoggedIn.value = false
+    }
+
+    private suspend fun tryEnhanceWithApi(work: DouyinWorkInfo) {
+        val cookies = sessionCookies
+        if (cookies == null) {
+            updateDynamicStatus(work, DouyinDynamicMediaStatus.LoginRequired)
+            return
+        }
 
         try {
-            val animatedMap = withContext(Dispatchers.IO) {
+            val enhancement = withContext(Dispatchers.IO) {
                 parser.enhanceWithApi(work.workId, work.userAgent, cookies)
-            } ?: return
+            }
 
             val currentState = _state.value
             if (currentState !is DouyinImportState.Ready || currentState.work.workId != work.workId) return
 
             val enhancedMedia = currentState.work.media.map { media ->
                 if (media is DouyinMediaResource.Image) {
-                    val matches = animatedMap[media.index - 1]
+                    val matches = media.sourceKey?.let(enhancement.urlsBySourceKey::get)
+                        ?: enhancement.urlsByIndex[media.index - 1]
                     if (matches != null) {
-                        DouyinMediaResource.AnimatedImage(media.index, media.urls, matches)
+                        DouyinMediaResource.AnimatedImage(
+                            media.index, media.urls, matches, media.sourceKey
+                        )
                     } else media
                 } else media
             }
             _state.value = DouyinImportState.Ready(
-                currentState.work.copy(media = enhancedMedia)
+                currentState.work.copy(
+                    media = enhancedMedia,
+                    dynamicMediaStatus = if (enhancedMedia.any { it is DouyinMediaResource.AnimatedImage }) {
+                        DouyinDynamicMediaStatus.Available
+                    } else {
+                        DouyinDynamicMediaStatus.None
+                    },
+                )
             )
         } catch (_: Exception) {
-            // API enhancement is best-effort; SSR data is sufficient
+            updateDynamicStatus(work, DouyinDynamicMediaStatus.Failed)
+        }
+    }
+
+    private fun updateDynamicStatus(work: DouyinWorkInfo, status: DouyinDynamicMediaStatus) {
+        val current = _state.value
+        if (current is DouyinImportState.Ready && current.work.workId == work.workId) {
+            _state.value = DouyinImportState.Ready(current.work.copy(dynamicMediaStatus = status))
         }
     }
 
@@ -230,6 +262,7 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
             readTimeout = 60_000
             setRequestProperty("User-Agent", work.userAgent)
             setRequestProperty("Referer", "https://www.douyin.com/")
+            sessionCookies?.let { setRequestProperty("Cookie", it) }
         }
         var pendingUri: Uri? = null
 

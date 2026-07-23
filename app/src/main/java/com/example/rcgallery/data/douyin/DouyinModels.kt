@@ -7,7 +7,16 @@ data class DouyinWorkInfo(
     val coverUrl: String?,
     val userAgent: String,
     val media: List<DouyinMediaResource>,
+    val dynamicMediaStatus: DouyinDynamicMediaStatus = DouyinDynamicMediaStatus.NotChecked,
 )
+
+enum class DouyinDynamicMediaStatus {
+    NotChecked,
+    Available,
+    None,
+    LoginRequired,
+    Failed,
+}
 
 sealed interface DouyinMediaResource {
     val index: Int
@@ -16,12 +25,14 @@ sealed interface DouyinMediaResource {
     data class Image(
         override val index: Int,
         override val urls: List<String>,
+        val sourceKey: String? = null,
     ) : DouyinMediaResource
 
     data class AnimatedImage(
         override val index: Int,
         override val urls: List<String>,
         val animatedUrls: List<String>,
+        val sourceKey: String? = null,
     ) : DouyinMediaResource
 
     data class Video(

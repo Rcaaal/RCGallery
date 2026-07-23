@@ -2,7 +2,10 @@ package com.example.rcgallery.ui.screen
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -48,6 +51,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.rcgallery.data.douyin.DouyinImportState
+import com.example.rcgallery.data.douyin.DouyinDynamicMediaStatus
 import com.example.rcgallery.data.douyin.DouyinMediaResource
 import com.example.rcgallery.data.douyin.DouyinWorkInfo
 import com.example.rcgallery.viewmodel.DouyinImportViewModel
@@ -62,8 +66,12 @@ fun DouyinImportScreen(
     viewModel: DouyinImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val isLoggedIn by viewModel.isLoggedIn.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var input by remember(initialInput) { mutableStateOf(initialInput.orEmpty()) }
+    val loginLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        viewModel.refreshLoginState()
+    }
 
     LaunchedEffect(initialInput) {
         initialInput?.trim()?.takeIf { it.isNotEmpty() }?.let(viewModel::parse)
@@ -128,6 +136,21 @@ fun DouyinImportScreen(
                     modifier = Modifier.weight(1f),
                     enabled = state !is DouyinImportState.Parsing && state !is DouyinImportState.Downloading,
                 ) { Text("开始解析") }
+            }
+
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (isLoggedIn) "已登录抖音，可识别动态图片" else "登录后可识别动态图片",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = {
+                        if (isLoggedIn) viewModel.clearLogin()
+                        else loginLauncher.launch(Intent(context, DouyinLoginActivity::class.java))
+                    },
+                ) { Text(if (isLoggedIn) "退出登录" else "登录抖音") }
             }
 
             when (val current = state) {
@@ -266,6 +289,28 @@ private fun DouyinResultCard(work: DouyinWorkInfo) {
                 if (!work.author.isNullOrBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(work.author.orEmpty(), style = MaterialTheme.typography.bodySmall)
+                }
+                when (work.dynamicMediaStatus) {
+                    DouyinDynamicMediaStatus.LoginRequired -> Text(
+                        "登录抖音后可检查动态图片资源",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    DouyinDynamicMediaStatus.Available -> Text(
+                        "已识别动态图片，保存时将同时下载对应 MP4",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    DouyinDynamicMediaStatus.None -> Text(
+                        "该作品未返回动态图片资源",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    DouyinDynamicMediaStatus.Failed -> Text(
+                        "动态图片检查失败，可重新登录后再次解析",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    DouyinDynamicMediaStatus.NotChecked -> Unit
                 }
             }
         }
