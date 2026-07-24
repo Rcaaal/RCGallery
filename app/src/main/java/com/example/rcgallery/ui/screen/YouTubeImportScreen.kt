@@ -130,6 +130,13 @@ fun YouTubeImportScreen(
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("公开视频链接或 Shorts 链接") },
+                trailingIcon = {
+                    if (input.isNotBlank()) {
+                        TextButton(onClick = { input = "" }) {
+                            Text("清空")
+                        }
+                    }
+                },
                 minLines = 2,
                 maxLines = 4,
                 enabled = state !is YouTubeImportState.Initializing &&

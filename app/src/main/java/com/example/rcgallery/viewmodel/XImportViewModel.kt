@@ -9,9 +9,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.rcgallery.data.ImportedMediaOutput
 import com.example.rcgallery.data.MediaImportHistoryPlatform
 import com.example.rcgallery.data.MediaImportHistoryRepository
-import com.example.rcgallery.data.x.XParser
-import com.example.rcgallery.data.x.XAuthManager
-import com.example.rcgallery.data.x.XWorkInfo
 import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -28,8 +25,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 sealed interface XImportState {
     data object Idle : XImportState
-    data object Parsing : XImportState
-    data class Ready(val work: XWorkInfo) : XImportState
     data class Downloading(
         val progress: Float,
         val downloadedBytes: Long,
@@ -47,100 +42,9 @@ class XImportViewModel(application: Application) : AndroidViewModel(application)
     val state: StateFlow<XImportState> = _state.asStateFlow()
     private val downloadInProgress = AtomicBoolean(false)
     private val historyRepository = MediaImportHistoryRepository(application)
-    private val authManager = XAuthManager(application)
-    private val parser = XParser(application) { authManager.cookiePath() }
-    private val _hasLogin = MutableStateFlow(authManager.hasLogin())
-    val hasLogin: StateFlow<Boolean> = _hasLogin.asStateFlow()
 
-    fun captureLoginCookies(): Boolean {
-        val captured = authManager.captureWebViewCookies()
-        _hasLogin.value = authManager.hasLogin()
-        AppLogger.d("XImport", "login cookie captured=$captured active=${_hasLogin.value}")
-        return captured
-    }
-
-    fun clearLogin() {
-        authManager.clear()
-        _hasLogin.value = false
-    }
-
-    fun parse(input: String) {
-        viewModelScope.launch {
-            _state.value = XImportState.Parsing
-            try {
-                _state.value = XImportState.Ready(withContext(Dispatchers.IO) { parser.parse(input) })
-            } catch (_: CancellationException) {
-                throw CancellationException()
-            } catch (error: Exception) {
-                AppLogger.e("XImport", "local parse failed", error)
-                _state.value = XImportState.Error(error.message ?: "X 本地解析失败")
-            }
-        }
-    }
-
-    fun downloadParsed(work: XWorkInfo, onSaved: () -> Unit) {
-        if (!downloadInProgress.compareAndSet(false, true)) {
-            AppLogger.d("XImport", "duplicate local download ignored")
-            return
-        }
-        viewModelScope.launch {
-            val outputs = mutableListOf<ImportedMediaOutput>()
-            var failures = 0
-            try {
-                work.media.forEachIndexed { index, item ->
-                    try {
-                        val output = withContext(Dispatchers.IO) {
-                            downloadToMediaStore(
-                                downloadUrl = item.url,
-                                userAgent = item.headers["User-Agent"].orEmpty(),
-                                cookie = mergeCookies(item.headers["Cookie"], authManager.cookieHeader()),
-                                requestHeaders = item.headers,
-                                contentDisposition = "attachment; filename=\"${item.displayName}\"",
-                                advertisedMime = item.mimeType,
-                                onProgress = { downloaded, total ->
-                                    _state.value = XImportState.Downloading(
-                                        progress = if (total > 0L) downloaded.toFloat() / total else -1f,
-                                        downloadedBytes = downloaded,
-                                        totalBytes = total,
-                                        currentIndex = index + 1,
-                                        totalItems = work.media.size,
-                                        displayName = item.displayName,
-                                    )
-                                },
-                            )
-                        }
-                        outputs += output
-                    } catch (_: CancellationException) {
-                        throw CancellationException()
-                    } catch (error: Exception) {
-                        failures++
-                        AppLogger.e("XImport", "local media failed name=${item.displayName}", error)
-                    }
-                }
-                if (outputs.isEmpty()) throw IllegalStateException("所有媒体下载失败")
-                withContext(Dispatchers.IO) {
-                    historyRepository.record(
-                        platform = MediaImportHistoryPlatform.X,
-                        sourceUrl = work.sourceUrl,
-                        title = work.title,
-                        author = work.author.ifBlank { null },
-                        coverUrl = work.thumbnailUrl,
-                        successCount = outputs.size,
-                        failedCount = failures,
-                        outputs = outputs,
-                    )
-                }
-                _state.value = XImportState.Success(outputs.first().displayName)
-                onSaved()
-            } catch (_: CancellationException) {
-                throw CancellationException()
-            } catch (error: Exception) {
-                AppLogger.e("XImport", "local download failed", error)
-                _state.value = XImportState.Error(error.message ?: "下载失败")
-            } finally {
-                downloadInProgress.set(false)
-            }
-        }
+    fun reset() {
+        if (_state.value !is XImportState.Downloading) _state.value = XImportState.Idle
     }
 
     fun download(
@@ -148,29 +52,32 @@ class XImportViewModel(application: Application) : AndroidViewModel(application)
         downloadUrl: String,
         userAgent: String,
         cookie: String?,
+        referer: String?,
         contentDisposition: String?,
         advertisedMime: String?,
         onSaved: () -> Unit,
     ) {
         if (!downloadInProgress.compareAndSet(false, true)) {
-            AppLogger.d("XImport", "duplicate download ignored")
+            AppLogger.d("XImport", "duplicate web download ignored")
             return
         }
         viewModelScope.launch {
             try {
                 val output = withContext(Dispatchers.IO) {
                     downloadToMediaStore(
-                        downloadUrl,
-                        userAgent,
-                        mergeCookies(cookie, authManager.cookieHeader()),
-                        emptyMap(),
-                        contentDisposition,
-                        advertisedMime,
+                        downloadUrl = downloadUrl,
+                        userAgent = userAgent,
+                        cookie = cookie,
+                        requestHeaders = buildMap {
+                            referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                        },
+                        contentDisposition = contentDisposition,
+                        advertisedMime = advertisedMime,
                         onProgress = { downloaded, total ->
                             _state.value = XImportState.Downloading(
-                                if (total > 0L) downloaded.toFloat() / total else -1f,
-                                downloaded,
-                                total,
+                                progress = if (total > 0L) downloaded.toFloat() / total else -1f,
+                                downloadedBytes = downloaded,
+                                totalBytes = total,
                             )
                         },
                     )
@@ -192,16 +99,12 @@ class XImportViewModel(application: Application) : AndroidViewModel(application)
             } catch (_: CancellationException) {
                 throw CancellationException()
             } catch (error: Exception) {
-                AppLogger.e("XImport", "download failed", error)
-                _state.value = XImportState.Error(error.message ?: "下载失败")
+                AppLogger.e("XImport", "web download failed", error)
+                _state.value = XImportState.Error("下载失败，请在网页中重新选择下载项")
             } finally {
                 downloadInProgress.set(false)
             }
         }
-    }
-
-    fun reset() {
-        if (_state.value !is XImportState.Downloading) _state.value = XImportState.Idle
     }
 
     private suspend fun downloadToMediaStore(
@@ -334,18 +237,6 @@ class XImportViewModel(application: Application) : AndroidViewModel(application)
             if (!exists) return candidate
             suffix++
         }
-    }
-
-    private fun mergeCookies(primary: String?, secondary: String?): String? {
-        val values = linkedMapOf<String, String>()
-        listOf(primary, secondary).filterNotNull().forEach { raw ->
-            raw.split(';').map(String::trim).forEach { pair ->
-                val index = pair.indexOf('=')
-                if (index > 0) values[pair.substring(0, index)] = pair.substring(index + 1)
-            }
-        }
-        return values.entries.takeIf { it.isNotEmpty() }
-            ?.joinToString("; ") { (name, value) -> "$name=$value" }
     }
 
     private companion object {

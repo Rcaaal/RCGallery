@@ -1,5 +1,6 @@
 package com.example.rcgallery.data.douyin
 
+import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -9,6 +10,7 @@ import java.io.BufferedInputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.Base64
 import kotlin.coroutines.coroutineContext
@@ -65,11 +67,14 @@ class DouyinParser {
     ): DynamicEnhancement {
         var lastFailure = "详情接口没有返回作品数据"
         for (aid in DETAIL_AID_CANDIDATES) {
+            val startedAt = System.nanoTime()
             val params = buildApiParams(workId, aid)
             val (signedParams, _, _) = XBogus(userAgent).getXBogus(params)
-            val json = fetchApiJson("$POST_DETAIL?$signedParams", userAgent, cookies)
+            val response = fetchApiJson("$POST_DETAIL?$signedParams", userAgent, cookies)
+            val json = response.json
             if (json == null) {
-                lastFailure = "详情接口请求失败"
+                lastFailure = "详情接口请求失败：${response.reason}"
+                AppLogger.d("DouyinParser", "detail aid=$aid failed reason=${response.reason} elapsedMs=${elapsedMillis(startedAt)}")
                 continue
             }
             val detail = json.optJSONObject("aweme_detail")
@@ -77,8 +82,10 @@ class DouyinParser {
                 val filterReason = json.optJSONObject("filter_detail")?.optString("filter_reason")
                 lastFailure = filterReason?.takeIf { it.isNotBlank() }
                     ?.let { "作品数据被接口过滤：$it" } ?: "详情接口没有返回作品数据"
+                AppLogger.d("DouyinParser", "detail aid=$aid empty reason=$lastFailure elapsedMs=${elapsedMillis(startedAt)}")
                 continue
             }
+            AppLogger.d("DouyinParser", "detail aid=$aid success elapsedMs=${elapsedMillis(startedAt)}")
             return dynamicEnhancementFromDetail(detail)
         }
         throw DouyinParseException(lastFailure)
@@ -154,7 +161,9 @@ class DouyinParser {
      * Fetch JSON from the authenticated API endpoint.
      * Returns null on any failure (server returns empty body, HTTP error, etc.)
      */
-    private suspend fun fetchApiJson(url: String, userAgent: String, cookies: String): JSONObject? {
+    private data class ApiResponse(val json: JSONObject?, val reason: String)
+
+    private suspend fun fetchApiJson(url: String, userAgent: String, cookies: String): ApiResponse {
         return try {
             val connection = openConnection(url, userAgent, followRedirects = true).apply {
                 setRequestProperty("Cookie", cookies)
@@ -163,17 +172,22 @@ class DouyinParser {
             }
             try {
                 val code = connection.responseCode
-                if (code !in 200..299) return null
+                if (code !in 200..299) return ApiResponse(null, "http=$code")
                 val body = BufferedInputStream(connection.inputStream).bufferedReader(Charsets.UTF_8).readText()
-                if (body.isBlank()) return null
-                JSONObject(body)
+                if (body.isBlank()) return ApiResponse(null, "empty")
+                ApiResponse(JSONObject(body), "ok")
             } finally {
                 connection.disconnect()
             }
-        } catch (_: Exception) {
-            null
+        } catch (error: SocketTimeoutException) {
+            ApiResponse(null, "timeout")
+        } catch (error: Exception) {
+            ApiResponse(null, error::class.java.simpleName)
         }
     }
+
+    private fun elapsedMillis(startedAtNanos: Long): Long =
+        (System.nanoTime() - startedAtNanos) / 1_000_000L
 
     private fun extractImageResources(item: JSONObject): List<DouyinMediaResource> {
         val qualityImages = highestQualityImages(item)

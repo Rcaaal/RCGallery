@@ -12,6 +12,7 @@ data class DouyinWorkInfo(
 
 enum class DouyinDynamicMediaStatus {
     NotChecked,
+    Checking,
     Available,
     None,
     LoginRequired,
@@ -45,6 +46,7 @@ sealed interface DouyinImportState {
     data object Idle : DouyinImportState
     data object Parsing : DouyinImportState
     data class Ready(val work: DouyinWorkInfo) : DouyinImportState
+    data class PreparingDownload(val work: DouyinWorkInfo) : DouyinImportState
     data class Downloading(
         val work: DouyinWorkInfo,
         val currentIndex: Int,

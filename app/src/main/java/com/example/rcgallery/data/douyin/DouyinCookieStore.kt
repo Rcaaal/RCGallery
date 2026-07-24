@@ -60,6 +60,8 @@ class DouyinCookieStore {
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun fetchDetailViaWebView(workId: String): String? = suspendCancellableCoroutine { continuation ->
         Handler(Looper.getMainLooper()).post {
+            val startedAt = System.nanoTime()
+            AppLogger.d(LOG_TAG, "web detail create WebView work=$workId")
             val webView = WebView(APP_CONTEXT)
             val handler = Handler(Looper.getMainLooper())
             var completed = false
@@ -69,9 +71,11 @@ class DouyinCookieStore {
                 if (completed) return
                 completed = true
                 handler.removeCallbacks(timeout)
+                AppLogger.d(LOG_TAG, "web detail complete work=$workId reason=$reason elapsedMs=${elapsedMillis(startedAt)}")
                 finishWebDetail(webView, continuation, value, reason)
             }
             timeout = Runnable {
+                AppLogger.d(LOG_TAG, "web detail timeout work=$workId")
                 complete(null, "timeout")
             }
             fun handlePayload(payloadText: String) {
@@ -100,6 +104,7 @@ class DouyinCookieStore {
             fun requestDetail() {
                 if (detailRequested) return
                 detailRequested = true
+                AppLogger.d(LOG_TAG, "web detail script request work=$workId")
                 val script = """
                     (async function() {
                         const cookieValue = (name) => {
@@ -210,7 +215,10 @@ class DouyinCookieStore {
             }, "RCGalleryDetailBridge")
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
-                    if (!completed && url.startsWith(DOUYIN_URL)) requestDetail()
+                    if (!completed && url.startsWith(DOUYIN_URL)) {
+                        AppLogger.d(LOG_TAG, "web detail page finished work=$workId")
+                        requestDetail()
+                    }
                 }
             }
             continuation.invokeOnCancellation {
@@ -314,6 +322,9 @@ class DouyinCookieStore {
         webView.destroy()
         if (continuation.isActive) continuation.resume(value)
     }
+
+    private fun elapsedMillis(startedAtNanos: Long): Long =
+        (System.nanoTime() - startedAtNanos) / 1_000_000L
 
     companion object {
         private const val DOUYIN_URL = "https://www.douyin.com/"

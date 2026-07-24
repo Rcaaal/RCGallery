@@ -41,8 +41,8 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     private var sessionCookies: String? = cookieStore.getAuthenticatedCookies()
     private val _isLoggedIn = MutableStateFlow(sessionCookies != null)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
-    // Parsing/dynamic enhancement and saving must not cancel one another.
-    private var operationJob: Job? = null
+    private var parseJob: Job? = null
+    private var enhancementJob: Job? = null
     private var downloadJob: Job? = null
     private val downloadInProgress = AtomicBoolean(false)
     private val historyRepository = MediaImportHistoryRepository(application)
@@ -55,18 +55,24 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         }
         lastInput = text
         cancel()
-        operationJob = viewModelScope.launch {
+        parseJob = viewModelScope.launch {
             _state.value = DouyinImportState.Parsing
             try {
                 AppLogger.d("DouyinImport", "parse start authenticated=${sessionCookies != null}")
+                val startedAt = System.nanoTime()
                 val work = withContext(Dispatchers.IO) { parser.parse(text, sessionCookies) }
-                AppLogger.d("DouyinImport", "parse success work=${work.workId} media=${work.media.size}")
-                _state.value = DouyinImportState.Ready(work)
-
-                // If the work has images, try API enhancement for animated image data
-                if (work.media.any { it is DouyinMediaResource.Image }) {
-                    tryEnhanceWithApi(work)
+                val needsEnhancement = work.media.any { it is DouyinMediaResource.Image }
+                val readyWork = if (needsEnhancement) {
+                    work.copy(dynamicMediaStatus = DouyinDynamicMediaStatus.Checking)
+                } else {
+                    work
                 }
+                AppLogger.d(
+                    "DouyinImport",
+                    "public parse success work=${work.workId} media=${work.media.size} elapsedMs=${elapsedMillis(startedAt)}",
+                )
+                _state.value = DouyinImportState.Ready(readyWork)
+                if (needsEnhancement) launchEnhancement(readyWork)
             } catch (_: CancellationException) {
                 return@launch
             } catch (error: DouyinParseException) {
@@ -85,10 +91,11 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         sessionCookies = cookieStore.getAuthenticatedCookies()
         _isLoggedIn.value = sessionCookies != null
         AppLogger.d("DouyinImport", "login refreshed loggedIn=${_isLoggedIn.value}")
-        val ready = _state.value as? DouyinImportState.Ready ?: return
-        if (_isLoggedIn.value && ready.work.media.any { it is DouyinMediaResource.Image }) {
-            operationJob?.cancel()
-            operationJob = viewModelScope.launch { tryEnhanceWithApi(ready.work) }
+        val work = stateWork(_state.value) ?: return
+        if (_isLoggedIn.value && work.dynamicMediaStatus == DouyinDynamicMediaStatus.LoginRequired &&
+            work.media.any { it is DouyinMediaResource.Image }
+        ) {
+            launchEnhancement(work.copy(dynamicMediaStatus = DouyinDynamicMediaStatus.Checking))
         }
     }
 
@@ -98,7 +105,14 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         _isLoggedIn.value = false
     }
 
+    private fun launchEnhancement(work: DouyinWorkInfo) {
+        enhancementJob?.cancel()
+        publishWork(work)
+        enhancementJob = viewModelScope.launch { tryEnhanceWithApi(work) }
+    }
+
     private suspend fun tryEnhanceWithApi(work: DouyinWorkInfo) {
+        val enhancementStartedAt = System.nanoTime()
         val cookies = sessionCookies
         if (cookies == null) {
             updateDynamicStatus(work, DouyinDynamicMediaStatus.LoginRequired)
@@ -107,20 +121,25 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
 
         try {
             val enhancement = try {
+                val nativeStartedAt = System.nanoTime()
                 withContext(Dispatchers.IO) {
                     parser.enhanceWithApi(work.workId, DouyinCookieStore.REQUEST_USER_AGENT, cookies)
+                }.also {
+                    AppLogger.d("DouyinImport", "dynamic native detail completed work=${work.workId} elapsedMs=${elapsedMillis(nativeStartedAt)}")
                 }
             } catch (nativeError: Exception) {
-                AppLogger.d("DouyinImport", "native detail failed; trying WebView bridge work=${work.workId}")
+                val webStartedAt = System.nanoTime()
+                AppLogger.d("DouyinImport", "dynamic native detail failed; trying WebView bridge work=${work.workId} reason=${nativeError::class.java.simpleName}")
                 val webJson = cookieStore.fetchDetailViaWebView(work.workId)
                     ?: throw nativeError
-                parser.enhanceFromDetailJson(webJson)
+                parser.enhanceFromDetailJson(webJson).also {
+                    AppLogger.d("DouyinImport", "dynamic WebView fallback completed work=${work.workId} elapsedMs=${elapsedMillis(webStartedAt)}")
+                }
             }
 
-            val currentState = _state.value
-            if (currentState !is DouyinImportState.Ready || currentState.work.workId != work.workId) return
+            val currentWork = stateWork(_state.value)?.takeIf { it.workId == work.workId } ?: return
 
-            val enhancedMedia = currentState.work.media.map { media ->
+            val enhancedMedia = currentWork.media.map { media ->
                 if (media is DouyinMediaResource.Image) {
                     val matches = media.sourceKey?.let(enhancement.urlsBySourceKey::get)
                         ?: enhancement.urlsByIndex[media.index - 1]
@@ -131,16 +150,15 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                     } else media
                 } else media
             }
-            _state.value = DouyinImportState.Ready(
-                currentState.work.copy(
+            publishWork(
+                currentWork.copy(
                     media = enhancedMedia,
                     dynamicMediaStatus = if (enhancedMedia.any { it is DouyinMediaResource.AnimatedImage }) {
                         DouyinDynamicMediaStatus.Available
-                    } else {
-                        DouyinDynamicMediaStatus.None
-                    },
-                )
+                    } else DouyinDynamicMediaStatus.None,
+                ),
             )
+            AppLogger.d("DouyinImport", "dynamic enhancement completed work=${work.workId} elapsedMs=${elapsedMillis(enhancementStartedAt)}")
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -151,8 +169,24 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
 
     private fun updateDynamicStatus(work: DouyinWorkInfo, status: DouyinDynamicMediaStatus) {
         val current = _state.value
-        if (current is DouyinImportState.Ready && current.work.workId == work.workId) {
-            _state.value = DouyinImportState.Ready(current.work.copy(dynamicMediaStatus = status))
+        val currentWork = stateWork(current)
+        if (currentWork?.workId == work.workId) {
+            publishWork(currentWork.copy(dynamicMediaStatus = status))
+        }
+    }
+
+    private fun stateWork(state: DouyinImportState): DouyinWorkInfo? = when (state) {
+        is DouyinImportState.Ready -> state.work
+        is DouyinImportState.PreparingDownload -> state.work
+        is DouyinImportState.Downloading -> state.work
+        else -> null
+    }
+
+    private fun publishWork(work: DouyinWorkInfo) {
+        _state.value = when (val current = _state.value) {
+            is DouyinImportState.Ready -> if (current.work.workId == work.workId) DouyinImportState.Ready(work) else current
+            is DouyinImportState.PreparingDownload -> if (current.work.workId == work.workId) DouyinImportState.PreparingDownload(work) else current
+            else -> current
         }
     }
 
@@ -163,17 +197,17 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         }
         downloadJob = viewModelScope.launch {
             try {
-            // The Ready state is published before the WebView detail bridge completes.
-            // Wait for that bridge so animated-image video URLs are not lost on save.
-            val pendingEnhancement = operationJob
-            if (pendingEnhancement?.isActive == true) {
-                AppLogger.d("DouyinImport", "download waiting dynamic enhancement work=${work.workId}")
+            val waitingStartedAt = System.nanoTime()
+            val pendingEnhancement = enhancementJob
+            if (pendingEnhancement?.isActive == true && work.dynamicMediaStatus == DouyinDynamicMediaStatus.Checking) {
+                _state.value = DouyinImportState.PreparingDownload(work)
+                AppLogger.d("DouyinImport", "download preparing dynamic resources work=${work.workId}")
                 pendingEnhancement.join()
             }
-            val resolvedWork = (_state.value as? DouyinImportState.Ready)
-                ?.work
+            val resolvedWork = stateWork(_state.value)
                 ?.takeIf { it.workId == work.workId }
                 ?: work
+            AppLogger.d("DouyinImport", "download wait completed work=${work.workId} elapsedMs=${elapsedMillis(waitingStartedAt)}")
             val resources = resourcesFor(resolvedWork)
             AppLogger.d(
                 "DouyinImport",
@@ -228,12 +262,15 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
 
     fun cancel() {
         val current = _state.value
-        operationJob?.cancel()
+        parseJob?.cancel()
+        enhancementJob?.cancel()
         downloadJob?.cancel()
-        operationJob = null
+        parseJob = null
+        enhancementJob = null
         downloadJob = null
         _state.value = when (current) {
             is DouyinImportState.Downloading -> DouyinImportState.Ready(current.work)
+            is DouyinImportState.PreparingDownload -> DouyinImportState.Ready(current.work)
             DouyinImportState.Parsing -> DouyinImportState.Idle
             else -> current
         }
@@ -284,6 +321,9 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         .replace(Regex("""\.{2,}"""), ".")
         .trim(' ', '.')
         .take(48)
+
+    private fun elapsedMillis(startedAtNanos: Long): Long =
+        (System.nanoTime() - startedAtNanos) / 1_000_000L
 
     private fun downloadingState(
         work: DouyinWorkInfo,

@@ -118,9 +118,16 @@ fun DouyinImportScreen(
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("抖音分享链接") },
+                trailingIcon = {
+                    if (input.isNotBlank()) {
+                        TextButton(onClick = { input = "" }) {
+                            Text("清空")
+                        }
+                    }
+                },
                 minLines = 3,
                 maxLines = 5,
-                enabled = state !is DouyinImportState.Parsing && state !is DouyinImportState.Downloading,
+                enabled = state !is DouyinImportState.Parsing && state !is DouyinImportState.PreparingDownload && state !is DouyinImportState.Downloading,
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
@@ -129,12 +136,12 @@ fun DouyinImportScreen(
                         input = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
                     },
                     modifier = Modifier.weight(1f),
-                    enabled = state !is DouyinImportState.Downloading,
+                    enabled = state !is DouyinImportState.PreparingDownload && state !is DouyinImportState.Downloading,
                 ) { Text("粘贴") }
                 Button(
                     onClick = { viewModel.parse(input) },
                     modifier = Modifier.weight(1f),
-                    enabled = state !is DouyinImportState.Parsing && state !is DouyinImportState.Downloading,
+                    enabled = state !is DouyinImportState.Parsing && state !is DouyinImportState.PreparingDownload && state !is DouyinImportState.Downloading,
                 ) { Text("开始解析") }
             }
 
@@ -174,6 +181,17 @@ fun DouyinImportScreen(
                             if (current.work.media.size > 1) "一键保存全部 ${current.work.media.size} 项"
                             else "保存到本地相册"
                         )
+                    }
+                }
+                is DouyinImportState.PreparingDownload -> {
+                    DouyinResultCard(work = current.work)
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "正在获取 Live Photo 视频资源…",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedButton(onClick = viewModel::cancel, modifier = Modifier.fillMaxWidth()) {
+                        Text("取消准备")
                     }
                 }
                 is DouyinImportState.Downloading -> {
@@ -291,6 +309,11 @@ private fun DouyinResultCard(work: DouyinWorkInfo) {
                     Text(work.author.orEmpty(), style = MaterialTheme.typography.bodySmall)
                 }
                 when (work.dynamicMediaStatus) {
+                    DouyinDynamicMediaStatus.Checking -> Text(
+                        "正在识别 Live Photo 视频资源",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     DouyinDynamicMediaStatus.LoginRequired -> Text(
                         "登录抖音后可检查动态图片资源",
                         style = MaterialTheme.typography.bodySmall,
@@ -306,7 +329,7 @@ private fun DouyinResultCard(work: DouyinWorkInfo) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     DouyinDynamicMediaStatus.Failed -> Text(
-                        "动态图片检查失败，可重新登录后再次解析",
+                        "动态视频资源未获取到，将仅保存图片",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )

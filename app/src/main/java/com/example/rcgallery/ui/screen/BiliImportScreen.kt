@@ -133,6 +133,13 @@ fun BiliImportScreen(
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("视频链接、BV 号或 AV 号") },
+                trailingIcon = {
+                    if (input.isNotBlank()) {
+                        TextButton(onClick = { input = "" }) {
+                            Text("清空")
+                        }
+                    }
+                },
                 minLines = 2,
                 maxLines = 4,
                 enabled = state !is BiliImportState.Parsing && state !is BiliImportState.Downloading,
