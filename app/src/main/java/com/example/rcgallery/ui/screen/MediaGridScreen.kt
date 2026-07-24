@@ -48,7 +48,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
-import com.example.rcgallery.ui.component.DevOverlay
+import com.example.rcgallery.ui.component.DevLogDialog
 import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.component.SettingsOverlay
@@ -322,9 +322,7 @@ fun MediaGridScreen(
     // ── 日志面板 ──
     var showLogDialog by remember { mutableStateOf(false) }
     if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
+        DevLogDialog(onDismiss = { showLogDialog = false })
     }
 
     Surface(modifier = Modifier.fillMaxSize()) {

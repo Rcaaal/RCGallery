@@ -36,6 +36,7 @@ enum class MediaImportPlatform {
     DOUYIN,
     BILIBILI,
     YOUTUBE,
+    X,
 }
 
 data class MediaImportRoute(
@@ -59,6 +60,7 @@ fun detectMediaImportRoute(input: String): MediaImportRoute? {
             "douyin.com" in host -> MediaImportPlatform.DOUYIN
             "bilibili.com" in host || "b23.tv" in host -> MediaImportPlatform.BILIBILI
             "youtube.com" in host || "youtu.be" in host -> MediaImportPlatform.YOUTUBE
+            "x.com" in host || "twitter.com" in host -> MediaImportPlatform.X
             else -> null
         }
         if (platform != null) return MediaImportRoute(platform, normalizedInput)
@@ -76,6 +78,7 @@ fun detectMediaImportRoute(input: String): MediaImportRoute? {
 fun MediaImportScreen(
     onDismiss: () -> Unit,
     onRouteDetected: (MediaImportRoute) -> Unit,
+    onShowHistory: () -> Unit,
 ) {
     val context = LocalContext.current
     var input by remember { mutableStateOf("") }
@@ -97,6 +100,7 @@ fun MediaImportScreen(
             TopAppBar(
                 title = { Text("媒体导入") },
                 navigationIcon = { TextButton(onClick = onDismiss) { Text("返回") } },
+                actions = { TextButton(onClick = onShowHistory) { Text("历史") } },
                 windowInsets = WindowInsets(0, 0, 0, 0),
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface,

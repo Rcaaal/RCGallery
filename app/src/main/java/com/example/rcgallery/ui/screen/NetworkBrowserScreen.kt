@@ -73,6 +73,7 @@ fun NetworkBrowserScreen(
 
     var showConnectDialog by remember { mutableStateOf(false) }
     var showMediaImport by remember { mutableStateOf(false) }
+    var showMediaImportHistory by remember { mutableStateOf(false) }
     var pendingMediaImportRoute by remember { mutableStateOf<MediaImportRoute?>(null) }
     var showDouyinImport by remember { mutableStateOf(false) }
     var douyinAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
@@ -83,6 +84,9 @@ fun NetworkBrowserScreen(
     var showYouTubeImport by remember { mutableStateOf(false) }
     var youtubeAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
     var youtubeAlbumRequest by remember { mutableIntStateOf(0) }
+    var showXImport by remember { mutableStateOf(false) }
+    var xAlbum by remember { mutableStateOf<com.example.rcgallery.model.Album?>(null) }
+    var xAlbumRequest by remember { mutableIntStateOf(0) }
     // 预览状态：(当前索引, 全部媒体文件列表)
     var previewState by remember { mutableStateOf<Pair<Int, List<SmbFileInfo>>?>(null) }
     var lastPreviewFolderPath by remember { mutableStateOf<String?>(null) }
@@ -175,9 +179,58 @@ fun NetworkBrowserScreen(
         Toast.makeText(context, "专用相册暂无内容", Toast.LENGTH_SHORT).show()
     }
 
+    LaunchedEffect(xAlbumRequest) {
+        if (xAlbumRequest == 0) return@LaunchedEffect
+        val target = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+            "RCGallery/X"
+        ).absolutePath
+        viewModel.loadAlbums()
+        repeat(20) {
+            val album = viewModel.albums.value.firstOrNull {
+                File(it.directoryPath).absolutePath.equals(target, ignoreCase = true)
+            }
+            if (album != null) {
+                xAlbum = album
+                return@LaunchedEffect
+            }
+            delay(100)
+        }
+        Toast.makeText(context, "X album is empty", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showMediaImportHistory) {
+        MediaImportHistoryScreen(
+            onDismiss = {
+                showMediaImportHistory = false
+                showMediaImport = true
+            },
+            onReimport = { input ->
+                val route = detectMediaImportRoute(input)
+                if (route == null) {
+                    Toast.makeText(context, "未识别到支持的媒体链接", Toast.LENGTH_SHORT).show()
+                } else {
+                    pendingMediaImportRoute = route
+                    showMediaImportHistory = false
+                    when (route.platform) {
+                        MediaImportPlatform.DOUYIN -> showDouyinImport = true
+                        MediaImportPlatform.BILIBILI -> showBiliImport = true
+                        MediaImportPlatform.YOUTUBE -> showYouTubeImport = true
+                        MediaImportPlatform.X -> showXImport = true
+                    }
+                }
+            },
+        )
+        return
+    }
+
     if (showMediaImport) {
         MediaImportScreen(
             onDismiss = { showMediaImport = false },
+            onShowHistory = {
+                showMediaImport = false
+                showMediaImportHistory = true
+            },
             onRouteDetected = { route ->
                 pendingMediaImportRoute = route
                 showMediaImport = false
@@ -185,6 +238,7 @@ fun NetworkBrowserScreen(
                     MediaImportPlatform.DOUYIN -> showDouyinImport = true
                     MediaImportPlatform.BILIBILI -> showBiliImport = true
                     MediaImportPlatform.YOUTUBE -> showYouTubeImport = true
+                    MediaImportPlatform.X -> showXImport = true
                 }
             },
         )
@@ -220,6 +274,41 @@ fun NetworkBrowserScreen(
                     albumDirectoryPath = album.directoryPath,
                     onBackClick = { youtubeAlbum = null },
                     onGoHome = { youtubeAlbum = null },
+                    handleSystemBack = true,
+                )
+            }
+        }
+        return
+    }
+
+    if (showXImport) {
+        Box(Modifier.fillMaxSize()) {
+            XImportScreen(
+                onDismiss = {
+                    showXImport = false
+                    pendingMediaImportRoute = null
+                },
+                onMediaSaved = {
+                    viewModel.refreshLibraryAfterMediaImport(
+                        File(
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                            "RCGallery/X",
+                        ).absolutePath,
+                    )
+                    xAlbum?.bucketId?.let { viewModel.loadMedia(it) }
+                },
+                onOpenAlbum = { xAlbumRequest++ },
+                initialInput = pendingMediaImportRoute
+                    ?.takeIf { it.platform == MediaImportPlatform.X }
+                    ?.input,
+            )
+            xAlbum?.let { album ->
+                MediaGridScreen(
+                    albumId = album.bucketId,
+                    albumName = album.bucketName,
+                    albumDirectoryPath = album.directoryPath,
+                    onBackClick = { xAlbum = null },
+                    onGoHome = { xAlbum = null },
                     handleSystemBack = true,
                 )
             }

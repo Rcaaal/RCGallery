@@ -60,7 +60,7 @@ import com.example.rcgallery.model.SystemTags
 import com.example.rcgallery.data.db.TagEntity
 import com.example.rcgallery.data.db.ParentAlbumEntity
 import com.example.rcgallery.data.db.ParentMigrationStateEntity
-import com.example.rcgallery.ui.component.DevOverlay
+import com.example.rcgallery.ui.component.DevLogDialog
 import com.example.rcgallery.ui.component.FastScrollerView
 import com.example.rcgallery.ui.component.InertiaSettingsPanel
 import com.example.rcgallery.ui.screen.TrashScreen
@@ -426,9 +426,7 @@ fun AlbumGridScreen(
     // ── 日志面板 ──
     var showLogDialog by remember { mutableStateOf(false) }
     if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
+        DevLogDialog(onDismiss = { showLogDialog = false })
     }
     // ── 设置面板 ──
     var showInertiaSettings by remember { mutableStateOf(false) }

@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class, ParentHidRuleEntity::class, SystemAlbumHideSourceEntity::class, ParentMigrationStateEntity::class, WatchLaterEntity::class],
-    version = 7,
+    entities = [TagEntity::class, TagTargetEntity::class, ViewHistoryEntity::class, ParentAlbumEntity::class, ParentChildEntity::class, ParentSharedTagEntity::class, SystemAlbumRuleEntity::class, ParentHidRuleEntity::class, SystemAlbumHideSourceEntity::class, ParentMigrationStateEntity::class, WatchLaterEntity::class, MediaImportHistoryEntity::class],
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -21,6 +21,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun systemAlbumRuleDao(): SystemAlbumRuleDao
     abstract fun hierarchySystemDao(): HierarchySystemDao
     abstract fun watchLaterDao(): WatchLaterDao
+    abstract fun mediaImportHistoryDao(): MediaImportHistoryDao
 
     companion object {
         @Volatile
@@ -151,6 +152,27 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `media_import_history` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `platform` TEXT NOT NULL,
+                        `sourceUrl` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `author` TEXT,
+                        `coverUrl` TEXT,
+                        `downloadedAt` INTEGER NOT NULL,
+                        `successCount` INTEGER NOT NULL,
+                        `failedCount` INTEGER NOT NULL,
+                        `outputsJson` TEXT NOT NULL
+                    )
+                """)
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_media_import_history_downloadedAt` ON `media_import_history` (`downloadedAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_media_import_history_platform` ON `media_import_history` (`platform`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -158,7 +180,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "rcgallery_tags.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .build()
                     .also { INSTANCE = it }
             }

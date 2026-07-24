@@ -16,6 +16,9 @@ import com.example.rcgallery.data.youtube.YouTubeImportState
 import com.example.rcgallery.data.youtube.YouTubeParseException
 import com.example.rcgallery.data.youtube.YouTubeParser
 import com.example.rcgallery.data.youtube.YouTubeWorkInfo
+import com.example.rcgallery.data.ImportedMediaOutput
+import com.example.rcgallery.data.MediaImportHistoryPlatform
+import com.example.rcgallery.data.MediaImportHistoryRepository
 import com.example.rcgallery.util.AppLogger
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -35,6 +38,7 @@ import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Locale
 import kotlin.math.roundToLong
 
@@ -54,6 +58,14 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
     private val downloadMutex = Mutex()
     private val downloadJobs = ConcurrentHashMap.newKeySet<Job>()
     private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
+    private val downloadInProgress = AtomicBoolean(false)
+    private val historyRepository = MediaImportHistoryRepository(application)
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            historyRepository.migrateLegacyYoutubeHistoryIfNeeded()
+        }
+    }
 
     // ── cookie ───────────────────────────────────────────────────────────
 
@@ -127,15 +139,30 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
         codecMode: YouTubeCodecMode,
         onSaved: () -> Unit,
     ) {
+        if (!downloadInProgress.compareAndSet(false, true)) {
+            AppLogger.d("YouTubeImport", "duplicate download ignored id=${work.id}")
+            return
+        }
         val job = viewModelScope.launch {
             downloadMutex.withLock {
                 _state.value = YouTubeImportState.Downloading(work, 0f, "")
                 try {
-                    val displayName = withContext(Dispatchers.IO) {
+                    val output = withContext(Dispatchers.IO) {
                         downloadVideo(work, height, codecMode)
                     }
-                    addHistory(work, displayName)
-                    _state.value = YouTubeImportState.Success(displayName)
+                    withContext(Dispatchers.IO) {
+                        historyRepository.record(
+                            platform = MediaImportHistoryPlatform.YOUTUBE,
+                            sourceUrl = work.webpageUrl,
+                            title = work.title,
+                            author = work.channelName,
+                            coverUrl = work.thumbnailUrl,
+                            successCount = 1,
+                            failedCount = 0,
+                            outputs = listOf(output),
+                        )
+                    }
+                    _state.value = YouTubeImportState.Success(output.displayName)
                     onSaved()
                 } catch (_: CancellationException) {
                     throw CancellationException()
@@ -148,7 +175,10 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
             }
         }
         downloadJobs += job
-        job.invokeOnCompletion { downloadJobs -= job }
+        job.invokeOnCompletion {
+            downloadJobs -= job
+            downloadInProgress.set(false)
+        }
     }
 
     // ── cancel / reset ──────────────────────────────────────────────────
@@ -181,7 +211,7 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
         work: YouTubeWorkInfo,
         height: Int,
         codecMode: YouTubeCodecMode,
-    ): String {
+    ): ImportedMediaOutput {
         val tempDir = File(
             getApplication<Application>().cacheDir,
             "youtube_import/${work.id}_${System.nanoTime()}"
@@ -320,8 +350,9 @@ class YouTubeImportViewModel(application: Application) : AndroidViewModel(applic
                 ) {
                     throw IllegalStateException("MediaStore 文件未正确发布")
                 }
+                val publishedUri = pendingUri
                 pendingUri = null
-                displayName
+                ImportedMediaOutput(displayName, publishedUri.toString())
             } finally {
                 pendingUri?.let { resolver.delete(it, null, null) }
             }

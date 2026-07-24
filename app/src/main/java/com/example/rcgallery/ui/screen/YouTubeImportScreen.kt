@@ -68,12 +68,10 @@ fun YouTubeImportScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val hasCookie by viewModel.hasCookie.collectAsStateWithLifecycle()
-    val history by viewModel.history.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var input by remember(initialInput) { mutableStateOf(initialInput.orEmpty()) }
     var selectedHeight by remember { mutableIntStateOf(0) }
     var codecMode by remember { mutableStateOf(YouTubeCodecMode.AUTO) }
-    var showHistory by remember { mutableStateOf(false) }
 
     androidx.compose.runtime.LaunchedEffect(initialInput) {
         initialInput?.trim()?.takeIf { it.isNotEmpty() }?.let(viewModel::parse)
@@ -113,7 +111,6 @@ fun YouTubeImportScreen(
                 title = { Text("YouTube 导入") },
                 navigationIcon = { TextButton(onClick = ::close) { Text("← 返回") } },
                 actions = {
-                    TextButton(onClick = { showHistory = !showHistory }) { Text("历史") }
                     TextButton(onClick = onOpenAlbum) { Text("相册") }
                 },
                 windowInsets = WindowInsets(0, 0, 0, 0),
@@ -187,10 +184,6 @@ fun YouTubeImportScreen(
                         }
                     }
                 }
-            }
-
-            if (showHistory && history.isNotEmpty()) {
-                YouTubeHistorySection(history)
             }
 
             // ── state body ──

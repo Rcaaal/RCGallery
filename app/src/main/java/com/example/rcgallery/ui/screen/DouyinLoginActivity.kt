@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -15,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.example.rcgallery.data.douyin.DouyinCookieStore
+import com.example.rcgallery.util.AppLogger
 
 class DouyinLoginActivity : Activity() {
     private lateinit var webView: WebView
@@ -26,7 +28,14 @@ class DouyinLoginActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
+            setOnApplyWindowInsetsListener { view, insets ->
+                val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
+                view.setPadding(0, systemBars.top, 0, systemBars.bottom)
+                insets
+            }
         }
+        window.statusBarColor = Color.rgb(18, 18, 18)
+        window.navigationBarColor = Color.rgb(18, 18, 18)
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -52,6 +61,7 @@ class DouyinLoginActivity : Activity() {
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = true
             settings.userAgentString = DouyinCookieStore.REQUEST_USER_AGENT
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -63,9 +73,35 @@ class DouyinLoginActivity : Activity() {
         setContentView(root)
     }
 
+    override fun onPause() {
+        pauseWebMedia()
+        webView.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
+    }
+
+    override fun onDestroy() {
+        webView.stopLoading()
+        webView.destroy()
+        super.onDestroy()
+    }
+
+    private fun pauseWebMedia() {
+        webView.evaluateJavascript(
+            "document.querySelectorAll('video,audio').forEach(function(media){media.pause();});",
+            null
+        )
+    }
+
     private fun completeLogin() {
         CookieManager.getInstance().flush()
-        if (DouyinCookieStore().isLoggedIn()) {
+        val isLoggedIn = DouyinCookieStore().isLoggedIn()
+        AppLogger.d(LOG_TAG, "complete requested loggedIn=$isLoggedIn")
+        if (isLoggedIn) {
             setResult(RESULT_OK)
             finish()
         } else {
@@ -75,5 +111,9 @@ class DouyinLoginActivity : Activity() {
 
     override fun onBackPressed() {
         if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+    }
+
+    private companion object {
+        const val LOG_TAG = "DouyinLogin"
     }
 }

@@ -20,6 +20,9 @@ import com.example.rcgallery.data.bilibili.BiliParser
 import com.example.rcgallery.data.bilibili.BiliQrPollResult
 import com.example.rcgallery.data.bilibili.BiliVideoTrack
 import com.example.rcgallery.data.bilibili.BiliWorkInfo
+import com.example.rcgallery.data.ImportedMediaOutput
+import com.example.rcgallery.data.MediaImportHistoryPlatform
+import com.example.rcgallery.data.MediaImportHistoryRepository
 import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +39,7 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 class BiliImportViewModel(application: Application) : AndroidViewModel(application) {
@@ -49,6 +53,8 @@ class BiliImportViewModel(application: Application) : AndroidViewModel(applicati
     private var operationJob: Job? = null
     private var authJob: Job? = null
     private var lastInput: String = ""
+    private val downloadInProgress = AtomicBoolean(false)
+    private val historyRepository = MediaImportHistoryRepository(application)
 
     init {
         restoreAccount()
@@ -156,19 +162,26 @@ class BiliImportViewModel(application: Application) : AndroidViewModel(applicati
             _state.value = BiliImportState.Error("请至少选择一个分P")
             return
         }
+        if (!downloadInProgress.compareAndSet(false, true)) {
+            AppLogger.d("BiliImport", "duplicate download ignored bvid=${work.bvid}")
+            return
+        }
         cancel()
         operationJob = viewModelScope.launch {
+            try {
             var saved = 0
             var failed = 0
             var firstName: String? = null
             var firstError: Throwable? = null
+            val savedOutputs = mutableListOf<ImportedMediaOutput>()
             try {
                 pages.forEachIndexed { index, page ->
                     try {
-                        val displayName = downloadPage(
+                        val output = downloadPage(
                             work, page, qualityId, codecMode, index, pages.size
                         )
-                        if (firstName == null) firstName = displayName
+                        if (firstName == null) firstName = output.displayName
+                        savedOutputs += output
                         saved++
                     } catch (error: CancellationException) {
                         throw error
@@ -191,9 +204,26 @@ class BiliImportViewModel(application: Application) : AndroidViewModel(applicati
                 } else {
                     BiliImportState.Success(saved, failed, firstName)
                 }
-                if (saved > 0) onSaved()
+                if (saved > 0) {
+                    withContext(Dispatchers.IO) {
+                        historyRepository.record(
+                            platform = MediaImportHistoryPlatform.BILIBILI,
+                            sourceUrl = lastInput,
+                            title = work.title,
+                            author = work.ownerName,
+                            coverUrl = work.coverUrl,
+                            successCount = saved,
+                            failedCount = failed,
+                            outputs = savedOutputs,
+                        )
+                    }
+                    onSaved()
+                }
             } catch (_: CancellationException) {
                 return@launch
+            }
+            } finally {
+                downloadInProgress.set(false)
             }
         }
     }
@@ -221,7 +251,7 @@ class BiliImportViewModel(application: Application) : AndroidViewModel(applicati
         codecMode: BiliCodecMode,
         pageIndex: Int,
         pageCount: Int,
-    ): String = withContext(Dispatchers.IO) {
+    ): ImportedMediaOutput = withContext(Dispatchers.IO) {
         val tempDir = File(getApplication<Application>().cacheDir, "bili_import/${work.bvid}_${page.cid}")
         tempDir.mkdirs()
         val videoPart = File(tempDir, "video.m4s")
@@ -275,7 +305,7 @@ class BiliImportViewModel(application: Application) : AndroidViewModel(applicati
                 null,
             )
             pendingUri = null
-            displayName
+            ImportedMediaOutput(displayName, uri.toString())
         } finally {
             pendingUri?.let { getApplication<Application>().contentResolver.delete(it, null, null) }
             videoPart.delete()

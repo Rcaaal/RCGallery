@@ -23,11 +23,11 @@ class DouyinParser {
     suspend fun parse(sharedText: String, cookies: String? = null): DouyinWorkInfo = withContext(Dispatchers.IO) {
         val inputUrl = extractUrl(sharedText)
         val userAgent = MOBILE_USER_AGENT
-        val finalUrl = resolveRedirects(inputUrl, userAgent)
+        val finalUrl = resolveRedirects(inputUrl, userAgent, cookies)
         val workId = extractWorkId(finalUrl)
         val pathType = extractPathType(finalUrl)
         val fetchPath = if (pathType == "slides") "note" else pathType
-        val html = fetchText("https://www.iesdouyin.com/share/$fetchPath/$workId", userAgent)
+        val html = fetchText("https://www.iesdouyin.com/share/$fetchPath/$workId", userAgent, cookies)
         val item = findItem(JSONObject(extractRouterData(html)))
         val author = item.optJSONObject("author")?.optString("nickname")?.takeIf { it.isNotBlank() }
         val title = sanitizeTitle(item.optString("desc").ifBlank { "douyin_$workId" })
@@ -79,22 +79,30 @@ class DouyinParser {
                     ?.let { "作品数据被接口过滤：$it" } ?: "详情接口没有返回作品数据"
                 continue
             }
-            val images = detailImageCandidates(detail).firstOrNull { it.length() > 0 }
-            if (images == null) {
-                return DynamicEnhancement(emptyMap(), emptyMap())
-            }
-            val bySourceKey = mutableMapOf<String, List<String>>()
-            val byIndex = mutableMapOf<Int, List<String>>()
-            for (index in 0 until images.length()) {
-                val image = images.optJSONObject(index) ?: continue
-                val urls = animatedVideoUrls(image)
-                if (urls.isEmpty()) continue
-                byIndex[index] = urls
-                image.optString("uri").takeIf { it.isNotBlank() }?.let { bySourceKey[it] = urls }
-            }
-            return DynamicEnhancement(bySourceKey, byIndex)
+            return dynamicEnhancementFromDetail(detail)
         }
         throw DouyinParseException(lastFailure)
+    }
+
+    internal fun enhanceFromDetailJson(rawJson: String): DynamicEnhancement {
+        val detail = JSONObject(rawJson).optJSONObject("aweme_detail")
+            ?: throw DouyinParseException("详情接口没有返回作品数据")
+        return dynamicEnhancementFromDetail(detail)
+    }
+
+    private fun dynamicEnhancementFromDetail(detail: JSONObject): DynamicEnhancement {
+        val images = detailImageCandidates(detail).firstOrNull { it.length() > 0 }
+            ?: return DynamicEnhancement(emptyMap(), emptyMap())
+        val bySourceKey = mutableMapOf<String, List<String>>()
+        val byIndex = mutableMapOf<Int, List<String>>()
+        for (index in 0 until images.length()) {
+            val image = images.optJSONObject(index) ?: continue
+            val urls = animatedVideoUrls(image)
+            if (urls.isEmpty()) continue
+            byIndex[index] = urls
+            image.optString("uri").takeIf { it.isNotBlank() }?.let { bySourceKey[it] = urls }
+        }
+        return DynamicEnhancement(bySourceKey, byIndex)
     }
 
     /**
@@ -324,11 +332,13 @@ class DouyinParser {
         return value
     }
 
-    private fun resolveRedirects(input: String, userAgent: String): String {
+    private fun resolveRedirects(input: String, userAgent: String, cookies: String?): String {
         var current = input
         repeat(MAX_REDIRECTS) {
             validateDouyinHost(current)
-            val connection = openConnection(current, userAgent, followRedirects = false)
+            val connection = openConnection(current, userAgent, followRedirects = false).apply {
+                cookies?.let { setRequestProperty("Cookie", it) }
+            }
             try {
                 val code = connection.responseCode
                 if (code !in 300..399) {
@@ -364,8 +374,10 @@ class DouyinParser {
         return PATH_TYPE_PATTERN.find(path)?.groupValues?.get(1)?.lowercase() ?: "video"
     }
 
-    private suspend fun fetchText(url: String, userAgent: String): String {
-        val connection = openConnection(url, userAgent, followRedirects = true)
+    private suspend fun fetchText(url: String, userAgent: String, cookies: String?): String {
+        val connection = openConnection(url, userAgent, followRedirects = true).apply {
+            cookies?.let { setRequestProperty("Cookie", it) }
+        }
         return try {
             val code = connection.responseCode
             if (code !in 200..299) throw DouyinParseException("作品页面访问失败（HTTP $code）")
@@ -461,7 +473,9 @@ class DouyinParser {
         private val WORK_ID_PATTERN = Regex("/(?:video|note|slides)/(\\d+)")
         private val PATH_TYPE_PATTERN = Regex("/(?:share/)?(video|note|slides)/")
         private val AUDIO_EXTENSIONS = listOf(".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac")
-        private const val MOBILE_USER_AGENT = DouyinCookieStore.REQUEST_USER_AGENT
+        private const val MOBILE_USER_AGENT =
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
         private val DETAIL_AID_CANDIDATES = listOf("6383", "1128")
     }
 }

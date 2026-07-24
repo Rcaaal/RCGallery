@@ -12,6 +12,10 @@ import com.example.rcgallery.data.douyin.DouyinMediaResource
 import com.example.rcgallery.data.douyin.DouyinParseException
 import com.example.rcgallery.data.douyin.DouyinParser
 import com.example.rcgallery.data.douyin.DouyinWorkInfo
+import com.example.rcgallery.data.ImportedMediaOutput
+import com.example.rcgallery.data.MediaImportHistoryPlatform
+import com.example.rcgallery.data.MediaImportHistoryRepository
+import com.example.rcgallery.util.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,6 +29,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import com.example.rcgallery.data.douyin.DouyinCookieStore
 
@@ -36,18 +41,26 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     private var sessionCookies: String? = cookieStore.getAuthenticatedCookies()
     private val _isLoggedIn = MutableStateFlow(sessionCookies != null)
     val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
+    // Parsing/dynamic enhancement and saving must not cancel one another.
     private var operationJob: Job? = null
+    private var downloadJob: Job? = null
+    private val downloadInProgress = AtomicBoolean(false)
+    private val historyRepository = MediaImportHistoryRepository(application)
+    private var lastInput: String = ""
 
     fun parse(text: String) {
         if (text.isBlank()) {
             _state.value = DouyinImportState.Error("请粘贴抖音分享链接")
             return
         }
+        lastInput = text
         cancel()
         operationJob = viewModelScope.launch {
             _state.value = DouyinImportState.Parsing
             try {
-                val work = withContext(Dispatchers.IO) { parser.parse(text) }
+                AppLogger.d("DouyinImport", "parse start authenticated=${sessionCookies != null}")
+                val work = withContext(Dispatchers.IO) { parser.parse(text, sessionCookies) }
+                AppLogger.d("DouyinImport", "parse success work=${work.workId} media=${work.media.size}")
                 _state.value = DouyinImportState.Ready(work)
 
                 // If the work has images, try API enhancement for animated image data
@@ -57,8 +70,10 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
             } catch (_: CancellationException) {
                 return@launch
             } catch (error: DouyinParseException) {
+                AppLogger.e("DouyinImport", "parse failed: ${error.message}", error)
                 _state.value = DouyinImportState.Error(error.message ?: "解析失败")
             } catch (error: Exception) {
+                AppLogger.e("DouyinImport", "parse unexpected failure", error)
                 _state.value = DouyinImportState.Error(
                     error.message?.takeIf { it.isNotBlank() } ?: "网络请求失败"
                 )
@@ -69,6 +84,7 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     fun refreshLoginState() {
         sessionCookies = cookieStore.getAuthenticatedCookies()
         _isLoggedIn.value = sessionCookies != null
+        AppLogger.d("DouyinImport", "login refreshed loggedIn=${_isLoggedIn.value}")
         val ready = _state.value as? DouyinImportState.Ready ?: return
         if (_isLoggedIn.value && ready.work.media.any { it is DouyinMediaResource.Image }) {
             operationJob?.cancel()
@@ -90,8 +106,15 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         }
 
         try {
-            val enhancement = withContext(Dispatchers.IO) {
-                parser.enhanceWithApi(work.workId, work.userAgent, cookies)
+            val enhancement = try {
+                withContext(Dispatchers.IO) {
+                    parser.enhanceWithApi(work.workId, DouyinCookieStore.REQUEST_USER_AGENT, cookies)
+                }
+            } catch (nativeError: Exception) {
+                AppLogger.d("DouyinImport", "native detail failed; trying WebView bridge work=${work.workId}")
+                val webJson = cookieStore.fetchDetailViaWebView(work.workId)
+                    ?: throw nativeError
+                parser.enhanceFromDetailJson(webJson)
             }
 
             val currentState = _state.value
@@ -118,7 +141,10 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                     },
                 )
             )
-        } catch (_: Exception) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            AppLogger.e("DouyinImport", "dynamic enhancement failed work=${work.workId}", error)
             updateDynamicStatus(work, DouyinDynamicMediaStatus.Failed)
         }
     }
@@ -131,20 +157,41 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun download(work: DouyinWorkInfo, onSaved: () -> Unit) {
-        cancel()
-        operationJob = viewModelScope.launch {
-            val resources = resourcesFor(work)
+        if (!downloadInProgress.compareAndSet(false, true)) {
+            AppLogger.d("DouyinImport", "duplicate download ignored work=${work.workId}")
+            return
+        }
+        downloadJob = viewModelScope.launch {
+            try {
+            // The Ready state is published before the WebView detail bridge completes.
+            // Wait for that bridge so animated-image video URLs are not lost on save.
+            val pendingEnhancement = operationJob
+            if (pendingEnhancement?.isActive == true) {
+                AppLogger.d("DouyinImport", "download waiting dynamic enhancement work=${work.workId}")
+                pendingEnhancement.join()
+            }
+            val resolvedWork = (_state.value as? DouyinImportState.Ready)
+                ?.work
+                ?.takeIf { it.workId == work.workId }
+                ?: work
+            val resources = resourcesFor(resolvedWork)
+            AppLogger.d(
+                "DouyinImport",
+                "download start work=${resolvedWork.workId} media=${resolvedWork.media.size} resources=${resources.size}"
+            )
             var completed = 0
             var failed = 0
             var firstName: String? = null
+            val savedOutputs = mutableListOf<ImportedMediaOutput>()
             try {
                 resources.forEachIndexed { index, resource ->
-                    _state.value = downloadingState(work, index, resources.size, completed, failed)
+                    _state.value = downloadingState(resolvedWork, index, resources.size, completed, failed)
                     try {
-                        val name = downloadResource(
-                            work, resource, index, resources.size, completed, failed
+                        val output = downloadResource(
+                            resolvedWork, resource, index, resources.size, completed, failed
                         )
-                        if (firstName == null) firstName = name
+                        if (firstName == null) firstName = output.displayName
+                        savedOutputs += output
                         completed++
                     } catch (error: CancellationException) {
                         throw error
@@ -155,11 +202,26 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                 if (completed == 0) {
                     _state.value = DouyinImportState.Error("下载失败，未保存任何文件")
                 } else {
+                    withContext(Dispatchers.IO) {
+                        historyRepository.record(
+                            platform = MediaImportHistoryPlatform.DOUYIN,
+                            sourceUrl = lastInput,
+                            title = resolvedWork.title,
+                            author = resolvedWork.author,
+                            coverUrl = resolvedWork.coverUrl,
+                            successCount = completed,
+                            failedCount = failed,
+                            outputs = savedOutputs,
+                        )
+                    }
                     _state.value = DouyinImportState.Success(completed, failed, firstName)
                     onSaved()
                 }
             } catch (_: CancellationException) {
                 return@launch
+            }
+            } finally {
+                downloadInProgress.set(false)
             }
         }
     }
@@ -167,7 +229,9 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
     fun cancel() {
         val current = _state.value
         operationJob?.cancel()
+        downloadJob?.cancel()
         operationJob = null
+        downloadJob = null
         _state.value = when (current) {
             is DouyinImportState.Downloading -> DouyinImportState.Ready(current.work)
             DouyinImportState.Parsing -> DouyinImportState.Idle
@@ -186,10 +250,15 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         val isVideo: Boolean,
     )
 
-    private fun resourcesFor(work: DouyinWorkInfo): List<DownloadResource> =
-        work.media.flatMapIndexed { position, media ->
-            val baseName = if (work.media.size == 1) work.title
-                else "${work.title}_${(position + 1).toString().padStart(2, '0')}"
+    private fun resourcesFor(work: DouyinWorkInfo): List<DownloadResource> {
+        val titlePrefix = work.author
+            ?.let(::sanitizeFilePart)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "${it}_${work.title}" }
+            ?: work.title
+        return work.media.flatMapIndexed { position, media ->
+            val baseName = if (work.media.size == 1) titlePrefix
+                else "${titlePrefix}_${(position + 1).toString().padStart(2, '0')}"
             when (media) {
                 is com.example.rcgallery.data.douyin.DouyinMediaResource.Image -> listOf(
                     DownloadResource(urls = media.urls, baseName = baseName, isVideo = false)
@@ -201,13 +270,20 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                 is com.example.rcgallery.data.douyin.DouyinMediaResource.Video -> listOf(
                     DownloadResource(
                         urls = media.urls,
-                        baseName = if (work.media.size == 1) work.title
-                        else "${work.title}_video_${(position + 1).toString().padStart(2, '0')}",
+                        baseName = if (work.media.size == 1) titlePrefix
+                        else "${titlePrefix}_video_${(position + 1).toString().padStart(2, '0')}",
                         isVideo = true,
                     )
                 )
             }
         }
+    }
+
+    private fun sanitizeFilePart(value: String): String = value
+        .replace(Regex("""[\\/:*?\"<>|#\n\r]"""), "_")
+        .replace(Regex("""\.{2,}"""), ".")
+        .trim(' ', '.')
+        .take(48)
 
     private fun downloadingState(
         work: DouyinWorkInfo,
@@ -230,7 +306,7 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         itemCount: Int,
         completedCount: Int,
         failedCount: Int,
-    ): String = withContext(Dispatchers.IO) {
+    ): ImportedMediaOutput = withContext(Dispatchers.IO) {
         var lastError: Throwable? = null
         resource.urls.forEach { url ->
             coroutineContext.ensureActive()
@@ -255,12 +331,16 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
         itemCount: Int,
         completedCount: Int,
         failedCount: Int,
-    ): String {
+    ): ImportedMediaOutput {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 15_000
             readTimeout = 60_000
-            setRequestProperty("User-Agent", work.userAgent)
+            // Signed media URLs are bound to the authenticated WebView session fingerprint.
+            setRequestProperty(
+                "User-Agent",
+                if (sessionCookies != null) DouyinCookieStore.REQUEST_USER_AGENT else work.userAgent
+            )
             setRequestProperty("Referer", "https://www.douyin.com/")
             sessionCookies?.let { setRequestProperty("Cookie", it) }
         }
@@ -336,7 +416,7 @@ class DouyinImportViewModel(application: Application) : AndroidViewModel(applica
                 ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null
             )
             pendingUri = null
-            return displayName
+            return ImportedMediaOutput(displayName, uri.toString())
         } finally {
             pendingUri?.let { getApplication<Application>().contentResolver.delete(it, null, null) }
             connection.disconnect()

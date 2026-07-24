@@ -44,9 +44,7 @@ fun SettingsOverlay(
         onOpenLog = { showInertiaSettings = false; showLogDialog = true }
     )
     if (showLogDialog) {
-        Box(Modifier.fillMaxSize().clickable { showLogDialog = false }) {
-            DevOverlay(initialShow = true)
-        }
+        DevLogDialog(onDismiss = { showLogDialog = false })
     }
 
     if (visible) {
